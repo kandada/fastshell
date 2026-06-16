@@ -8,7 +8,7 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 
 ## Features
 
-- **75+ built-in commands** — `ls`, `grep`, `sed`, `awk`, `jq`, `curl`, `git`, `tar`, `sha256sum`...
+- **160+ built-in commands** — `ls`, `grep`, `sed`, `awk`, `jq`, `curl`, `git`, `tar`, `sha256sum`...
 - **Pipeline support** — `cat file | grep pattern | wc -l` works as expected
 - **Glob expansion** — `ls *.rs`, `cat src/**/*.rs`
 - **Regex** — Full regex in `grep` and `sed s///`
@@ -182,12 +182,19 @@ cargo test  # 115 tests
 fastshell/
 ├── src/
 │   ├── vfs/       # Layer 1 — Virtual sandbox filesystem
-│   ├── shell/     # Layer 1 — 75+ built-in shell commands (pure Rust)
+│   ├── shell/     # Layer 1 — 160+ built-in shell commands (pure Rust)
 │   ├── python/    # Layer 1 — Python engine (subprocess / CPython)
 │   ├── bridge/    # Layer 2 — Script execution, I/O, pipeline, glob
 │   └── sdk/       # Layer 3 — Public API + platform FFI (JNI / C)
 └── dist/          # Pre-built libraries per platform
 ```
+
+## Design Principles
+
+- **Lightweight** — Pure Rust implementation, no BusyBox dependency, no GPL licensing issues
+- **Compatible** — Commands behave identically to Linux; AI agents need no retraining
+- **Secure** — VFS sandbox isolation, path escape prevention, command timeout control
+- **Cross-platform** — Unified API, same Rust core across Android / iOS / macOS / Linux
 
 ## License
 
