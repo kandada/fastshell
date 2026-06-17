@@ -100,22 +100,38 @@ if _fs_exec is not None:
     _sandbox_root = _os_module.environ.get('FASTSHELL_ROOT', '')
     _sandbox_cwd = _os_module.environ.get('FASTSHELL_CWD', '/')
 
+    def _resolve_sandbox_path(file):
+        if not _sandbox_root:
+            return file
+        if not _os_module.path.isabs(file):
+            file = _os_module.path.join(_sandbox_cwd, file)
+        else:
+            file = file.lstrip('/')
+        components = []
+        for p in file.split('/'):
+            if p == '..':
+                if components: components.pop()
+            elif p and p != '.':
+                components.append(p)
+        safe = '/'.join(components)
+        return _os_module.path.join(_sandbox_root, safe)
+
     _real_open = builtins.open
     def _sandboxed_open(file, mode='r', *args, **kwargs):
-        if _sandbox_root:
-            if not _os_module.path.isabs(file):
-                file = _os_module.path.normpath(_os_module.path.join(_sandbox_root, _sandbox_cwd.lstrip('/'), file))
-            else:
-                file = _os_module.path.normpath(_os_module.path.join(_sandbox_root, file.lstrip('/')))
-        return _real_open(file, mode, *args, **kwargs)
+        return _real_open(_resolve_sandbox_path(file), mode, *args, **kwargs)
     builtins.open = _sandboxed_open
+
+    _real_os_open = _os_module.open
+    def _sandboxed_os_open(file, flags, mode=0o777):
+        return _real_os_open(_resolve_sandbox_path(file), flags, mode)
+    _os_module.open = _sandboxed_os_open
 
     _real_chdir = _os_module.chdir
     def _sandboxed_chdir(path):
-        nonlocal _sandbox_cwd
+        global _sandbox_cwd
         if _sandbox_root:
             if _os_module.path.isabs(path):
-                _sandbox_cwd = path
+                _sandbox_cwd = _os_module.path.normpath(path)
             else:
                 _sandbox_cwd = _os_module.path.normpath(_os_module.path.join(_sandbox_cwd, path))
         _real_chdir(path)
@@ -123,12 +139,7 @@ if _fs_exec is not None:
 
     _real_listdir = _os_module.listdir
     def _sandboxed_listdir(path='.'):
-        if _sandbox_root:
-            if not _os_module.path.isabs(path):
-                path = _os_module.path.normpath(_os_module.path.join(_sandbox_root, _sandbox_cwd.lstrip('/'), path))
-            else:
-                path = _os_module.path.normpath(_os_module.path.join(_sandbox_root, path.lstrip('/')))
-        return _real_listdir(path)
+        return _real_listdir(_resolve_sandbox_path(path))
     _os_module.listdir = _sandboxed_listdir
 
     class _FastShellProcess:
@@ -202,7 +213,7 @@ if _fs_exec is not None:
     _os_module.system = lambda cmd: _fs_run(cmd).get("returncode", 0)
 
     del ctypes, json, asyncio, io, _sp, _orig_csp, _orig_run
-del _fs_exec, _fs_free, _fs_run, _FastShellProcess, _hooked_csp, _hooked_run, _hooked_Popen, _sandbox_root, _sandbox_cwd, _sandboxed_open, _real_open, _real_chdir, _real_listdir
+del _fs_exec, _fs_free, _fs_run, _FastShellProcess, _hooked_csp, _hooked_run, _hooked_Popen, _sandbox_root, _sandbox_cwd, _sandboxed_open, _real_open, _sandboxed_os_open, _real_os_open, _real_chdir, _sandboxed_chdir, _real_listdir, _sandboxed_listdir, _resolve_sandbox_path
 "#;
 
 pub struct CpythonEngine {

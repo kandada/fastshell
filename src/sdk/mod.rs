@@ -1,11 +1,13 @@
 pub mod ffi;
 pub mod types;
+pub mod plugin;
 
 use crate::bridge::Runtime;
 use crate::python::{self, PythonEngine};
 use crate::python::cpython;
 use crate::shell::Shell;
 use crate::vfs::Vfs;
+use crate::sdk::plugin::DevicePlugin;
 use types::*;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,22 +22,29 @@ pub struct Fastshell {
     env_vars: std::collections::HashMap<String, String>,
     permissions: Arc<Mutex<HashMap<String, bool>>>,
     cancel_flag: Arc<AtomicBool>,
+    plugin_ref: Arc<Mutex<Option<Box<dyn DevicePlugin>>>>,
 }
 
 impl Fastshell {
     pub fn new() -> Self {
+        let permissions = Arc::new(Mutex::new(HashMap::new()));
+        let plugin = Arc::new(Mutex::new(None));
         Fastshell {
             runtime: Arc::new(Mutex::new(Runtime::new(
-                Shell::new(Vfs::new(std::env::temp_dir().join("fastshell")).unwrap_or_else(|_| {
-                    panic!("Failed to create default VFS")
-                })),
+                Shell::with_plugin(
+                    Vfs::new(std::env::temp_dir().join("fastshell")).unwrap_or_else(|_| {
+                        panic!("Failed to create default VFS")
+                    }),
+                    true, false, permissions.clone(), plugin.clone(),
+                ),
                 None,
             ))),
             config: Config::default(),
             initialized: false,
             env_vars: std::collections::HashMap::new(),
-            permissions: Arc::new(Mutex::new(HashMap::new())),
+            permissions,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            plugin_ref: plugin,
         }
     }
 
@@ -47,7 +56,10 @@ impl Fastshell {
         let vfs = Vfs::new(sandbox_path.clone()).map_err(|e| format!("Failed to initialize VFS: {}", e))?;
 
         let permissions = Arc::new(Mutex::new(HashMap::new()));
-        let shell = Shell::new_with_config(vfs, config.allow_subprocess, config.network_ask_permission, permissions.clone());
+        let plugin = Arc::new(Mutex::new(
+            self.plugin_ref.lock().unwrap().take()
+        ));
+        let shell = Shell::with_plugin(vfs, config.allow_subprocess, config.network_ask_permission, permissions.clone(), plugin.clone());
 
         let python: Option<Box<dyn PythonEngine>> = if config.python_enabled {
             Some(python::detect_python_engine(&sandbox_path))
@@ -60,6 +72,7 @@ impl Fastshell {
         self.initialized = true;
         self.env_vars.clear();
         self.permissions = permissions;
+        self.plugin_ref = plugin;
 
         cpython::register_shell_execute(fastshell_shell_exec_c);
         cpython::register_shell_free(fastshell_shell_free_c);
@@ -226,6 +239,12 @@ impl Fastshell {
         }
     }
 
+    pub fn register_plugin(&self, plugin: Box<dyn DevicePlugin>) {
+        if let Ok(mut p) = self.plugin_ref.lock() {
+            *p = Some(plugin);
+        }
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -386,7 +405,7 @@ mod tests {
     fn test_get_info() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.2.0");
+        assert_eq!(info.version, "0.2.1");
         assert!(!info.platform.is_empty());
     }
 
@@ -486,7 +505,7 @@ mod tests {
     fn test_sdk_info_includes_allow_subprocess() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.2.0");
+        assert_eq!(info.version, "0.2.1");
         assert!(info.allow_subprocess);
     }
 }

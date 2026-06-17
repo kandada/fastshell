@@ -1,4 +1,5 @@
 use crate::vfs::Vfs;
+use crate::sdk::plugin::DevicePlugin;
 use std::fs;
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -7,6 +8,7 @@ use std::collections::HashMap;
 pub mod commands;
 
 pub const EXIT_NEED_PERMISSION: i32 = 100;
+pub const EXIT_NOT_SUPPORTED: i32 = 126;
 
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -43,6 +45,14 @@ impl CommandOutput {
     pub fn needs_permission(&self) -> bool {
         self.exit_code == EXIT_NEED_PERMISSION
     }
+
+    pub fn not_supported(feature: &str) -> Self {
+        CommandOutput {
+            stdout: String::new(),
+            stderr: format!("{}: not supported (plugin not registered)\n", feature),
+            exit_code: EXIT_NOT_SUPPORTED,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -52,6 +62,7 @@ pub struct Shell {
     pub allow_subprocess: bool,
     pub network_ask_permission: bool,
     pub permissions: Arc<Mutex<HashMap<String, bool>>>,
+    pub plugin: Arc<Mutex<Option<Box<dyn DevicePlugin>>>>,
 }
 
 impl Shell {
@@ -62,6 +73,7 @@ impl Shell {
             allow_subprocess: true,
             network_ask_permission: false,
             permissions: Arc::new(Mutex::new(HashMap::new())),
+            plugin: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -77,6 +89,39 @@ impl Shell {
             allow_subprocess,
             network_ask_permission,
             permissions,
+            plugin: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn with_plugin(
+        vfs: Vfs,
+        allow_subprocess: bool,
+        network_ask_permission: bool,
+        permissions: Arc<Mutex<HashMap<String, bool>>>,
+        plugin: Arc<Mutex<Option<Box<dyn DevicePlugin>>>>,
+    ) -> Self {
+        Shell {
+            vfs,
+            cwd: "/".to_string(),
+            allow_subprocess,
+            network_ask_permission,
+            permissions,
+            plugin,
+        }
+    }
+
+    pub fn check_device_permission(&self, resource_type: &str, resource: &str) -> Option<CommandOutput> {
+        let full = format!("{}:{}", resource_type, resource);
+        if let Ok(perms) = self.permissions.lock() {
+            match perms.get(&full) {
+                Some(&true) => None,
+                Some(&false) => Some(CommandOutput::error(
+                    format!("Permission denied for {}\n", full), 1,
+                )),
+                None => Some(CommandOutput::permission_needed(resource_type, resource)),
+            }
+        } else {
+            None
         }
     }
 
@@ -263,6 +308,28 @@ impl Shell {
             "ethtool" => self.cmd_ethtool(args),
             "service" => self.cmd_service(args),
             "showmount" => self.cmd_showmount(args),
+            // ── device commands (plugin) ──
+            "camera" => self.cmd_camera(args),
+            "screencapture" => self.cmd_screencapture(args),
+            "photolib" => self.cmd_photolib(args),
+            "record" => self.cmd_record(args),
+            "play" => self.cmd_play(args),
+            "say" => self.cmd_say(args),
+            "speech" => self.cmd_speech(args),
+            "contacts" => self.cmd_contacts(args),
+            "location" => self.cmd_location(args),
+            "clipboard" | "pbpaste" => self.cmd_clipboard(args),
+            "pbcopy" => self.cmd_pbcopy(args),
+            "sensor" => self.cmd_sensor(args),
+            "notify" | "notify-send" => self.cmd_notify(args),
+            "share" => self.cmd_share(args),
+            "open" | "xdg-open" => self.cmd_open_url(args),
+            "auth" => self.cmd_auth(args),
+            "battery" => self.cmd_battery(args),
+            "vibrate" => self.cmd_vibrate(args),
+            "screen" => self.cmd_screen(args),
+            "device" => self.cmd_device(args),
+            "arecord" => self.cmd_record(args),
             _ => {
                 if self.allow_subprocess {
                     self.run_subprocess(command, args)
@@ -290,10 +357,25 @@ impl Shell {
             .current_dir(&cwd)
             .output()
         {
-            Ok(out) => CommandOutput {
-                stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-                exit_code: out.status.code().unwrap_or(-1),
+            Ok(out) => {
+                let exit_code = if let Some(code) = out.status.code() {
+                    code
+                } else {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        out.status.signal().map_or(-1, |s| 128 + s)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        -1
+                    }
+                };
+                CommandOutput {
+                    stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                    exit_code,
+                }
             },
             Err(e) => CommandOutput {
                 stdout: String::new(),
@@ -469,11 +551,12 @@ pub(crate) fn status_code(status: git2::Status, staged: bool) -> char {
 }
 
 pub(crate) struct ProcInfo {
-    pid: u32,
-    ppid: u32,
-    comm: String,
-    rss: u64,
-    cpu_pct: f64,
+    pub pid: u32,
+    pub ppid: u32,
+    pub comm: String,
+    pub rss: u64,
+    pub cpu_pct: f64,
+    pub uid: u32,
 }
 
 pub(crate) fn list_processes() -> Result<Vec<ProcInfo>, String> {
@@ -565,13 +648,31 @@ fn parse_proc_stat(pid: u32, stat: &str, _total_cpu: u64) -> Option<ProcInfo> {
         0.0
     };
 
+    let uid = read_proc_uid(pid).unwrap_or(0);
+
     Some(ProcInfo {
         pid: pid as u32,
         ppid,
         comm,
         rss: rss * 4,
         cpu_pct,
+        uid,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_uid(pid: u32) -> Option<u32> {
+    let path = format!("/proc/{}/status", pid);
+    let status = fs::read_to_string(&path).ok()?;
+    for line in status.lines() {
+        if line.starts_with("Uid:") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                return parts[1].parse().ok();
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -714,6 +815,18 @@ fn get_proc_info_macos(pid: libc::c_int) -> Option<ProcInfo> {
             }
         };
 
+        let uid = {
+            let mut bsd2: ProcBsdShortInfo = std::mem::zeroed();
+            let sz2 = libc::proc_pidinfo(
+                pid,
+                PROC_PIDT_SHORTBSDINFO,
+                0,
+                &mut bsd2 as *mut _ as *mut libc::c_void,
+                std::mem::size_of::<ProcBsdShortInfo>() as i32,
+            );
+            if sz2 > 0 { bsd2.pbsi_uid } else { 0 }
+        };
+
         Some(ProcInfo {
             pid: pid as u32,
             ppid,
@@ -721,6 +834,7 @@ fn get_proc_info_macos(pid: libc::c_int) -> Option<ProcInfo> {
             rss: ti.pti_resident_size / 1024,
             cpu_pct: (ti.pti_total_user + ti.pti_total_system) as f64 / 1_000_000_000.0
                 * 100.0,
+            uid,
         })
     }
 }
@@ -1355,4 +1469,466 @@ mod tests {
         assert_eq!(out.exit_code, EXIT_NEED_PERMISSION);
         assert!(out.stderr.contains("PERMISSION_NEEDED:network:example.com"));
     }
+
+    #[test]
+    fn test_chmod_symbolic_add_x() {
+        let shell = mk_shell();
+        let r = shell.cmd_touch(&["script.sh"]);
+        assert_eq!(r.exit_code, 0, "touch failed: {:?}", r);
+
+        let out = shell.cmd_chmod(&["+x", "script.sh"]);
+        assert_eq!(out.exit_code, 0, "chmod failed: {:?}", out);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = shell.vfs.resolve("script.sh", &shell.cwd).unwrap();
+            let mode = target.metadata().unwrap().permissions().mode();
+            assert!(mode & 0o111 != 0, "execute bit should be set");
+        }
+    }
+
+    #[test]
+    fn test_chmod_symbolic_remove_w() {
+        let shell = mk_shell();
+        let r = shell.cmd_touch(&["file.txt"]);
+        assert_eq!(r.exit_code, 0);
+
+        let out = shell.cmd_chmod(&["-w", "file.txt"]);
+        assert_eq!(out.exit_code, 0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = shell.vfs.resolve("file.txt", &shell.cwd).unwrap();
+            let mode = target.metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode & 0o222, 0, "write bits should be cleared");
+        }
+    }
+
+    #[test]
+    fn test_chmod_symbolic_user_add_x() {
+        let shell = mk_shell();
+        let r = shell.cmd_touch(&["prog"]);
+        assert_eq!(r.exit_code, 0);
+
+        let out = shell.cmd_chmod(&["u+x", "prog"]);
+        assert_eq!(out.exit_code, 0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = shell.vfs.resolve("prog", &shell.cwd).unwrap();
+            let mode = target.metadata().unwrap().permissions().mode();
+            assert!(mode & 0o100 != 0, "user execute should be set");
+        }
+    }
+
+    #[test]
+    fn test_chmod_symbolic_group_other_remove_w() {
+        let shell = mk_shell();
+        let r = shell.cmd_touch(&["shared"]);
+        assert_eq!(r.exit_code, 0);
+
+        let out = shell.cmd_chmod(&["go-w", "shared"]);
+        assert_eq!(out.exit_code, 0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = shell.vfs.resolve("shared", &shell.cwd).unwrap();
+            let mode = target.metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode & 0o022, 0, "group+other write should be cleared");
+        }
+    }
+
+    #[test]
+    fn test_chmod_symbolic_set_readonly() {
+        let shell = mk_shell();
+        let r = shell.cmd_touch(&["readme.txt"]);
+        assert_eq!(r.exit_code, 0);
+
+        let out = shell.cmd_chmod(&["a=r", "readme.txt"]);
+        assert_eq!(out.exit_code, 0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = shell.vfs.resolve("readme.txt", &shell.cwd).unwrap();
+            let mode = target.metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o444, "expected r--r--r-- (444), got {:o}", mode);
+        }
+    }
+
+    #[test]
+    fn test_chmod_symbolic_multiple_clauses() {
+        let shell = mk_shell();
+        let r = shell.cmd_touch(&["bin"]);
+        assert_eq!(r.exit_code, 0);
+
+        let out = shell.cmd_chmod(&["u+x,g-w", "bin"]);
+        assert_eq!(out.exit_code, 0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = shell.vfs.resolve("bin", &shell.cwd).unwrap();
+            let mode = target.metadata().unwrap().permissions().mode() & 0o777;
+            assert!(mode & 0o100 != 0, "user execute should be set");
+            assert_eq!(mode & 0o020, 0, "group write should be cleared");
+        }
+    }
+
+    #[test]
+    fn test_chmod_recursive() {
+        let shell = mk_shell();
+        shell.cmd_mkdir(&["mydir"]);
+        shell.cmd_touch(&["mydir/file1.txt"]);
+        shell.cmd_touch(&["mydir/file2.txt"]);
+
+        let out = shell.cmd_chmod(&["-R", "755", "mydir"]);
+        assert_eq!(out.exit_code, 0, "chmod failed: {}", out.stderr);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in &["mydir", "mydir/file1.txt", "mydir/file2.txt"] {
+                let target = shell.vfs.resolve(name, &shell.cwd).unwrap();
+                let mode = target.metadata().unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o755, "{}: expected 755 got {:o}", name, mode);
+            }
+        }
+    }
+
+    #[test]
+    fn test_chmod_invalid_mode_error() {
+        let shell = mk_shell();
+        shell.cmd_touch(&["f.txt"]);
+        let out = shell.cmd_chmod(&["bad", "f.txt"]);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn test_chmod_missing_args_error() {
+        let shell = mk_shell();
+        let out = shell.cmd_chmod(&[]);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    // --- sort tests ---
+
+    #[test]
+    fn test_sort_numeric() {
+        let shell = mk_shell();
+        shell.vfs.write("/nums.txt", "", "10\n2\n1\n").unwrap();
+        let out = shell.cmd_sort(&["-n", "/nums.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["1", "2", "10"]);
+    }
+
+    #[test]
+    fn test_sort_reverse() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "a\nc\nb\n").unwrap();
+        let out = shell.cmd_sort(&["-r", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn test_sort_unique() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "a\na\nb\nb\nc\n").unwrap();
+        let out = shell.cmd_sort(&["-u", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_sort_by_column() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "apple 3\nbanana 1\ncherry 2\n").unwrap();
+        let out = shell.cmd_sort(&["-k", "2", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines[0], "banana 1");
+        assert_eq!(lines[1], "cherry 2");
+        assert_eq!(lines[2], "apple 3");
+    }
+
+    #[test]
+    fn test_sort_by_column_range() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "a x y 1\nb x z 2\na x a 3\n").unwrap();
+        let out = shell.cmd_sort(&["-k", "2,3", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines[0], "a x a 3");
+        assert_eq!(lines[1], "a x y 1");
+        assert_eq!(lines[2], "b x z 2");
+    }
+
+    #[test]
+    fn test_sort_custom_delimiter() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "z,1\na,3\nb,2\n").unwrap();
+        let out = shell.cmd_sort(&["-t", ",", "-k", "2", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines[0], "z,1");
+        assert_eq!(lines[1], "b,2");
+        assert_eq!(lines[2], "a,3");
+    }
+
+    #[test]
+    fn test_sort_case_insensitive() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "Zebra\nalpha\nBeta\n").unwrap();
+        let out = shell.cmd_sort(&["-f", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines[0], "alpha");
+        assert_eq!(lines[1], "Beta");
+        assert_eq!(lines[2], "Zebra");
+    }
+
+    #[test]
+    fn test_sort_human_numeric() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "3M\n1G\n2K\n500\n").unwrap();
+        let out = shell.cmd_sort(&["-h", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines[0], "500");
+        assert_eq!(lines[1], "2K");
+        assert_eq!(lines[2], "3M");
+        assert_eq!(lines[3], "1G");
+    }
+
+    #[test]
+    fn test_sort_human_numeric_with_B() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "3MB\n1GB\n2KB\n").unwrap();
+        let out = shell.cmd_sort(&["-h", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines[0], "2KB");
+        assert_eq!(lines[1], "3MB");
+        assert_eq!(lines[2], "1GB");
+    }
+
+    #[test]
+    fn test_sort_stable() {
+        let shell = mk_shell();
+        shell.vfs.write("/f.txt", "", "a 10\nb 10\nc 10\n").unwrap();
+        let out = shell.cmd_sort(&["-k", "2", "-s", "/f.txt"], None);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        // With -s, equal keys keep original order
+        assert_eq!(lines[0], "a 10");
+        assert_eq!(lines[1], "b 10");
+        assert_eq!(lines[2], "c 10");
+    }
+
+    #[test]
+    fn test_sort_stdin() {
+        let shell = mk_shell();
+        let out = shell.cmd_sort(&[], Some("c\na\nb\n"));
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_sort_missing_file_error() {
+        let shell = mk_shell();
+        let out = shell.cmd_sort(&[], None);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    // --- git tests ---
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_log_empty_repo() {
+        let mut shell = mk_shell();
+        let out = shell.execute("git", &["init"], None);
+        assert_eq!(out.exit_code, 0);
+
+        let out = shell.execute("git", &["log"], None);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_log_with_commits() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "first"], None);
+        shell.cmd_touch(&["g.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "second"], None);
+
+        let out = shell.execute("git", &["log"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("first"));
+        assert!(out.stdout.contains("second"));
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_log_oneline() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "hello world"], None);
+
+        let out = shell.execute("git", &["log", "--oneline"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("hello world"));
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_log_limit() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["a.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "c1"], None);
+        shell.cmd_touch(&["b.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "c2"], None);
+        shell.cmd_touch(&["c.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "c3"], None);
+
+        let out = shell.execute("git", &["log", "-n", "2"], None);
+        assert_eq!(out.exit_code, 0);
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        // Should only have 2 commit entries (each is 6 lines in full format)
+        let commit_count = lines.iter().filter(|l| l.starts_with("commit ")).count();
+        assert_eq!(commit_count, 2);
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_diff_unstaged() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.vfs.write("/f.txt", "", "hello\n").unwrap();
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "base"], None);
+
+        shell.vfs.write("/f.txt", "", "modified\n").unwrap();
+        let out = shell.execute("git", &["diff"], None);
+        assert!(out.stdout.contains("modified") || out.stdout.contains("hello"));
+        assert_ne!(out.exit_code, 0); // unstaged changes exist
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_diff_cached() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.vfs.write("/f.txt", "", "hello\n").unwrap();
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "base"], None);
+
+        shell.vfs.write("/f.txt", "", "changed\n").unwrap();
+        shell.execute("git", &["add", "."], None);
+
+        let out = shell.execute("git", &["diff", "--cached"], None);
+        assert!(out.stdout.contains("changed") || out.stdout.contains("hello"));
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_checkout_existing_branch() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "init"], None);
+
+        // Create a new branch and switch back
+        shell.execute("git", &["checkout", "-b", "feature"], None);
+        let out = shell.execute("git", &["checkout", "master"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("master"));
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_checkout_create_branch() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "init"], None);
+
+        let out = shell.execute("git", &["checkout", "-b", "develop"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("new branch"));
+        assert!(out.stdout.contains("develop"));
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_checkout_nonexistent_branch_error() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "init"], None);
+
+        let out = shell.execute("git", &["checkout", "nope"], None);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_branch_list() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "init"], None);
+
+        let out = shell.execute("git", &["branch"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("* master"));
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_branch_create_and_list() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "init"], None);
+
+        shell.execute("git", &["checkout", "-b", "feature"], None);
+        let out = shell.execute("git", &["branch"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("* feature"));
+        assert!(out.stdout.contains("master"));
+    }
+
+    #[test]
+    #[cfg(feature = "git")]
+    fn test_git_branch_delete() {
+        let mut shell = mk_shell();
+        shell.execute("git", &["init"], None);
+        shell.cmd_touch(&["f.txt"]);
+        shell.execute("git", &["add", "."], None);
+        shell.execute("git", &["commit", "-m", "init"], None);
+
+        shell.execute("git", &["checkout", "-b", "temp"], None);
+        shell.execute("git", &["checkout", "master"], None);
+
+        let out = shell.execute("git", &["branch", "-d", "temp"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("Deleted"));
+
+        let out = shell.execute("git", &["branch"], None);
+        assert!(!out.stdout.contains("temp"));
+    }
 }
+// (will remove)

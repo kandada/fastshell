@@ -4,6 +4,7 @@ impl Shell {
     pub fn cmd_tr(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut delete = false;
         let mut squeeze = false;
+        let mut complement = false;
         let mut set1 = String::new();
         let mut set2 = String::new();
 
@@ -11,6 +12,7 @@ impl Shell {
             match *arg {
                 "-d" => delete = true,
                 "-s" => squeeze = true,
+                "-c" => complement = true,
                 _ if !arg.starts_with('-') && set1.is_empty() => set1 = arg.to_string(),
                 _ if !arg.starts_with('-') && set2.is_empty() => set2 = arg.to_string(),
                 _ => {}
@@ -26,8 +28,16 @@ impl Shell {
             None => return CommandOutput::error("tr: missing input\n".to_string(), 1),
         };
 
-        let chars1 = expand_set(&unescape_tr(&set1));
-        let chars2 = expand_set(&unescape_tr(&set2));
+        let set1_expanded = resolve_char_classes(&set1);
+        let chars1_raw = expand_set(&unescape_tr(&set1_expanded));
+        let chars1: Vec<char> = if complement {
+            complement_set(&chars1_raw)
+        } else {
+            chars1_raw
+        };
+
+        let set2_expanded = resolve_char_classes(&set2);
+        let chars2 = expand_set(&unescape_tr(&set2_expanded));
 
         let squeeze_chars: &[char] = if squeeze { &chars1 } else { &[] };
 
@@ -68,6 +78,38 @@ impl Shell {
 
         CommandOutput::success(output)
     }
+}
+
+fn resolve_char_classes(s: &str) -> String {
+    let classes: &[(&str, &str)] = &[
+        ("[:alpha:]", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"),
+        ("[:digit:]", "0123456789"),
+        ("[:alnum:]", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"),
+        ("[:lower:]", "abcdefghijklmnopqrstuvwxyz"),
+        ("[:upper:]", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        ("[:space:]", " \t\n\r\x0b\x0c"),
+        ("[:punct:]", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
+        ("[:print:]", "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ "),
+        ("[:graph:]", "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"),
+        ("[:cntrl:]", "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f"),
+        ("[:xdigit:]", "0123456789ABCDEFabcdef"),
+    ];
+
+    let mut result = s.to_string();
+    for (name, chars) in classes {
+        result = result.replace(name, chars);
+    }
+    result
+}
+
+fn complement_set(chars: &[char]) -> Vec<char> {
+    let mut result = Vec::new();
+    for c in (0u32..=127).filter_map(char::from_u32) {
+        if !chars.contains(&c) {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn expand_set(s: &str) -> Vec<char> {

@@ -6,17 +6,17 @@
 
 | 平台 | 文件 | 大小 |
 |---|---|---|
-| macOS Apple Silicon | `aarch64-apple-darwin/libfastshell-0.2.0.dylib` | 8.0M |
-| macOS Intel | `x86_64-apple-darwin/libfastshell-0.2.0.dylib` | 9.0M |
-| iOS arm64 | `aarch64-apple-ios/libfastshell-0.2.0.a` | 39M |
-| Android arm64 | `aarch64-linux-android/libfastshell-0.2.0.so` | 10M |
-| Linux x86_64 | `x86_64-unknown-linux-gnu/libfastshell-0.2.0.so` | 8.5M |
+| macOS Apple Silicon | `aarch64-apple-darwin/libfastshell-0.2.1.dylib` | 8.0M |
+| macOS Intel | `x86_64-apple-darwin/libfastshell-0.2.1.dylib` | 9.0M |
+| iOS arm64 | `aarch64-apple-ios/libfastshell-0.2.1.a` | 39M |
+| Android arm64 | `aarch64-linux-android/libfastshell-0.2.1.so` | 10M |
+| Linux x86_64 | `x86_64-unknown-linux-gnu/libfastshell-0.2.1.so` | 8.5M |
 
 ## 集成方式
 
 ```bash
 # Android
-app/src/main/jniLibs/arm64-v8a/libfastshell-0.2.0.so
+app/src/main/jniLibs/arm64-v8a/libfastshell-0.2.1.so
 
 # iOS
 拖入 Xcode → Build Phases → Link Binary With Libraries

@@ -84,10 +84,58 @@ impl Shell {
     }
 
     pub fn cmd_stat(&self, args: &[&str]) -> CommandOutput {
-        let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let mut format: Option<String> = None;
+        let mut files: Vec<String> = Vec::new();
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-c" => {
+                    if i + 1 < args.len() {
+                        format = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                "--format" => {
+                    if i + 1 < args.len() {
+                        format = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                arg if arg.starts_with("--format=") => {
+                    format = Some(arg[9..].to_string());
+                }
+                arg if !arg.starts_with('-') => files.push(arg.to_string()),
+                _ => {}
+            }
+            i += 1;
+        }
 
         if files.is_empty() {
             return CommandOutput::error("stat: missing operand\n".to_string(), 1);
+        }
+
+        if let Some(ref fmt) = format {
+            let mut output = String::new();
+            for file in &files {
+                let resolved = match self.vfs.resolve(file, &self.cwd) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        output.push_str(&format!("stat: {}: {}\n", file, e));
+                        continue;
+                    }
+                };
+
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(meta) => {
+                        output.push_str(&format_stat(&resolved, &meta, fmt));
+                    }
+                    Err(e) => {
+                        output.push_str(&format!("stat: {}: {}\n", file, e));
+                    }
+                }
+            }
+            return CommandOutput::success(output);
         }
 
         let mut output = String::new();
@@ -141,6 +189,85 @@ impl Shell {
 
         CommandOutput::success(output)
     }
+}
+
+fn format_stat(path: &std::path::Path, meta: &std::fs::Metadata, fmt: &str) -> String {
+    let ftype_str = if meta.is_dir() {
+        "directory"
+    } else if meta.is_symlink() {
+        "symbolic link"
+    } else if meta.is_file() {
+        "regular file"
+    } else {
+        "unknown"
+    };
+
+    let (uid, gid, mode) = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            (meta.uid(), meta.gid(), meta.permissions().mode() & 0o7777)
+        }
+        #[cfg(not(unix))]
+        {
+            (0, 0, 0)
+        }
+    };
+
+    let perms_human = {
+        #[cfg(unix)]
+        {
+            crate::shell::mode_string(meta)
+        }
+        #[cfg(not(unix))]
+        {
+            if meta.permissions().readonly() { "r--r--r--".to_string() } else { "rw-r--r--".to_string() }
+        }
+    };
+
+    let nlink = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.nlink()
+        }
+        #[cfg(not(unix))]
+        {
+            1
+        }
+    };
+
+    let (atime_secs, mtime_secs, ctime_secs) = {
+        let to_secs = |t: std::io::Result<std::time::SystemTime>| -> u64 {
+            t.ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        };
+        (to_secs(meta.accessed()), to_secs(meta.modified()), to_secs(meta.created()))
+    };
+
+    let filename = path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    let mut result = fmt.to_string();
+    result = result.replace("%n", &filename);
+    result = result.replace("%s", &format!("{}", meta.len()));
+    result = result.replace("%a", &format!("{:04o}", mode));
+    result = result.replace("%A", &perms_human);
+    result = result.replace("%F", ftype_str);
+    result = result.replace("%h", &format!("{}", nlink));
+    result = result.replace("%u", &format!("{}", uid));
+    result = result.replace("%g", &format!("{}", gid));
+    result = result.replace("%x", &crate::shell::format_unix_time(atime_secs));
+    result = result.replace("%y", &crate::shell::format_unix_time(mtime_secs));
+    result = result.replace("%z", &crate::shell::format_unix_time(ctime_secs));
+
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
 }
 
 fn du_walk(path: &std::path::Path, max_depth: Option<usize>, current_depth: usize) -> u64 {

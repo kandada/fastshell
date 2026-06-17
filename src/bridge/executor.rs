@@ -78,7 +78,7 @@ impl Runtime {
         let n = expanded_stages.len();
         let last_idx = n - 1;
 
-        let mut threads: Vec<std::thread::JoinHandle<(i32, String, String)>> = Vec::new();
+        let mut threads: Vec<std::thread::JoinHandle<std::thread::Result<(i32, String, String)>>> = Vec::new();
         let mut prev_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
 
         for (i, stage) in expanded_stages.into_iter().enumerate() {
@@ -96,7 +96,7 @@ impl Runtime {
                 (None, None)
             };
 
-            let handle = std::thread::spawn(move || {
+            let handle = std::thread::spawn(move || -> std::thread::Result<(i32, String, String)> {
                 let mut stdin_buf = String::new();
                 if let Some(rx) = rx {
                     while let Ok(chunk) = rx.recv() {
@@ -112,7 +112,7 @@ impl Runtime {
                     let _ = tx.send(result.stdout.as_bytes().to_vec());
                 }
 
-                (result.exit_code, result.stdout, result.stderr)
+                Ok((result.exit_code, result.stdout, result.stderr))
             });
 
             threads.push(handle);
@@ -122,10 +122,11 @@ impl Runtime {
         let mut all_stderr = String::new();
         let mut final_exit_code = 0;
         let mut final_stdout = String::new();
+        let mut panicked = false;
 
         for (i, handle) in threads.into_iter().enumerate() {
             match handle.join() {
-                Ok((code, out, err)) => {
+                Ok(Ok((code, out, err))) => {
                     if !err.is_empty() {
                         if !all_stderr.is_empty() { all_stderr.push('\n'); }
                         all_stderr.push_str(&err);
@@ -135,13 +136,17 @@ impl Runtime {
                         final_stdout = out;
                     }
                 }
-                Err(_) => {
-                    return CommandOutput::error("pipeline: thread panicked".to_string(), 1);
+                Ok(Err(_)) | Err(_) => {
+                    panicked = true;
                 }
             }
         }
 
         self.shell.cwd = saved_cwd;
+
+        if panicked {
+            return CommandOutput::error(format!("pipeline: thread panicked\n{}", all_stderr), 1);
+        }
 
         CommandOutput {
             stdout: final_stdout,

@@ -9,6 +9,7 @@
 ## 特性
 
 - **160+ 内置命令** — `ls`、`grep`、`sed`、`awk`、`jq`、`curl`、`git`、`tar`、`sha256sum`……
+- **设备能力集成** — `camera`、`clipboard`、`contacts`、`location`、`notify`、`open`、`say`、`screencapture`……通过插件 trait 接入
 - **管道支持** — 真正并发执行，每个阶段独立线程，mpsc channel 流式传递
 - **通配符展开** — `ls *.rs`、`cat src/**/*.rs`
 - **正则表达式** — `grep` 和 `sed s///` 使用完整正则
@@ -123,6 +124,9 @@ impl Fastshell {
 
     // 取消正在执行的命令（超时或中断用）
     pub fn cancel_execution(&self);
+
+    // 注册设备插件
+    pub fn register_plugin(&self, plugin: Box<dyn DevicePlugin>);
 }
 
 pub struct CommandResult {
@@ -160,6 +164,46 @@ if result.exit_code == 100 {
     let result = sdk.execute("curl http://example.com"); // 重试
 }
 ```
+
+## 设备插件
+
+fastshell 内置 22 个**设备能力命令**（`camera`、`clipboard`、`contacts`、`location`、`notify`、`open`……）。
+这些命令**默认不工作** —— 需要宿主 App 实现 `DevicePlugin` trait 并注册。
+
+```
+┌──────────────────────────────┐      ┌────────────────────────────┐
+│  fastshell SDK                │      │  宿主 App (Kotlin/Swift)   │
+│                                │      │                            │
+│  shell: "camera" → 命令       │      │  impl DevicePlugin {       │
+│  检查: 插件已注册?             │──→   │    fn take_photo(path) {   │
+│  调用: plugin.take_photo()    │      │      // AVCaptureSession   │
+│                                │      │      // 或 CameraX         │
+│  返回结果给 AI Agent           │←──   │    }                       │
+└──────────────────────────────┘      └────────────────────────────┘
+```
+
+**宿主集成示例：**
+```rust
+use fastshell::sdk::plugin::DevicePlugin;
+
+struct MyPlugin;
+impl DevicePlugin for MyPlugin {
+    fn take_photo(&self, output_path: &str) -> Result<(), String> {
+        // 调起原生相机，照片存入沙盒指定路径
+    }
+    fn get_clipboard(&self) -> Result<String, String> { ... }
+    fn get_location(&self) -> Result<Location, String> { ... }
+    // 按需实现其他方法
+}
+
+sdk.register_plugin(Box::new(MyPlugin));
+```
+
+**权限模型：** 与网络权限一致 —— 首次调用返回 `exit_code=100` 和 `PERMISSION_NEEDED:camera:photo`。
+宿主 App 弹出原生授权对话框，调用 `set_permission` 后重试。
+
+**命令兼容性：** 常用 macOS/Linux 命令名均已别名 —— `pbcopy` / `pbpaste`、
+`notify-send`、`xdg-open`、`screencapture`、`say`、`arecord` —— AI Agent 无需学习新命令名。
 
 ## 移动端集成注意事项
 
@@ -215,11 +259,11 @@ ls -la | grep foo | wc -l
 
 | 平台 | 文件 | 大小 |
 |------|------|------|
-| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.2.0.dylib` | 8.0 MB |
-| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.2.0.dylib` | 9.0 MB |
-| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.2.0.a` | 39 MB |
-| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.2.0.so` | 10 MB |
-| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.2.0.so` | 8.5 MB |
+| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.2.1.dylib` | 8.0 MB |
+| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.2.1.dylib` | 9.0 MB |
+| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.2.1.a` | 39 MB |
+| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.2.1.so` | 10 MB |
+| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.2.1.so` | 8.5 MB |
 
 ### 集成方式
 
@@ -293,6 +337,9 @@ cargo test  # 148 个测试
 
 ### 控制流程
 `true` `false` `test` `expr` `timeout`
+
+### 设备能力（需插件）
+`camera` `screencapture` `photolib` `record` `arecord` `play` `say` `speech` `contacts` `location` `clipboard` `pbpaste` `pbcopy` `sensor` `notify` `notify-send` `share` `open` `xdg-open` `auth` `battery` `vibrate` `screen` `device`
 
 ### 版本控制
 `git`

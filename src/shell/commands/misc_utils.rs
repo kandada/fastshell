@@ -218,12 +218,39 @@ impl Shell {
     }
 
     pub fn cmd_xxd(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        let mut reverse = false;
+        let mut plain = false;
+        let mut limit: Option<usize> = None;
+        let mut seek: usize = 0;
         let mut files = Vec::new();
 
-        for arg in args {
-            if !arg.starts_with('-') {
-                files.push(arg.to_string());
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-r" => reverse = true,
+                "-p" => plain = true,
+                "-l" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().ok();
+                        i += 1;
+                    }
+                }
+                "-s" => {
+                    if i + 1 < args.len() {
+                        seek = parse_offset(args[i + 1]);
+                        i += 1;
+                    }
+                }
+                arg if arg.starts_with("-l") && arg.len() > 2 => {
+                    limit = arg[2..].parse().ok();
+                }
+                arg if arg.starts_with("-s") && arg.len() > 2 => {
+                    seek = parse_offset(&arg[2..]);
+                }
+                arg if !arg.starts_with('-') => files.push(arg.to_string()),
+                _ => {}
             }
+            i += 1;
         }
 
         let data = if files.is_empty() {
@@ -242,9 +269,35 @@ impl Shell {
             all
         };
 
+        let data = if seek > 0 {
+            if seek >= data.len() {
+                &[] as &[u8]
+            } else {
+                &data[seek..]
+            }
+        } else {
+            &data[..]
+        };
+
+        let data = if let Some(lim) = limit {
+            if lim < data.len() { &data[..lim] } else { data }
+        } else {
+            data
+        };
+
+        if reverse {
+            return xxd_reverse(data);
+        }
+
+        if plain {
+            return xxd_plain(data);
+        }
+
         let mut output = String::new();
-        for (offset, chunk) in data.chunks(16).enumerate() {
-            output.push_str(&format!("{:08x}: ", offset * 16));
+        let base_offset = seek;
+        for (idx, chunk) in data.chunks(16).enumerate() {
+            let offset = base_offset + idx * 16;
+            output.push_str(&format!("{:08x}: ", offset));
             let mut hex_part = String::new();
             let mut ascii_part = String::new();
             for (j, &byte) in chunk.iter().enumerate() {
@@ -283,6 +336,55 @@ impl Shell {
             Err(e) => CommandOutput::error(format!("expr: {}\n", e), 1),
         }
     }
+}
+
+fn parse_offset(s: &str) -> usize {
+    if s.starts_with("0x") || s.starts_with("0X") {
+        usize::from_str_radix(&s[2..], 16).unwrap_or(0)
+    } else {
+        s.parse().unwrap_or(0)
+    }
+}
+
+fn xxd_reverse(data: &[u8]) -> CommandOutput {
+    let input = String::from_utf8_lossy(data);
+    let mut output = Vec::new();
+
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Skip the offset prefix if present
+        let hex_part = if let Some(colon_pos) = line.find(':') {
+            &line[colon_pos + 1..]
+        } else {
+            line
+        };
+
+        let hex_only: String = hex_part.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        for chunk in hex_only.as_bytes().chunks(2) {
+            if chunk.len() == 2 {
+                let hex_str = std::str::from_utf8(chunk).unwrap_or("00");
+                if let Ok(byte) = u8::from_str_radix(hex_str, 16) {
+                    output.push(byte);
+                }
+            }
+        }
+    }
+
+    CommandOutput::success(String::from_utf8_lossy(&output).to_string())
+}
+
+fn xxd_plain(data: &[u8]) -> CommandOutput {
+    let mut output = String::new();
+    for chunk in data.chunks(30) {
+        for &byte in chunk {
+            output.push_str(&format!("{:02x}", byte));
+        }
+        output.push('\n');
+    }
+    CommandOutput::success(output)
 }
 
 fn shuffle<T>(items: &mut Vec<T>) {

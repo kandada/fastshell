@@ -9,6 +9,7 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 ## Features
 
 - **160+ built-in commands** — `ls`, `grep`, `sed`, `awk`, `jq`, `curl`, `git`, `tar`, `sha256sum`...
+- **Device integration** — `camera`, `clipboard`, `contacts`, `location`, `notify`, `open`, `say`, `screencapture`... via plugin trait
 - **Pipeline support** — True concurrent execution, each stage runs in its own thread with streaming channels
 - **Glob expansion** — `ls *.rs`, `cat src/**/*.rs`
 - **Regex** — Full regex in `grep` and `sed s///`
@@ -123,6 +124,9 @@ impl Fastshell {
 
     // Cancel a running command (for timeout/interrupt)
     pub fn cancel_execution(&self);
+
+    // Device plugin registration
+    pub fn register_plugin(&self, plugin: Box<dyn DevicePlugin>);
 }
 
 pub struct CommandResult {
@@ -160,6 +164,46 @@ if result.exit_code == 100 {
     let result = sdk.execute("curl http://example.com"); // retry
 }
 ```
+
+## Device Plugin
+
+fastshell provides 22 **device capability commands** (`camera`, `clipboard`, `contacts`, `location`, `notify`, `open`...).
+These commands **do nothing by default** — the host app must implement the `DevicePlugin` trait and register it.
+
+```
+┌──────────────────────────────┐      ┌────────────────────────────┐
+│  fastshell SDK                │      │  Host App (Kotlin/Swift)   │
+│                                │      │                            │
+│  shell: "camera" → command    │      │  impl DevicePlugin {       │
+│  checks: plugin registered?   │──→   │    fn take_photo(path) {   │
+│  calls: plugin.take_photo()   │      │      // AVCaptureSession   │
+│                                │      │      // or CameraX         │
+│  returns result to AI agent   │←──   │    }                       │
+└──────────────────────────────┘      └────────────────────────────┘
+```
+
+**Host app integration:**
+```rust
+use fastshell::sdk::plugin::DevicePlugin;
+
+struct MyPlugin;
+impl DevicePlugin for MyPlugin {
+    fn take_photo(&self, output_path: &str) -> Result<(), String> {
+        // invoke native camera, save to sandbox
+    }
+    fn get_clipboard(&self) -> Result<String, String> { ... }
+    fn get_location(&self) -> Result<Location, String> { ... }
+    // ... implement the methods you need
+}
+
+sdk.register_plugin(Box::new(MyPlugin));
+```
+
+**Permission model:** Same as network — first call returns `exit_code=100` with `PERMISSION_NEEDED:camera:photo`.
+Host app shows native permission dialog, calls `set_permission`, retries.
+
+**Command compatibility:** Common macOS/Linux names are aliased — `pbcopy` / `pbpaste`,
+`notify-send`, `xdg-open`, `screencapture`, `say`, `arecord` — AI agents use familiar commands without retraining.
 
 ## Mobile Integration Notes
 
@@ -216,11 +260,11 @@ Built-in commands (`ls`, `grep`, `curl`, `git`, etc.) work everywhere regardless
 
 | Platform | File | Size |
 |----------|------|------|
-| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.2.0.dylib` | 8.0 MB |
-| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.2.0.dylib` | 9.0 MB |
-| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.2.0.a` | 39 MB |
-| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.2.0.so` | 10 MB |
-| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.2.0.so` | 8.5 MB |
+| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.2.1.dylib` | 8.0 MB |
+| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.2.1.dylib` | 9.0 MB |
+| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.2.1.a` | 39 MB |
+| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.2.1.so` | 10 MB |
+| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.2.1.so` | 8.5 MB |
 
 ## Build from Source
 
@@ -278,6 +322,9 @@ cargo test  # 148 tests
 
 ### Control Flow
 `true` `false` `test` `expr` `timeout`
+
+### Device (requires plugin)
+`camera` `screencapture` `photolib` `record` `arecord` `play` `say` `speech` `contacts` `location` `clipboard` `pbpaste` `pbcopy` `sensor` `notify` `notify-send` `share` `open` `xdg-open` `auth` `battery` `vibrate` `screen` `device`
 
 ### Version Control
 `git`

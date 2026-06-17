@@ -4,6 +4,8 @@ impl Shell {
     pub fn cmd_cut(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut delimiter = '\t';
         let mut fields: Vec<FieldRange> = Vec::new();
+        let mut char_mode = false;
+        let mut complement = false;
         let mut files = Vec::new();
 
         let mut i = 0;
@@ -21,11 +23,23 @@ impl Shell {
                         i += 1;
                     }
                 }
+                "-c" => {
+                    if i + 1 < args.len() {
+                        fields = parse_field_spec(args[i + 1]);
+                        char_mode = true;
+                        i += 1;
+                    }
+                }
+                "--complement" => complement = true,
                 arg if arg.starts_with("-d") && arg.len() > 2 => {
                     delimiter = arg[2..].chars().next().unwrap_or('\t');
                 }
                 arg if arg.starts_with("-f") && arg.len() > 2 => {
                     fields = parse_field_spec(&arg[2..]);
+                }
+                arg if arg.starts_with("-c") && arg.len() > 2 => {
+                    fields = parse_field_spec(&arg[2..]);
+                    char_mode = true;
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
@@ -55,23 +69,72 @@ impl Shell {
 
         let mut output = String::new();
         for line in input.lines() {
-            let cols: Vec<&str> = line.split(delimiter).collect();
-            let total_cols = cols.len();
-            let mut parts = Vec::new();
-            for range in &fields {
-                let start = range.start.saturating_sub(1);
-                let end = match range.end {
-                    Some(e) => (e.saturating_sub(1)).min(total_cols.saturating_sub(1)),
-                    None => total_cols.saturating_sub(1),
-                };
-                if start <= end && start < total_cols {
-                    for idx in start..=end {
-                        parts.push(cols[idx].to_string());
+            if char_mode {
+                let chars: Vec<char> = line.chars().collect();
+                let total = chars.len();
+                let mut selected = Vec::new();
+                for range in &fields {
+                    let start = range.start.saturating_sub(1);
+                    let end = match range.end {
+                        Some(e) => (e.saturating_sub(1)).min(total.saturating_sub(1)),
+                        None => total.saturating_sub(1),
+                    };
+                    if start <= end && start < total {
+                        for idx in start..=end {
+                            selected.push(idx);
+                        }
                     }
                 }
-            }
-            if !parts.is_empty() {
-                output.push_str(&parts.join(&delimiter.to_string()));
+                if complement {
+                    let mut result = String::new();
+                    for idx in 0..total {
+                        if !selected.contains(&idx) {
+                            result.push(chars[idx]);
+                        }
+                    }
+                    output.push_str(&result);
+                } else {
+                    for idx in selected {
+                        output.push(chars[idx]);
+                    }
+                }
+            } else {
+                let cols: Vec<&str> = line.split(delimiter).collect();
+                let total_cols = cols.len();
+                let mut parts = Vec::new();
+                for range in &fields {
+                    let start = range.start.saturating_sub(1);
+                    let end = match range.end {
+                        Some(e) => (e.saturating_sub(1)).min(total_cols.saturating_sub(1)),
+                        None => total_cols.saturating_sub(1),
+                    };
+                    if start <= end && start < total_cols {
+                        for idx in start..=end {
+                            parts.push(idx);
+                        }
+                    }
+                }
+                if complement {
+                    let mut selected: Vec<bool> = vec![false; total_cols];
+                    for &idx in &parts {
+                        selected[idx] = true;
+                    }
+                    let mut result_parts = Vec::new();
+                    for idx in 0..total_cols {
+                        if !selected[idx] {
+                            result_parts.push(cols[idx].to_string());
+                        }
+                    }
+                    if !result_parts.is_empty() {
+                        output.push_str(&result_parts.join(&delimiter.to_string()));
+                    }
+                } else if !parts.is_empty() {
+                    let mut result_parts = Vec::new();
+                    for &idx in &parts {
+                        result_parts.push(cols[idx].to_string());
+                    }
+                    output.push_str(&result_parts.join(&delimiter.to_string()));
+                }
             }
             output.push('\n');
         }
