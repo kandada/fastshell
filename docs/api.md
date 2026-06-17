@@ -1,6 +1,6 @@
 # fastshell API Reference
 
-Complete Rust SDK API reference for fastshell v0.2.1.
+Complete Rust SDK API reference for fastshell v0.2.2.
 
 ## Core Types
 
@@ -27,7 +27,7 @@ pub struct Config {
     /// Allow unknown commands to fall through to system shell via fork/exec.
     /// **Desktop default: true** — system shell available.
     /// **Mobile default: false** — avoids fork (Android phantom process killer, iOS prohibition).
-    /// Built-in 160+ commands always work regardless of this setting.
+    /// Built-in 180+ commands always work regardless of this setting.
     pub allow_subprocess: bool,
 
     /// Enable network permission checking. When true, curl/wget/ping/ssh
@@ -57,7 +57,7 @@ pub struct CommandResult {
 
 ```rust
 pub struct SdkInfo {
-    pub version: String,          // e.g. "0.2.1"
+    pub version: String,          // e.g. "0.2.2"
     pub platform: String,         // e.g. "macos", "linux", "android", "ios"
     pub python_available: bool,   // whether CPython engine is loaded
     pub sandbox_path: String,     // current VFS root

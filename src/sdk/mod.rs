@@ -405,7 +405,7 @@ mod tests {
     fn test_get_info() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.2.1");
+        assert_eq!(info.version, "0.2.2");
         assert!(!info.platform.is_empty());
     }
 
@@ -505,7 +505,7 @@ mod tests {
     fn test_sdk_info_includes_allow_subprocess() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.2.1");
+        assert_eq!(info.version, "0.2.2");
         assert!(info.allow_subprocess);
     }
 }

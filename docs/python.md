@@ -158,3 +158,4 @@ Then Python code can `import requests` or `import rich` as usual.
 - **No ctypes safety** — `ctypes.CDLL(None)` can load system libraries and bypass sandbox
 - **GIL** — CPython's Global Interpreter Lock applies; Python code is single-threaded
 - **Memory** — CPython runtime adds ~5-10MB memory overhead
+- **`sqlite3` module** — works on macOS/Linux if system CPython has `_sqlite3` compiled in (most do). On mobile (Android/iOS), requires CPython to be cross-compiled with `--with-sqlite3`. As an alternative, fastshell has a built-in `sqlite3` shell command available on all platforms.

@@ -2,6 +2,12 @@
 
 All built-in shell commands. Commands marked with `*` require DevicePlugin registration.
 
+## Database
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `sqlite3` | DB [query] — `-csv`, `-header`, `.tables`, `.schema`, `.help` | SQLite database (bundled, no system dep) |
+
 ## File Operations
 
 | Command | Flags | Description |

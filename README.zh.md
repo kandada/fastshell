@@ -1,6 +1,6 @@
 # fastshell
 
-轻量级跨平台 Shell 运行时 SDK，面向移动端 AI Agent——提供 160+ Linux 兼容命令、管道、通配符展开、Python 执行。
+轻量级跨平台 Shell 运行时 SDK，面向移动端 AI Agent——提供 180+ Linux 兼容命令、管道、通配符展开、Python 执行、内置 SQLite。
 
 ## 解决的问题
 
@@ -8,7 +8,8 @@
 
 ## 特性
 
-- **160+ 内置命令** — `ls`、`grep`、`sed`、`awk`、`jq`、`curl`、`git`、`tar`、`sha256sum`……
+- **180+ 内置命令** — `ls`、`grep`、`sed`、`awk`、`jq`、`curl`、`git`、`tar`、`sha256sum`……
+- **内置 SQLite** — `sqlite3 db.sqlite "SELECT ..."`，零系统依赖（rusqlite bundled 静态链接）
 - **设备能力集成** — `camera`、`clipboard`、`contacts`、`location`、`notify`、`open`、`say`、`screencapture`……通过插件 trait 接入
 - **管道支持** — 真正并发执行，每个阶段独立线程，mpsc channel 流式传递
 - **通配符展开** — `ls *.rs`、`cat src/**/*.rs`
@@ -16,7 +17,7 @@
 - **Python 引擎** — `python -c '...'` 和执行 `.py` 脚本
 - **虚拟文件系统** — 沙箱隔离，防止路径逃逸
 - **线程安全** — `Arc<Mutex<Runtime>>`，支持超时控制
-- **跨平台** — 预编译 macOS (ARM64/Intel)、iOS、Android、Linux x86_64
+- **跨平台** — 统一代码库编译 Android / iOS / macOS / Linux
 
 ## 快速开始
 
@@ -74,7 +75,7 @@ import os
 ret = os.system("mkdir -p /tmp/work")
 ```
 
-全部 160+ 内置命令、管道、通配符展开都可以在 Python 中使用。桌面端未知命令会转发给系统 shell；移动端**默认禁用** subprocess fallthrough，所有执行保持在进程内。
+全部 180+ 内置命令、管道、通配符展开都可以在 Python 中使用。桌面端未知命令会转发给系统 shell；移动端**默认禁用** subprocess fallthrough，所有执行保持在进程内。
 
 ### 移动端 (FFI)
 
@@ -255,62 +256,53 @@ ls -la | grep foo | wc -l
 
 内置命令（`ls`、`grep`、`curl`、`git` 等）不受此设置影响，在所有平台都能正常运行。
 
-## 预编译库
-
-| 平台 | 文件 | 大小 |
-|------|------|------|
-| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.2.1.dylib` | 8.0 MB |
-| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.2.1.dylib` | 9.0 MB |
-| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.2.1.a` | 39 MB |
-| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.2.1.so` | 10 MB |
-| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.2.1.so` | 8.5 MB |
-
-### 集成方式
-
-```bash
-# Android
-# 将 .so 放到 app/src/main/jniLibs/arm64-v8a/
-
-# iOS
-# 将 .a 拖入 Xcode → Build Phases → Link Binary With Libraries
-
-# macOS / Linux
-# 直接链接 .dylib / .so
-```
-
 ## 从源码编译
 
+需要 Rust 稳定版工具链。
+
 ```bash
-cd fastshell
+# 1. 一键配置（安装 Rust targets，可选下载 Android NDK）
+./scripts/setup.sh
 
-# 环境准备
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-rustup target add aarch64-apple-ios aarch64-linux-android
-rustup target add x86_64-unknown-linux-gnu
+# 2. 编译目标平台
+cargo build --release --target aarch64-apple-darwin        # macOS ARM64
+cargo build --release --target x86_64-apple-darwin          # macOS Intel
+cargo build --release --target aarch64-apple-ios            # iOS（需 macOS 宿主机）
+cargo build --release --target aarch64-linux-android        # Android（需要 NDK）
 
-# Android NDK
-# 下载 android-ndk-r27c 放到项目根目录
-
-# iOS 最低版本
-export IPHONEOS_DEPLOYMENT_TARGET=16.0
-
-# macOS
-cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
-
-# iOS
-cargo build --release --target aarch64-apple-ios
-
-# Android
-cargo build --release --target aarch64-linux-android
-
-# Linux x86_64（需要 cargo-zigbuild）
+# Linux x86_64 交叉编译（需要 cargo-zigbuild）
 pip3 install cargo-zigbuild
 cargo zigbuild --release --target x86_64-unknown-linux-gnu
 
-# 测试
-cargo test  # 148 个测试
+# 3. 运行测试（268 个测试）
+cargo test
 ```
+
+**注意：** Android 目标需要 Android NDK r27c，`./scripts/setup.sh` 会询问是否自动下载。
+macOS、iOS、Linux 目标无需 NDK 即可编译。
+
+产物直接链接到你的项目：
+
+```
+# macOS / Linux
+target/aarch64-apple-darwin/release/libfastshell.dylib
+
+# iOS
+target/aarch64-apple-ios/release/libfastshell.a
+
+# Android
+target/aarch64-linux-android/release/libfastshell.so
+```
+
+编译产物参考：
+
+| 平台 | 输出文件 | 格式 | 约大小 |
+|------|---------|------|--------|
+| macOS Apple Silicon | `libfastshell.dylib` | 动态库 | ~11 MB |
+| macOS Intel | `libfastshell.dylib` | 动态库 | ~13 MB |
+| iOS arm64 | `libfastshell.a` | 静态库 | ~47 MB |
+| Android arm64 | `libfastshell.so` | 动态库 (.so) | ~12 MB |
+| Linux x86_64 | `libfastshell.so` | 动态库 (.so) | ~10 MB |
 
 ## 命令列表
 
@@ -338,6 +330,9 @@ cargo test  # 148 个测试
 ### 控制流程
 `true` `false` `test` `expr` `timeout`
 
+### 数据库
+`sqlite3`（内置，bundled，无系统依赖）
+
 ### 设备能力（需插件）
 `camera` `screencapture` `photolib` `record` `arecord` `play` `say` `speech` `contacts` `location` `clipboard` `pbpaste` `pbcopy` `sensor` `notify` `notify-send` `share` `open` `xdg-open` `auth` `battery` `vibrate` `screen` `device`
 
@@ -350,11 +345,13 @@ cargo test  # 148 个测试
 fastshell/
 ├── src/
 │   ├── vfs/       # 层1 — 虚拟沙箱文件系统
-│   ├── shell/     # 层1 — 160+ 内置命令（纯 Rust 实现）
+│   ├── shell/     # 层1 — 180+ 内置命令（纯 Rust 实现）
 │   ├── python/    # 层1 — Python 引擎（子进程 / CPython）
 │   ├── bridge/    # 层2 — 脚本执行、I/O、管道、通配符
 │   └── sdk/       # 层3 — 公共 API + 平台 FFI（JNI / C）
-└── dist/          # 各平台预编译库
+├── docs/          # 文档（API、命令、集成、插件、安全等）
+├── tests/         # 集成测试
+└── vendor/        # 内嵌 CPython 3.12 库
 ```
 
 ## 设计理念

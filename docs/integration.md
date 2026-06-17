@@ -10,13 +10,13 @@ Copy the pre-built library to your project:
 
 ```
 # Android
-app/src/main/jniLibs/arm64-v8a/libfastshell-0.2.1.so
+app/src/main/jniLibs/arm64-v8a/libfastshell.so
 
 # iOS
-Drag libfastshell-0.2.1.a into Xcode → Build Phases → Link Binary With Libraries
+Drag libfastshell.a into Xcode → Build Phases → Link Binary With Libraries
 
 # macOS / Linux
-Link libfastshell-0.2.1.dylib / libfastshell-0.2.1.so dynamically
+Link libfastshell.dylib / libfastshell-0.2.1.so dynamically
 ```
 
 ### 2. Initialize

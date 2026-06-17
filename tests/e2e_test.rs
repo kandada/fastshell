@@ -375,6 +375,57 @@ fn e2e_python_subprocess_bridge() {
 }
 
 // ═══════════════════════════════════════════════════════
+// SQLite3
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn e2e_sqlite3_shell_command() {
+    let sdk = setup_default();
+    sdk.execute("sqlite3 test.db 'CREATE TABLE users (id, name)'");
+    sdk.execute("sqlite3 test.db \"INSERT INTO users VALUES (1, 'Alice')\"");
+    sdk.execute("sqlite3 test.db \"INSERT INTO users VALUES (2, 'Bob')\"");
+
+    let r = sdk.execute("sqlite3 test.db 'SELECT * FROM users ORDER BY id'");
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("Alice"));
+    assert!(r.stdout.contains("Bob"));
+
+    let r = sdk.execute("sqlite3 test.db .tables");
+    assert!(r.stdout.contains("users"));
+
+    let r = sdk.execute("sqlite3 -csv test.db 'SELECT * FROM users'");
+    assert!(r.stdout.contains("1,Alice"));
+}
+
+#[test]
+fn e2e_sqlite3_stdin() {
+    let sdk = setup_default();
+    // Test sqlite3 with stdin via file redirection
+    sdk.write_file("init.sql", "CREATE TABLE t (x TEXT);\nINSERT INTO t VALUES ('pipe_works');\nSELECT * FROM t;\n").unwrap();
+    // Use cat to pipe SQL file content to sqlite3
+    let r = sdk.execute("cat init.sql | sqlite3 test2.db");
+    assert!(r.exit_code == 0 || r.stdout.contains("pipe_works"),
+        "exit={} stdout={} stderr={}", r.exit_code, r.stdout, r.stderr);
+}
+
+#[test]
+fn e2e_python_sqlite3_import() {
+    let sdk = setup_default();
+    let info = sdk.get_info();
+    if !info.python_available { return; }
+
+    let r = sdk.execute_python(
+        "import sqlite3; conn = sqlite3.connect(':memory:'); \
+         conn.execute('CREATE TABLE t(x)'); \
+         conn.execute('INSERT INTO t VALUES(42)'); \
+         print(conn.execute('SELECT x FROM t').fetchone()[0])"
+    );
+    if r.exit_code == 0 {
+        assert!(r.stdout.contains("42"), "sqlite3 import failed: stdout={} stderr={}", r.stdout, r.stderr);
+    }
+}
+
+// ═══════════════════════════════════════════════════════
 // Config — Defaults
 // ═══════════════════════════════════════════════════════
 

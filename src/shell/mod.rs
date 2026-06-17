@@ -329,6 +329,7 @@ impl Shell {
             "vibrate" => self.cmd_vibrate(args),
             "screen" => self.cmd_screen(args),
             "device" => self.cmd_device(args),
+            "sqlite3" => self.cmd_sqlite3(args, stdin),
             "arecord" => self.cmd_record(args),
             _ => {
                 if self.allow_subprocess {

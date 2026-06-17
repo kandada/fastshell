@@ -57,3 +57,4 @@ pub mod sys_utils;
 pub mod extra;
 pub mod final_batch;
 pub mod devices;
+pub mod sqlite3;

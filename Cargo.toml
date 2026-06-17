@@ -1,6 +1,6 @@
 [package]
 name = "fastshell"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Lightweight Bash + Python runtime SDK for mobile AI agents"
 license = "Apache-2.0"
@@ -42,3 +42,4 @@ num_cpus = "1"
 xz2 = "0.1"
 sha3 = "0.10"
 bzip2 = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }

@@ -1,6 +1,6 @@
 # fastshell
 
-A lightweight, cross-platform shell runtime SDK for mobile AI agents — providing 160+ Linux-compatible commands, pipelines, glob expansion, and Python execution.
+A lightweight, cross-platform shell runtime SDK for mobile AI agents — providing 180+ Linux-compatible commands, pipelines, glob expansion, Python execution, and built-in SQLite.
 
 ## Why
 
@@ -8,7 +8,8 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 
 ## Features
 
-- **160+ built-in commands** — `ls`, `grep`, `sed`, `awk`, `jq`, `curl`, `git`, `tar`, `sha256sum`...
+- **180+ built-in commands** — `ls`, `grep`, `sed`, `awk`, `jq`, `curl`, `git`, `tar`, `sha256sum`...
+- **Built-in SQLite** — `sqlite3 db.sqlite "SELECT ..."`, zero system dependency (bundled via rusqlite)
 - **Device integration** — `camera`, `clipboard`, `contacts`, `location`, `notify`, `open`, `say`, `screencapture`... via plugin trait
 - **Pipeline support** — True concurrent execution, each stage runs in its own thread with streaming channels
 - **Glob expansion** — `ls *.rs`, `cat src/**/*.rs`
@@ -16,7 +17,7 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 - **Python engine** — `python -c '...'` and `.py` script execution
 - **Virtual filesystem** — Sandbox isolation, path escape prevention
 - **Thread-safe SDK** — `Arc<Mutex<Runtime>>`, timeout enforcement
-- **Cross-platform** — Pre-built for macOS (ARM64/Intel), iOS, Android, Linux x86_64
+- **Cross-platform** — Single codebase compiles to Android, iOS, macOS, Linux
 
 ## Quick Start
 
@@ -74,7 +75,7 @@ import os
 ret = os.system("mkdir -p /tmp/work")
 ```
 
-All 160+ built-in commands, pipelines, and globs are available. On desktop, unknown commands fall through to the system shell. On mobile, subprocess fallthrough is **disabled by default** — all execution stays in-process.
+All 180+ built-in commands, pipelines, and globs are available. On desktop, unknown commands fall through to the system shell. On mobile, subprocess fallthrough is **disabled by default** — all execution stays in-process.
 
 ### Mobile (FFI)
 
@@ -256,46 +257,53 @@ for vendor-specific instructions.
 
 Built-in commands (`ls`, `grep`, `curl`, `git`, etc.) work everywhere regardless of this setting.
 
-## Pre-built Libraries
-
-| Platform | File | Size |
-|----------|------|------|
-| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.2.1.dylib` | 8.0 MB |
-| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.2.1.dylib` | 9.0 MB |
-| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.2.1.a` | 39 MB |
-| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.2.1.so` | 10 MB |
-| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.2.1.so` | 8.5 MB |
-
 ## Build from Source
 
+Requires Rust stable toolchain.
+
 ```bash
-cd fastshell
+# 1. One-time setup (installs Rust targets, optional Android NDK)
+./scripts/setup.sh
 
-# Prerequisites
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-rustup target add aarch64-apple-ios aarch64-linux-android
-rustup target add x86_64-unknown-linux-gnu
+# 2. Build for your target
+cargo build --release --target aarch64-apple-darwin        # macOS ARM64
+cargo build --release --target x86_64-apple-darwin          # macOS Intel
+cargo build --release --target aarch64-apple-ios            # iOS (macOS host)
+cargo build --release --target aarch64-linux-android        # Android (needs NDK)
 
-# Android NDK
-# Download android-ndk-r27c and place at project root
-
-# macOS
-cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
-
-# iOS
-cargo build --release --target aarch64-apple-ios
-
-# Android
-cargo build --release --target aarch64-linux-android
-
-# Linux x86_64 (via zigbuild)
+# Linux x86_64 cross-compile (requires cargo-zigbuild)
 pip3 install cargo-zigbuild
 cargo zigbuild --release --target x86_64-unknown-linux-gnu
 
-# Tests
-cargo test  # 148 tests
+# 3. Run tests (268 tests)
+cargo test
 ```
+
+**Note:** Android target requires Android NDK r27c. `./scripts/setup.sh` will offer to download it.
+macOS, iOS, and Linux targets build without NDK.
+
+Linking the library into your project:
+
+```
+# macOS / Linux
+target/aarch64-apple-darwin/release/libfastshell.dylib
+
+# iOS
+target/aarch64-apple-ios/release/libfastshell.a
+
+# Android
+target/aarch64-linux-android/release/libfastshell.so
+```
+
+Build artifacts per platform (reference):
+
+| Platform | Output File | Format | Approx Size |
+|----------|------------|--------|-------------|
+| macOS Apple Silicon | `libfastshell.dylib` | dynamic library | ~11 MB |
+| macOS Intel | `libfastshell.dylib` | dynamic library | ~13 MB |
+| iOS arm64 | `libfastshell.a` | static library | ~47 MB |
+| Android arm64 | `libfastshell.so` | shared library (.so) | ~12 MB |
+| Linux x86_64 | `libfastshell.so` | shared library (.so) | ~10 MB |
 
 ## Commands
 
@@ -323,6 +331,9 @@ cargo test  # 148 tests
 ### Control Flow
 `true` `false` `test` `expr` `timeout`
 
+### Database
+`sqlite3` (built-in, bundled — no system dependency)
+
 ### Device (requires plugin)
 `camera` `screencapture` `photolib` `record` `arecord` `play` `say` `speech` `contacts` `location` `clipboard` `pbpaste` `pbcopy` `sensor` `notify` `notify-send` `share` `open` `xdg-open` `auth` `battery` `vibrate` `screen` `device`
 
@@ -335,11 +346,13 @@ cargo test  # 148 tests
 fastshell/
 ├── src/
 │   ├── vfs/       # Layer 1 — Virtual sandbox filesystem
-│   ├── shell/     # Layer 1 — 160+ built-in shell commands (pure Rust)
+│   ├── shell/     # Layer 1 — 180+ built-in shell commands (pure Rust)
 │   ├── python/    # Layer 1 — Python engine (subprocess / CPython)
 │   ├── bridge/    # Layer 2 — Script execution, I/O, pipeline, glob
 │   └── sdk/       # Layer 3 — Public API + platform FFI (JNI / C)
-└── dist/          # Pre-built libraries per platform
+├── docs/          # Documentation (API, commands, integration, plugin, security, etc.)
+├── tests/         # Integration tests
+└── vendor/        # Embedded CPython 3.12 libraries
 ```
 
 ## Design Principles
