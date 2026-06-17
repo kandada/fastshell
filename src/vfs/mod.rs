@@ -49,6 +49,7 @@ pub struct DirEntry {
     pub modified: Option<SystemTime>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Vfs {
     root: PathBuf,
 }

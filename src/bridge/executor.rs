@@ -1,5 +1,6 @@
 use crate::python::PythonEngine;
 use crate::shell::{CommandOutput, Shell};
+use std::sync::mpsc;
 
 pub struct Runtime {
     shell: Shell,
@@ -54,51 +55,99 @@ impl Runtime {
     }
 
     fn execute_pipeline(&mut self, input: &str) -> CommandOutput {
-        let mut stages = parse_pipeline(input);
+        let stages = parse_pipeline(input);
         if stages.is_empty() {
             return CommandOutput::success(String::new());
         }
-        for stage in &mut stages {
-            let expanded = self.expand_globs(std::mem::take(stage));
-            *stage = expanded.into_iter().map(|s| ParsedToken::new(s, false)).collect();
+
+        let mut expanded_stages: Vec<Vec<ParsedToken>> = Vec::new();
+        for mut stage in stages {
+            let expanded = self.expand_globs(std::mem::take(&mut stage));
+            expanded_stages.push(expanded.into_iter().map(|s| ParsedToken::new(s, false)).collect());
         }
-        if stages.len() == 1 {
-            let mut flat: Vec<String> = stages[0].iter().map(|t| t.value.clone()).collect();
+
+        if expanded_stages.len() == 1 {
+            let mut flat: Vec<String> = expanded_stages[0].iter().map(|t| t.value.clone()).collect();
+            if flat.is_empty() { return CommandOutput::success(String::new()); }
             let cmd = flat.remove(0);
             let args: Vec<&str> = flat.iter().map(|s| s.as_str()).collect();
             return self.shell.execute(&cmd, &args, None);
         }
 
-        let mut stdin: Option<String> = None;
-        let mut stderr_all = String::new();
+        let saved_cwd = self.shell.cwd.clone();
+        let n = expanded_stages.len();
+        let last_idx = n - 1;
 
-        let last_idx = stages.len() - 1;
-        for (i, stage) in stages.iter().enumerate() {
-            if stage.is_empty() {
-                continue;
-            }
-            let cmd = &stage[0].value;
-            let args: Vec<&str> = stage[1..].iter().map(|t| t.value.as_str()).collect();
+        let mut threads: Vec<std::thread::JoinHandle<(i32, String, String)>> = Vec::new();
+        let mut prev_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
 
-            let mut result = self.shell.execute(cmd, &args, stdin.as_deref());
+        for (i, stage) in expanded_stages.into_iter().enumerate() {
+            if stage.is_empty() { continue; }
+            let cmd = stage[0].value.clone();
+            let args: Vec<String> = stage[1..].iter().map(|t| t.value.clone()).collect();
+            let mut shell = self.shell.clone();
+            let rx = prev_rx.take();
+            let is_last = i == last_idx;
 
-            if i < last_idx {
-                stdin = Some(result.stdout.clone());
-            }
-            if !result.stderr.is_empty() {
-                stderr_all.push_str(&result.stderr);
-                if i < last_idx {
-                    stderr_all.push('\n');
+            let (tx, next_rx) = if !is_last {
+                let (t, r) = mpsc::channel::<Vec<u8>>();
+                (Some(t), Some(r))
+            } else {
+                (None, None)
+            };
+
+            let handle = std::thread::spawn(move || {
+                let mut stdin_buf = String::new();
+                if let Some(rx) = rx {
+                    while let Ok(chunk) = rx.recv() {
+                        stdin_buf.push_str(&String::from_utf8_lossy(&chunk));
+                    }
                 }
-            }
+                let stdin = if stdin_buf.is_empty() { None } else { Some(stdin_buf) };
+                let stdin_ref = stdin.as_deref();
+                let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let result = shell.execute(&cmd, &args_refs, stdin_ref);
 
-            if i == last_idx {
-                result.stderr = stderr_all;
-                return result;
+                if let Some(tx) = tx {
+                    let _ = tx.send(result.stdout.as_bytes().to_vec());
+                }
+
+                (result.exit_code, result.stdout, result.stderr)
+            });
+
+            threads.push(handle);
+            prev_rx = next_rx;
+        }
+
+        let mut all_stderr = String::new();
+        let mut final_exit_code = 0;
+        let mut final_stdout = String::new();
+
+        for (i, handle) in threads.into_iter().enumerate() {
+            match handle.join() {
+                Ok((code, out, err)) => {
+                    if !err.is_empty() {
+                        if !all_stderr.is_empty() { all_stderr.push('\n'); }
+                        all_stderr.push_str(&err);
+                    }
+                    if i == last_idx {
+                        final_exit_code = code;
+                        final_stdout = out;
+                    }
+                }
+                Err(_) => {
+                    return CommandOutput::error("pipeline: thread panicked".to_string(), 1);
+                }
             }
         }
 
-        CommandOutput::success(String::new())
+        self.shell.cwd = saved_cwd;
+
+        CommandOutput {
+            stdout: final_stdout,
+            stderr: all_stderr,
+            exit_code: final_exit_code,
+        }
     }
 
     fn try_glob(&self, pattern: &str) -> Vec<String> {
@@ -193,6 +242,44 @@ impl Runtime {
 
     pub fn cwd(&self) -> &str {
         &self.shell.cwd
+    }
+
+    pub fn read_file(&self, path: &str) -> Result<String, String> {
+        let cwd = self.cwd().to_string();
+        self.shell.vfs.read_to_string(path, &cwd)
+            .map_err(|e| format!("read_file: {}", e))
+    }
+
+    pub fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
+        let cwd = self.cwd().to_string();
+        self.shell.vfs.write(path, &cwd, content)
+            .map_err(|e| format!("write_file: {}", e))
+    }
+
+    pub fn list_dir(&self, path: &str) -> Result<Vec<crate::sdk::types::FileEntry>, String> {
+        let cwd = self.cwd().to_string();
+        let entries = self.shell.vfs.list_dir(path, &cwd)
+            .map_err(|e| format!("list_dir: {}", e))?;
+        Ok(entries.into_iter().map(|de| {
+            let de_name = de.name.clone();
+            crate::sdk::types::FileEntry {
+                name: de.name,
+                path: if path.ends_with('/') { format!("{}{}", path, de_name) }
+                      else { format!("{}/{}", path, de_name) },
+                is_dir: de.is_dir,
+                size: de.size,
+            }
+        }).collect())
+    }
+
+    pub fn exists(&self, path: &str) -> bool {
+        let cwd = self.cwd().to_string();
+        self.shell.vfs.exists(path, &cwd)
+    }
+
+    pub fn is_dir(&self, path: &str) -> bool {
+        let cwd = self.cwd().to_string();
+        self.shell.vfs.is_dir(path, &cwd)
     }
 
     pub fn quick_execute(&mut self, command: &str) -> CommandOutput {

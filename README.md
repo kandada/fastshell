@@ -1,6 +1,6 @@
 # fastshell
 
-A lightweight, cross-platform shell runtime SDK for mobile AI agents — providing 75+ Linux-compatible commands, pipelines, glob expansion, and Python execution.
+A lightweight, cross-platform shell runtime SDK for mobile AI agents — providing 160+ Linux-compatible commands, pipelines, glob expansion, and Python execution.
 
 ## Why
 
@@ -9,7 +9,7 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 ## Features
 
 - **160+ built-in commands** — `ls`, `grep`, `sed`, `awk`, `jq`, `curl`, `git`, `tar`, `sha256sum`...
-- **Pipeline support** — `cat file | grep pattern | wc -l` works as expected
+- **Pipeline support** — True concurrent execution, each stage runs in its own thread with streaming channels
 - **Glob expansion** — `ls *.rs`, `cat src/**/*.rs`
 - **Regex** — Full regex in `grep` and `sed s///`
 - **Python engine** — `python -c '...'` and `.py` script execution
@@ -29,6 +29,8 @@ sdk.init(Config {
     sandbox_path: "/tmp/my-sandbox".into(),
     command_timeout_ms: 30_000,
     python_enabled: true,
+    allow_subprocess: true,
+    network_ask_permission: false,
 })?;
 
 let result = sdk.execute("echo hello | grep h | wc -c");
@@ -71,7 +73,7 @@ import os
 ret = os.system("mkdir -p /tmp/work")
 ```
 
-All 160+ built-in commands, pipelines, and globs are available. Commands not built-in fall through to the system shell.
+All 160+ built-in commands, pipelines, and globs are available. On desktop, unknown commands fall through to the system shell. On mobile, subprocess fallthrough is **disabled by default** — all execution stays in-process.
 
 ### Mobile (FFI)
 
@@ -85,6 +87,16 @@ fastshell_free_string(output);
 ## API
 
 ```rust
+pub struct Config {
+    pub sandbox_path: String,             // sandbox root path (required)
+    pub python_enabled: bool,             // enable Python engine
+    pub command_timeout_ms: u64,          // timeout in ms, 0 = no limit
+    pub allow_subprocess: bool,           // allow fallthrough to system shell
+                                          //   default: true on desktop, false on mobile
+    pub network_ask_permission: bool,     // prompt user before network access
+                                          //   default: true on mobile, false on desktop
+}
+
 impl Fastshell {
     pub fn new() -> Self;
     pub fn init(&mut self, config: Config) -> Result<(), String>;
@@ -103,18 +115,112 @@ impl Fastshell {
     pub fn config(&self) -> &Config;
     pub fn vfs_root(&self) -> String;
     pub fn shutdown(&mut self);
+
+    // Permission management (mobile)
+    pub fn set_permission(&self, resource: &str, allowed: bool);
+    pub fn check_permission(&self, resource: &str) -> Option<bool>;
+    pub fn clear_permissions(&self);
+
+    // Cancel a running command (for timeout/interrupt)
+    pub fn cancel_execution(&self);
+}
+
+pub struct CommandResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    // exit_code == 100 → permission needed (see below)
 }
 ```
+
+## Permission System (Mobile)
+
+fastshell does not make authorization decisions. Instead, it uses a **special exit code** to delegate to the host app:
+
+```
+1. Script runs "curl http://example.com"
+2. fastshell checks: is "network:example.com" granted?
+3. If not → returns { exit_code: 100, stderr: "PERMISSION_NEEDED:network:example.com" }
+4. Host app detects exit_code=100 → shows native dialog: "Allow network access to example.com?"
+5. User taps "Allow" → host calls sdk.set_permission("network:example.com", true) → retries command
+```
+
+**Resource types:**
+| Resource | Triggered by |
+|----------|-------------|
+| `network:<host>` | `curl`, `wget`, `ping`, `ssh`, `nslookup` |
+| `network:*` | Grant all network access at once |
+
+**Flow:**
+```rust
+let result = sdk.execute("curl http://example.com");
+if result.exit_code == 100 {
+    // parse stderr for resource, show native dialog
+    sdk.set_permission("network:example.com", true);
+    let result = sdk.execute("curl http://example.com"); // retry
+}
+```
+
+## Mobile Integration Notes
+
+### Single-Process Guarantee
+
+On mobile (`allow_subprocess = false`), fastshell is **100% single-process** — all commands, pipelines,
+and Python execution run within the host app's process. No `fork()`, no child processes. This avoids:
+
+- **Android 12+ Phantom Process Killer** — kills apps with >32 total processes (all apps combined)
+- **iOS `fork()` prohibition** — iOS forbids process forking entirely
+
+### Pipeline Concurrency
+
+Pipelines now use **true threading** — each stage runs in its own thread with `mpsc` streaming channels:
+
+```
+ls -la | grep foo | wc -l
+  Thread 1    Thread 2    Thread 3
+```
+
+### VFS Root Directory
+
+| Platform | Recommended path |
+|----------|-----------------|
+| Android | `/data/data/<pkg>/files/fastshell` |
+| iOS | `<app>/Documents/fastshell` (NOT `Library/Caches`) |
+| Desktop | Any writable path |
+
+### Network Configuration
+
+| Platform | Requirement |
+|----------|------------|
+| iOS | Add `NSAllowsArbitraryLoads` to `Info.plist`, or configure per-domain exceptions via `NSAppTransportSecurity` |
+| Android | Add `android:usesCleartextTraffic="true"` to `AndroidManifest.xml` |
+
+Without these, HTTP requests from `curl`/`wget` will fail silently on mobile.
+
+### Keep-Alive (Android)
+
+Host app should implement a **Foreground Service** with a persistent notification to prevent
+Android from killing the process in background. See [dontkillmyapp.com](https://dontkillmyapp.com)
+for vendor-specific instructions.
+
+### Subprocess Fallthrough
+
+| Platform | Default | Behavior |
+|----------|---------|----------|
+| Android / iOS | `allow_subprocess = false` | Unknown commands return "command not found (subprocess disabled)" |
+| macOS / Linux | `allow_subprocess = true` | Unknown commands forwarded to system shell |
+
+Built-in commands (`ls`, `grep`, `curl`, `git`, etc.) work everywhere regardless of this setting.
 
 ## Pre-built Libraries
 
 | Platform | File | Size |
 |----------|------|------|
-| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.1.0.dylib` | 7.8 MB |
-| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.1.0.dylib` | 8.6 MB |
-| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.1.0.a` | 38 MB |
-| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.1.0.so` | 9.6 MB |
-| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.1.0.so` | 8.0 MB |
+| macOS Apple Silicon | `dist/aarch64-apple-darwin/libfastshell-0.2.0.dylib` | 8.0 MB |
+| macOS Intel | `dist/x86_64-apple-darwin/libfastshell-0.2.0.dylib` | 9.0 MB |
+| iOS arm64 | `dist/aarch64-apple-ios/libfastshell-0.2.0.a` | 39 MB |
+| Android arm64 | `dist/aarch64-linux-android/libfastshell-0.2.0.so` | 10 MB |
+| Linux x86_64 | `dist/x86_64-unknown-linux-gnu/libfastshell-0.2.0.so` | 8.5 MB |
 
 ## Build from Source
 
@@ -144,7 +250,7 @@ pip3 install cargo-zigbuild
 cargo zigbuild --release --target x86_64-unknown-linux-gnu
 
 # Tests
-cargo test  # 115 tests
+cargo test  # 148 tests
 ```
 
 ## Commands
@@ -193,8 +299,9 @@ fastshell/
 
 - **Lightweight** — Pure Rust implementation, no BusyBox dependency, no GPL licensing issues
 - **Compatible** — Commands behave identically to Linux; AI agents need no retraining
-- **Secure** — VFS sandbox isolation, path escape prevention, command timeout control
+- **Secure** — VFS sandbox isolation, path escape prevention, command timeout control, single-process on mobile
 - **Cross-platform** — Unified API, same Rust core across Android / iOS / macOS / Linux
+- **Permission-driven** — Network access requires host app authorization; fastshell never decides on its own
 
 ## License
 

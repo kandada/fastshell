@@ -527,6 +527,10 @@ impl Shell {
             return CommandOutput::error("nslookup: missing hostname\n".to_string(), 1);
         }
 
+        if let Some(perm) = self.check_network_permission(host) {
+            return perm;
+        }
+
         let output = std::process::Command::new("nslookup")
             .arg(host)
             .output();

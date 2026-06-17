@@ -1,8 +1,12 @@
 use crate::vfs::Vfs;
 use std::fs;
 use std::process::Command as ProcessCommand;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 pub mod commands;
+
+pub const EXIT_NEED_PERMISSION: i32 = 100;
 
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -27,11 +31,27 @@ impl CommandOutput {
             exit_code,
         }
     }
+
+    pub fn permission_needed(resource_type: &str, resource: &str) -> Self {
+        CommandOutput {
+            stdout: String::new(),
+            stderr: format!("PERMISSION_NEEDED:{}:{}", resource_type, resource),
+            exit_code: EXIT_NEED_PERMISSION,
+        }
+    }
+
+    pub fn needs_permission(&self) -> bool {
+        self.exit_code == EXIT_NEED_PERMISSION
+    }
 }
 
+#[derive(Clone)]
 pub struct Shell {
     pub vfs: Vfs,
     pub cwd: String,
+    pub allow_subprocess: bool,
+    pub network_ask_permission: bool,
+    pub permissions: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 impl Shell {
@@ -39,6 +59,42 @@ impl Shell {
         Shell {
             vfs,
             cwd: "/".to_string(),
+            allow_subprocess: true,
+            network_ask_permission: false,
+            permissions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn new_with_config(
+        vfs: Vfs,
+        allow_subprocess: bool,
+        network_ask_permission: bool,
+        permissions: Arc<Mutex<HashMap<String, bool>>>,
+    ) -> Self {
+        Shell {
+            vfs,
+            cwd: "/".to_string(),
+            allow_subprocess,
+            network_ask_permission,
+            permissions,
+        }
+    }
+
+    pub fn check_network_permission(&self, host: &str) -> Option<CommandOutput> {
+        if !self.network_ask_permission {
+            return None;
+        }
+        let resource = format!("network:{}", host);
+        if let Ok(perms) = self.permissions.lock() {
+            match perms.get(&resource) {
+                Some(&true) => None,
+                Some(&false) => Some(CommandOutput::error(
+                    format!("Permission denied for {}\n", resource), 1,
+                )),
+                None => Some(CommandOutput::permission_needed("network", host)),
+            }
+        } else {
+            None
         }
     }
 
@@ -207,11 +263,19 @@ impl Shell {
             "ethtool" => self.cmd_ethtool(args),
             "service" => self.cmd_service(args),
             "showmount" => self.cmd_showmount(args),
-            _ => self.run_subprocess(command, args),
+            _ => {
+                if self.allow_subprocess {
+                    self.run_subprocess(command, args)
+                } else {
+                    CommandOutput {
+                        stdout: String::new(),
+                        stderr: format!("{}: command not found (subprocess disabled)\n", command),
+                        exit_code: 127,
+                    }
+                }
+            }
         }
     }
-
-    // ── command implementations moved to commands/*.rs ──
 
     fn run_subprocess(&self, command: &str, args: &[&str]) -> CommandOutput {
         let vfs_root = self.vfs.root().to_path_buf();
@@ -1261,7 +1325,34 @@ mod tests {
     #[test]
     fn test_command_not_found() {
         let mut shell = mk_shell();
+        shell.allow_subprocess = false;
         let out = shell.execute("nonexistent_command_xyz", &[], None);
         assert_ne!(out.exit_code, 0);
+        assert!(out.stderr.contains("command not found"));
+    }
+
+    #[test]
+    fn test_command_not_found_subprocess_enabled() {
+        let mut shell = mk_shell();
+        shell.allow_subprocess = true;
+        let out = shell.execute("nonexistent_command_xyz", &[], None);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn test_subprocess_disabled_returns_error() {
+        let mut shell = mk_shell();
+        shell.allow_subprocess = false;
+        let out = shell.execute("some_unknown_tool", &["--flag"], None);
+        assert_eq!(out.exit_code, 127);
+        assert!(out.stderr.contains("subprocess disabled"));
+    }
+
+    #[test]
+    fn test_permission_needed_output() {
+        let out = CommandOutput::permission_needed("network", "example.com");
+        assert!(out.needs_permission());
+        assert_eq!(out.exit_code, EXIT_NEED_PERMISSION);
+        assert!(out.stderr.contains("PERMISSION_NEEDED:network:example.com"));
     }
 }

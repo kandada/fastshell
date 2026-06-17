@@ -59,6 +59,8 @@ pub mod android {
         let config = crate::sdk::types::Config {
             sandbox_path,
             python_enabled: true,
+            allow_subprocess: false,
+            network_ask_permission: true,
             command_timeout_ms: 30_000,
         };
 
@@ -94,6 +96,29 @@ pub mod android {
         let cwd = sdk.get_cwd();
         std::ffi::CString::new(cwd).unwrap().into_raw()
     }
+
+    #[no_mangle]
+    pub extern "C" fn Java_com_fastshell_Sdk_nativeSetPermission(
+        _env: *mut std::os::raw::c_void,
+        _class: *mut std::os::raw::c_void,
+        resource: *const std::os::raw::c_char,
+        allowed: u8,
+    ) {
+        let resource = unsafe {
+            std::ffi::CStr::from_ptr(resource).to_string_lossy().to_string()
+        };
+        let sdk = get_sdk().lock().unwrap();
+        sdk.set_permission(&resource, allowed != 0);
+    }
+
+    #[no_mangle]
+    pub extern "C" fn Java_com_fastshell_Sdk_nativeCancelExecution(
+        _env: *mut std::os::raw::c_void,
+        _class: *mut std::os::raw::c_void,
+    ) {
+        let sdk = get_sdk().lock().unwrap();
+        sdk.cancel_execution();
+    }
 }
 
 #[cfg(target_os = "ios")]
@@ -112,6 +137,8 @@ pub mod ios {
         let config = crate::sdk::types::Config {
             sandbox_path,
             python_enabled: true,
+            allow_subprocess: false,
+            network_ask_permission: true,
             command_timeout_ms: 30_000,
         };
 
@@ -133,6 +160,21 @@ pub mod ios {
         let result = sdk.execute(&command);
         result_to_cstring(&result)
     }
+
+    #[no_mangle]
+    pub extern "C" fn fastshell_ios_set_permission(resource: *const std::os::raw::c_char, allowed: u8) {
+        let resource = unsafe {
+            std::ffi::CStr::from_ptr(resource).to_string_lossy().to_string()
+        };
+        let sdk = get_sdk().lock().unwrap();
+        sdk.set_permission(&resource, allowed != 0);
+    }
+
+    #[no_mangle]
+    pub extern "C" fn fastshell_ios_cancel_execution() {
+        let sdk = get_sdk().lock().unwrap();
+        sdk.cancel_execution();
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -151,6 +193,8 @@ pub mod c_ffi {
         let config = crate::sdk::types::Config {
             sandbox_path,
             python_enabled: true,
+            allow_subprocess: false,
+            network_ask_permission: true,
             command_timeout_ms: 30_000,
         };
 
@@ -171,5 +215,20 @@ pub mod c_ffi {
         let sdk = get_sdk().lock().unwrap();
         let result = sdk.execute(&command);
         result_to_cstring(&result)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn fastshell_set_permission(resource: *const std::os::raw::c_char, allowed: u8) {
+        let resource = unsafe {
+            std::ffi::CStr::from_ptr(resource).to_string_lossy().to_string()
+        };
+        let sdk = get_sdk().lock().unwrap();
+        sdk.set_permission(&resource, allowed != 0);
+    }
+
+    #[no_mangle]
+    pub extern "C" fn fastshell_cancel_execution() {
+        let sdk = get_sdk().lock().unwrap();
+        sdk.cancel_execution();
     }
 }

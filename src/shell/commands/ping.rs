@@ -36,13 +36,17 @@ impl Shell {
             None => return CommandOutput::error("ping: missing host\n".to_string(), 1),
         };
 
+        let hostname = host.split(':').next().unwrap_or(&host);
+        if let Some(perm) = self.check_network_permission(hostname) {
+            return perm;
+        }
+
         let port = if host.contains(':') {
             let parts: Vec<&str> = host.split(':').collect();
             parts[1].parse().unwrap_or(80)
         } else {
             80
         };
-        let hostname = host.split(':').next().unwrap_or(&host);
 
         let addr = format!("{}:{}", hostname, port);
 

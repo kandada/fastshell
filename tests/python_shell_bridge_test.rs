@@ -10,7 +10,7 @@ fn setup() -> Fastshell {
     let dir = std::env::temp_dir().join(format!("fs_pybridge_{}_{}", std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
     let mut sdk = Fastshell::new();
-    sdk.init(Config { sandbox_path: dir.to_string_lossy().to_string(), python_enabled: true, command_timeout_ms: 0 }).unwrap();
+    sdk.init(Config { sandbox_path: dir.to_string_lossy().to_string(), python_enabled: true, allow_subprocess: true, network_ask_permission: false, command_timeout_ms: 0 }).unwrap();
     sdk.write_file("hello.py", "print('hello from python')").unwrap();
     sdk
 }

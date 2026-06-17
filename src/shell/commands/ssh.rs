@@ -46,6 +46,10 @@ impl Shell {
             ("root".to_string(), target.clone())
         };
 
+        if let Some(perm) = self.check_network_permission(&host) {
+            return perm;
+        }
+
         let command = command.unwrap_or_else(|| "hostname".to_string());
 
         let rt = match tokio::runtime::Runtime::new() {

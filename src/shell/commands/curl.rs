@@ -46,6 +46,11 @@ impl Shell {
             None => return CommandOutput::error("curl: no URL specified\n".to_string(), 1),
         };
 
+        let curl_host = url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or(&url).split(':').next().unwrap_or(&url);
+        if let Some(perm) = self.check_network_permission(curl_host) {
+            return perm;
+        }
+
         let result = crate::shell::http_request(&method, &url, data.as_deref(), follow_redirects);
 
         match result {

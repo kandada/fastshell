@@ -8,6 +8,8 @@ use crate::shell::Shell;
 use crate::vfs::Vfs;
 use types::*;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 use std::time::Duration;
 use std::ffi::{c_char, CStr, CString};
 
@@ -16,6 +18,8 @@ pub struct Fastshell {
     config: Config,
     initialized: bool,
     env_vars: std::collections::HashMap<String, String>,
+    permissions: Arc<Mutex<HashMap<String, bool>>>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl Fastshell {
@@ -30,6 +34,8 @@ impl Fastshell {
             config: Config::default(),
             initialized: false,
             env_vars: std::collections::HashMap::new(),
+            permissions: Arc::new(Mutex::new(HashMap::new())),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -40,7 +46,9 @@ impl Fastshell {
         let sandbox_path = std::path::PathBuf::from(&config.sandbox_path);
         let vfs = Vfs::new(sandbox_path.clone()).map_err(|e| format!("Failed to initialize VFS: {}", e))?;
 
-        let shell = Shell::new(vfs);
+        let permissions = Arc::new(Mutex::new(HashMap::new()));
+        let shell = Shell::new_with_config(vfs, config.allow_subprocess, config.network_ask_permission, permissions.clone());
+
         let python: Option<Box<dyn PythonEngine>> = if config.python_enabled {
             Some(python::detect_python_engine(&sandbox_path))
         } else {
@@ -51,6 +59,7 @@ impl Fastshell {
         self.config = config;
         self.initialized = true;
         self.env_vars.clear();
+        self.permissions = permissions;
 
         cpython::register_shell_execute(fastshell_shell_exec_c);
         cpython::register_shell_free(fastshell_shell_free_c);
@@ -75,11 +84,22 @@ impl Fastshell {
             return CommandResult::from_code(output.stdout, output.stderr, output.exit_code);
         }
 
+        self.cancel_flag.store(false, Ordering::SeqCst);
         let rt = self.runtime.clone();
+        let cancel = self.cancel_flag.clone();
         let cmd = command.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            if cancel.load(Ordering::SeqCst) {
+                let _ = tx.send(crate::shell::CommandOutput::error("cancelled".to_string(), 143));
+                return;
+            }
             let mut runtime = rt.lock().unwrap();
+            if cancel.load(Ordering::SeqCst) {
+                drop(runtime);
+                let _ = tx.send(crate::shell::CommandOutput::error("cancelled".to_string(), 143));
+                return;
+            }
             let output = runtime.execute(&cmd);
             let _ = tx.send(output);
         });
@@ -87,6 +107,7 @@ impl Fastshell {
         match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
             Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.cancel_flag.store(true, Ordering::SeqCst);
                 CommandResult {
                     stdout: String::new(),
                     stderr: "command timed out\n".to_string(),
@@ -95,6 +116,10 @@ impl Fastshell {
             }
             Err(_) => CommandResult::error("internal error".to_string()),
         }
+    }
+
+    pub fn cancel_execution(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
     }
 
     pub fn execute_python(&self, code: &str) -> CommandResult {
@@ -128,14 +153,7 @@ impl Fastshell {
             return Err("SDK not initialized".to_string());
         }
         let rt = self.runtime.lock().unwrap();
-        let vfs_root = rt.shell_root_dir();
-        let cwd = rt.cwd();
-        let full_path = if path.starts_with('/') {
-            vfs_root.join(path.trim_start_matches('/'))
-        } else {
-            vfs_root.join(cwd.trim_start_matches('/')).join(path)
-        };
-        std::fs::read_to_string(&full_path).map_err(|e| e.to_string())
+        rt.read_file(path)
     }
 
     pub fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
@@ -143,17 +161,7 @@ impl Fastshell {
             return Err("SDK not initialized".to_string());
         }
         let rt = self.runtime.lock().unwrap();
-        let vfs_root = rt.shell_root_dir();
-        let cwd = rt.cwd();
-        let full_path = if path.starts_with('/') {
-            vfs_root.join(path.trim_start_matches('/'))
-        } else {
-            vfs_root.join(cwd.trim_start_matches('/')).join(path)
-        };
-        if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&full_path, content).map_err(|e| e.to_string())
+        rt.write_file(path, content)
     }
 
     pub fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, String> {
@@ -161,53 +169,19 @@ impl Fastshell {
             return Err("SDK not initialized".to_string());
         }
         let rt = self.runtime.lock().unwrap();
-        let vfs_root = rt.shell_root_dir();
-        let cwd = rt.cwd();
-        let full_path = if path.starts_with('/') {
-            vfs_root.join(path.trim_start_matches('/'))
-        } else {
-            vfs_root.join(cwd.trim_start_matches('/')).join(path)
-        };
-        let entries = std::fs::read_dir(&full_path).map_err(|e| e.to_string())?;
-        let mut result = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let metadata = entry.metadata().map_err(|e| e.to_string())?;
-            result.push(FileEntry {
-                name: entry.file_name().to_string_lossy().to_string(),
-                path: entry.path().to_string_lossy().to_string(),
-                is_dir: metadata.is_dir(),
-                size: metadata.len(),
-            });
-        }
-        result.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(result)
+        rt.list_dir(path)
     }
 
     pub fn exists(&self, path: &str) -> bool {
         if !self.initialized { return false; }
         let rt = self.runtime.lock().unwrap();
-        let vfs_root = rt.shell_root_dir();
-        let cwd = rt.cwd();
-        let full_path = if path.starts_with('/') {
-            vfs_root.join(path.trim_start_matches('/'))
-        } else {
-            vfs_root.join(cwd.trim_start_matches('/')).join(path)
-        };
-        full_path.exists()
+        rt.exists(path)
     }
 
     pub fn is_dir(&self, path: &str) -> bool {
         if !self.initialized { return false; }
         let rt = self.runtime.lock().unwrap();
-        let vfs_root = rt.shell_root_dir();
-        let cwd = rt.cwd();
-        let full_path = if path.starts_with('/') {
-            vfs_root.join(path.trim_start_matches('/'))
-        } else {
-            vfs_root.join(cwd.trim_start_matches('/')).join(path)
-        };
-        full_path.is_dir()
+        rt.is_dir(path)
     }
 
     pub fn set_env(&mut self, key: &str, value: &str) {
@@ -232,6 +206,23 @@ impl Fastshell {
             platform: std::env::consts::OS.to_string(),
             python_available,
             sandbox_path: self.config.sandbox_path.clone(),
+            allow_subprocess: self.config.allow_subprocess,
+        }
+    }
+
+    pub fn set_permission(&self, resource: &str, allowed: bool) {
+        if let Ok(mut perms) = self.permissions.lock() {
+            perms.insert(resource.to_string(), allowed);
+        }
+    }
+
+    pub fn check_permission(&self, resource: &str) -> Option<bool> {
+        self.permissions.lock().ok().and_then(|perms| perms.get(resource).copied())
+    }
+
+    pub fn clear_permissions(&self) {
+        if let Ok(mut perms) = self.permissions.lock() {
+            perms.clear();
         }
     }
 
@@ -298,6 +289,8 @@ mod tests {
         let config = Config {
             sandbox_path: dir.to_string_lossy().to_string(),
             python_enabled: true,
+            allow_subprocess: true,
+            network_ask_permission: false,
             ..Default::default()
         };
         sdk.init(config).unwrap();
@@ -393,7 +386,7 @@ mod tests {
     fn test_get_info() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.1.0");
+        assert_eq!(info.version, "0.2.0");
         assert!(!info.platform.is_empty());
     }
 
@@ -411,5 +404,89 @@ mod tests {
         let mut sdk = Fastshell::new();
         let config = Config { sandbox_path: String::new(), ..Default::default() };
         assert!(sdk.init(config).is_err());
+    }
+
+    #[test]
+    fn test_subprocess_disabled_by_default_on_mobile() {
+        let default_config = Config::default();
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        assert!(!default_config.allow_subprocess);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        assert!(default_config.allow_subprocess);
+    }
+
+    #[test]
+    fn test_network_ask_permission_default_on_mobile() {
+        let default_config = Config::default();
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        assert!(default_config.network_ask_permission);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        assert!(!default_config.network_ask_permission);
+    }
+
+    #[test]
+    fn test_permission_management() {
+        let sdk = setup_sdk();
+        assert_eq!(sdk.check_permission("network:example.com"), None);
+        sdk.set_permission("network:example.com", true);
+        assert_eq!(sdk.check_permission("network:example.com"), Some(true));
+        sdk.set_permission("network:example.com", false);
+        assert_eq!(sdk.check_permission("network:example.com"), Some(false));
+        sdk.clear_permissions();
+        assert_eq!(sdk.check_permission("network:example.com"), None);
+    }
+
+    #[test]
+    fn test_network_permission_denied() {
+        let mut sdk = Fastshell::new();
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("fastshell_sdk_perm_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let config = Config {
+            sandbox_path: dir.to_string_lossy().to_string(),
+            python_enabled: false,
+            allow_subprocess: false,
+            network_ask_permission: true,
+            command_timeout_ms: 5_000,
+        };
+        sdk.init(config).unwrap();
+
+        let result = sdk.execute("curl http://example.com");
+        assert_eq!(result.exit_code, EXIT_NEED_PERMISSION);
+        assert!(result.stderr.contains("PERMISSION_NEEDED:network:example.com"));
+
+        sdk.set_permission("network:example.com", true);
+        let result = sdk.execute("curl http://example.com");
+        assert_ne!(result.exit_code, EXIT_NEED_PERMISSION);
+    }
+
+    #[test]
+    fn test_command_not_found_subprocess_disabled() {
+        let mut sdk = Fastshell::new();
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("fastshell_sdk_nosub_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let config = Config {
+            sandbox_path: dir.to_string_lossy().to_string(),
+            python_enabled: false,
+            allow_subprocess: false,
+            network_ask_permission: false,
+            command_timeout_ms: 5_000,
+        };
+        sdk.init(config).unwrap();
+
+        let result = sdk.execute("nonexistent_xyz_123");
+        assert_eq!(result.exit_code, 127);
+        assert!(result.stderr.contains("subprocess disabled"));
+    }
+
+    #[test]
+    fn test_sdk_info_includes_allow_subprocess() {
+        let sdk = setup_sdk();
+        let info = sdk.get_info();
+        assert_eq!(info.version, "0.2.0");
+        assert!(info.allow_subprocess);
     }
 }

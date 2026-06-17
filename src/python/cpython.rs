@@ -72,7 +72,7 @@ pub extern "C" fn fastshell_python_shell_free(ptr: *mut c_char) {
 }
 
 const PYTHON_WRAPPER: &str = r#"
-import ctypes, json, asyncio, io
+import ctypes, json, asyncio, io, builtins, os as _os_module
 
 try:
     _fs_lib = ctypes.CDLL(None)
@@ -96,6 +96,40 @@ if _fs_exec is not None:
         r = json.loads(raw.decode('utf-8'))
         _fs_free(ptr)
         return r
+
+    _sandbox_root = _os_module.environ.get('FASTSHELL_ROOT', '')
+    _sandbox_cwd = _os_module.environ.get('FASTSHELL_CWD', '/')
+
+    _real_open = builtins.open
+    def _sandboxed_open(file, mode='r', *args, **kwargs):
+        if _sandbox_root:
+            if not _os_module.path.isabs(file):
+                file = _os_module.path.normpath(_os_module.path.join(_sandbox_root, _sandbox_cwd.lstrip('/'), file))
+            else:
+                file = _os_module.path.normpath(_os_module.path.join(_sandbox_root, file.lstrip('/')))
+        return _real_open(file, mode, *args, **kwargs)
+    builtins.open = _sandboxed_open
+
+    _real_chdir = _os_module.chdir
+    def _sandboxed_chdir(path):
+        nonlocal _sandbox_cwd
+        if _sandbox_root:
+            if _os_module.path.isabs(path):
+                _sandbox_cwd = path
+            else:
+                _sandbox_cwd = _os_module.path.normpath(_os_module.path.join(_sandbox_cwd, path))
+        _real_chdir(path)
+    _os_module.chdir = _sandboxed_chdir
+
+    _real_listdir = _os_module.listdir
+    def _sandboxed_listdir(path='.'):
+        if _sandbox_root:
+            if not _os_module.path.isabs(path):
+                path = _os_module.path.normpath(_os_module.path.join(_sandbox_root, _sandbox_cwd.lstrip('/'), path))
+            else:
+                path = _os_module.path.normpath(_os_module.path.join(_sandbox_root, path.lstrip('/')))
+        return _real_listdir(path)
+    _os_module.listdir = _sandboxed_listdir
 
     class _FastShellProcess:
         def __init__(self, command, cwd=None, env=None):
@@ -165,11 +199,10 @@ if _fs_exec is not None:
         return _FastShellProcess(cmd_str, kwargs.get('cwd'), kwargs.get('env'))
     _sp.Popen = _hooked_Popen
 
-    import os as _os
-    _os.system = lambda cmd: _fs_run(cmd).get("returncode", 0)
+    _os_module.system = lambda cmd: _fs_run(cmd).get("returncode", 0)
 
-    del ctypes, json, asyncio, io, _sp, _os, _orig_csp, _orig_run
-del _fs_exec, _fs_free, _fs_run, _FastShellProcess, _hooked_csp, _hooked_run, _hooked_Popen
+    del ctypes, json, asyncio, io, _sp, _orig_csp, _orig_run
+del _fs_exec, _fs_free, _fs_run, _FastShellProcess, _hooked_csp, _hooked_run, _hooked_Popen, _sandbox_root, _sandbox_cwd, _sandboxed_open, _real_open, _real_chdir, _real_listdir
 "#;
 
 pub struct CpythonEngine {
@@ -278,6 +311,10 @@ impl CpythonEngine {
 
         let capture_out = cwd.join(".fs_capture_out");
         let capture_err = cwd.join(".fs_capture_err");
+
+        std::env::set_var("FASTSHELL_ROOT", cwd.to_string_lossy().as_ref());
+        std::env::set_var("FASTSHELL_CWD", "/");
+
         let wrapped = format!(
             r#"
 import sys

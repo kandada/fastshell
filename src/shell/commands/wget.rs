@@ -25,6 +25,11 @@ impl Shell {
             None => return CommandOutput::error("wget: missing URL\n".to_string(), 1),
         };
 
+        let wget_host = url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or(&url).split(':').next().unwrap_or(&url);
+        if let Some(perm) = self.check_network_permission(wget_host) {
+            return perm;
+        }
+
         let result = crate::shell::http_request("GET", &url, None, true);
         match result {
             Ok(body) => {
