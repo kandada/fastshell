@@ -73,8 +73,9 @@ If a pipeline thread panics, the panic is caught via `std::panic::catch_unwind` 
 1. **Set sandbox_path to a dedicated directory** — not shared with other app data
 2. **Set command_timeout_ms** — prevent infinite loops from consuming resources
 3. **Implement Foreground Service** (Android) — prevent OS from killing the app
-4. **Bundle Python libraries at build time** — avoid runtime downloads (iOS review)
+4. **Python 代码随 App 打包** — CPython 解释器（vendor/python/，编译期嵌入）、pip 依赖包（app assets → sandbox/site-packages/）、aacode 源码（app assets → sandbox/）均应随 APK/IPA 一同分发。fastshell 的 `execute()` 会自动将 sandbox 和 site-packages 路径注入 `sys.path`，`import` 正常可用。移动端无需也无法使用 `pip install`
 5. **Configure cleartext traffic** (Android) and **ATS exceptions** (iOS) — enable HTTP
+6. **`CpythonDownloader::ensure_available()` 仅开发调试用** — 生产构建中 CPython 已在编译期嵌入，无需运行时下载
 
 ### For Development
 

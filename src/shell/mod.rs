@@ -561,21 +561,22 @@ pub(crate) struct ProcInfo {
 }
 
 pub(crate) fn list_processes() -> Result<Vec<ProcInfo>, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
+        // Android uses the Linux kernel and exposes /proc just like desktop Linux
         list_processes_linux()
     }
     #[cfg(target_os = "macos")]
     {
         list_processes_macos()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "android")))]
     {
         Err("ps: not supported on this platform".to_string())
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn list_processes_linux() -> Result<Vec<ProcInfo>, String> {
     let mut procs = Vec::new();
     let proc_dir = std::path::Path::new("/proc");
@@ -610,7 +611,7 @@ fn list_processes_linux() -> Result<Vec<ProcInfo>, String> {
     Ok(procs)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn read_proc_stat_total_cpu() -> Result<u64, String> {
     let stat = fs::read_to_string("/proc/stat").map_err(|e| e.to_string())?;
     for line in stat.lines() {
@@ -626,7 +627,7 @@ fn read_proc_stat_total_cpu() -> Result<u64, String> {
     Ok(1)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn parse_proc_stat(pid: u32, stat: &str, _total_cpu: u64) -> Option<ProcInfo> {
     let parts: Vec<&str> = stat.split_whitespace().collect();
     if parts.len() < 25 {
@@ -634,7 +635,7 @@ fn parse_proc_stat(pid: u32, stat: &str, _total_cpu: u64) -> Option<ProcInfo> {
     }
 
     let comm = parts[1].trim_matches('(').trim_matches(')').to_string();
-    let state = parts[2].chars().next()?;
+    let _state = parts[2].chars().next()?;
     let ppid: u32 = parts[3].parse().ok()?;
     let utime: u64 = parts[13].parse().ok()?;
     let stime: u64 = parts[14].parse().ok()?;
@@ -661,7 +662,7 @@ fn parse_proc_stat(pid: u32, stat: &str, _total_cpu: u64) -> Option<ProcInfo> {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn read_proc_uid(pid: u32) -> Option<u32> {
     let path = format!("/proc/{}/status", pid);
     let status = fs::read_to_string(&path).ok()?;
@@ -676,7 +677,7 @@ fn read_proc_uid(pid: u32) -> Option<u32> {
     None
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn read_proc_cmdline(pid: u32) -> Option<String> {
     let path = format!("/proc/{}/cmdline", pid);
     let data = fs::read(&path).ok()?;
@@ -1702,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_human_numeric_with_B() {
+    fn test_sort_human_numeric_with_b() {
         let shell = mk_shell();
         shell.vfs.write("/f.txt", "", "3MB\n1GB\n2KB\n").unwrap();
         let out = shell.cmd_sort(&["-h", "/f.txt"], None);

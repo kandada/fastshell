@@ -357,7 +357,6 @@ fn run_parallel_chunks(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::shell::Shell;
     use crate::vfs::Vfs;
     use std::fs;

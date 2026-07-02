@@ -13,6 +13,7 @@ impl Shell {
             let id = unsafe { libc::gethostid() };
             return CommandOutput::success(format!("{:08x}\n", id));
         }
+        #[allow(unreachable_code)]
         CommandOutput::success("00000000\n".to_string())
     }
 
@@ -43,7 +44,7 @@ impl Shell {
     }
 
     pub fn cmd_vmstat(&self, args: &[&str]) -> CommandOutput {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             let mut out = String::new();
             if let Ok(s) = std::fs::read_to_string("/proc/vmstat") {

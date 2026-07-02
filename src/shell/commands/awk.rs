@@ -819,7 +819,6 @@ fn is_operator_at(s: &str, pos: usize, op: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::shell::Shell;
     use crate::vfs::Vfs;
     use std::fs;

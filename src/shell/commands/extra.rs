@@ -32,7 +32,7 @@ impl Shell {
             Ok(f) => f,
             Err(_) => return CommandOutput::error(format!("nohup: cannot create {}\n", out_path.display()), 1),
         };
-        let mut child = match std::process::Command::new(cmd).args(&cmd_args).current_dir(&cwd)
+        let child = match std::process::Command::new(cmd).args(&cmd_args).current_dir(&cwd)
             .stdout(std::process::Stdio::from(out_file))
             .stderr(std::process::Stdio::inherit()).spawn() {
             Ok(c) => c, Err(e) => return CommandOutput::error(format!("nohup: {}\n", e), 1),

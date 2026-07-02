@@ -108,9 +108,16 @@ let documentsPath = FileManager.default
 
 ### App Store Review
 
-Interpreted code execution (Python) is allowed if all scripts and the interpreter are bundled with the app (not downloaded at runtime). fastshell's CPython is embedded at build time, meeting this requirement.
+Apple App Store 审核指南 (Section 2.5.2) 要求 App 的主要功能代码随安装包提供，Google Play 也有类似政策。Python 作为一种解释型语言，只要脚本和解释器都随 App 打包，就是合规的。
 
-Downloading Python packages at runtime (pip) is a gray area — bundle needed libraries at build time instead.
+fastshell 的设计完全适配这个场景：
+- **CPython 解释器**：编译期通过 `include_bytes!()` 嵌入，App 启动时从二进制解压到沙箱，无需网络
+- **Python 脚本和依赖**：建议在构建阶段放入 App assets，首次启动拷贝到沙箱。fastshell 的 `execute()` 会自动将 `sandbox/python/site-packages/` 注入 `sys.path`，使 `import` 能正确解析
+- **不依赖运行时下载**：`pip install` 在移动端本来就没有可用的 pip 环境和 shell，因此这个限制自然成立
+
+`CpythonDownloader::ensure_available()` 仅用于桌面端开发调试。生产构建时 CPython 已随 APK/IPA 嵌入，无需调用此函数。
+
+详见 `fastshell/docs/integration.md` 了解完整的构建打包流程。
 
 ### Binary Size
 

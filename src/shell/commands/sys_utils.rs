@@ -4,7 +4,17 @@ impl Shell {
     pub fn cmd_logger(&self, args: &[&str]) -> CommandOutput {
         let msg = args.join(" ");
         #[cfg(unix)]
-        unsafe { libc::syslog(libc::LOG_USER | libc::LOG_NOTICE, b"%s\0".as_ptr() as *const _, format!("{}\0", msg).as_ptr() as *const _); }
+        {
+            let msg_c = std::ffi::CString::new(msg.as_str()).unwrap_or_default();
+            // SAFETY: syslog reads format + args synchronously; pointers live for duration of call
+            unsafe {
+                libc::syslog(
+                    libc::LOG_USER | libc::LOG_NOTICE,
+                    b"%s\0".as_ptr() as *const _,
+                    msg_c.as_ptr(),
+                );
+            }
+        }
         CommandOutput::success(String::new())
     }
 
@@ -190,7 +200,7 @@ fn print_tree(
     children: &std::collections::HashMap<u32, Vec<u32>>,
     output: &mut String,
 ) {
-    let connector = if is_last { " \\- " } else { " |- " };
+    let _connector = if is_last { " \\- " } else { " |- " };
     if let Some(p) = pid_map.get(&pid) {
         output.push_str(&format!("{}{}({})\n", prefix, p.comm, pid));
     }

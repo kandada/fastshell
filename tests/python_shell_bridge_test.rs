@@ -104,3 +104,58 @@ print('RET:' + str(ret))
     assert!(r.stdout.contains("from_os_system"));
     assert!(r.stdout.contains("RET:0"));
 }
+
+#[test]
+fn test_python_site_packages_import() {
+    let sdk = setup();
+    if {
+        let rt = sdk.runtime_ref();
+        let rt = rt.lock().unwrap();
+        !rt.python_available()
+    } { return; }
+
+    let root = sdk.vfs_root();
+    let site_path = std::path::Path::new(&root).join("python/site-packages");
+    std::fs::create_dir_all(&site_path).unwrap();
+    let test_mod = site_path.join("myprebuilt.py");
+    std::fs::write(&test_mod, "def greet(): return 'bundled_hello'\n").unwrap();
+
+    // Diagnostic: print what sys.path looks like
+    let diag = sdk.execute_python("import sys, os; print('ROOT', repr(os.environ.get('FASTSHELL_ROOT'))); print('PATH', sys.path)");
+    eprintln!("DIAG: stdout={:?} stderr={:?}", diag.stdout, diag.stderr);
+
+    let code = r#"
+import myprebuilt
+print(myprebuilt.greet())
+"#;
+    let r = sdk.execute_python(code);
+    assert!(r.is_success(), "import myprebuilt failed: stdout={:?} stderr={:?}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("bundled_hello"), "stdout={:?} stderr={:?}", r.stdout, r.stderr);
+}
+
+#[test]
+fn test_python_sandbox_root_import() {
+    let sdk = setup();
+    if {
+        let rt = sdk.runtime_ref();
+        let rt = rt.lock().unwrap();
+        !rt.python_available()
+    } { return; }
+
+    // Simulate aacode code bundled at sandbox root level
+    let root = sdk.vfs_root();
+    let aacode_dir = std::path::Path::new(&root).join("aacode");
+    std::fs::create_dir_all(&aacode_dir).unwrap();
+    let init_file = aacode_dir.join("__init__.py");
+    std::fs::write(&init_file, "").unwrap();
+    let main_file = aacode_dir.join("main.py");
+    std::fs::write(&main_file, "def version(): return '1.0.0'\n").unwrap();
+
+    let code = r#"
+from aacode.main import version
+print(version())
+"#;
+    let r = sdk.execute_python(code);
+    assert!(r.is_success(), "import aacode.main failed: stdout={:?} stderr={:?}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("1.0.0"), "stdout={:?} stderr={:?}", r.stdout, r.stderr);
+}

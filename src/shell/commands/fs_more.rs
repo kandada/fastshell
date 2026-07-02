@@ -177,9 +177,8 @@ impl Shell {
 
         for _ in 0..100 {
             let mut name = resolved.clone();
-            let stem = name.file_stem().unwrap_or_default().to_string_lossy();
-            let suffix = format!("{:06x}", rng.next());
-            let new_name = format!("{}{}", stem, suffix);
+            let basename = resolved.file_name().unwrap_or_default().to_string_lossy();
+            let new_name = basename.replace('X', &format!("{:x}", rng.next() % 16));
             name.set_file_name(&new_name);
 
             if !name.exists() {

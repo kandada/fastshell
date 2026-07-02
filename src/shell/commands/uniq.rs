@@ -118,7 +118,6 @@ fn uniq_process(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::vfs::Vfs;
     use crate::shell::Shell;
     use std::sync::atomic::{AtomicUsize, Ordering};

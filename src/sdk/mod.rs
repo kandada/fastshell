@@ -29,12 +29,16 @@ impl Fastshell {
     pub fn new() -> Self {
         let permissions = Arc::new(Mutex::new(HashMap::new()));
         let plugin = Arc::new(Mutex::new(None));
+        let vfs = Vfs::new(std::env::temp_dir().join("fastshell"))
+            .unwrap_or_else(|_| {
+                // Fallback: use /tmp/fastshell if temp dir creation fails
+                Vfs::new(std::path::PathBuf::from("/tmp/fastshell"))
+                    .expect("VFS should always be creatable with /tmp fallback")
+            });
         Fastshell {
             runtime: Arc::new(Mutex::new(Runtime::new(
                 Shell::with_plugin(
-                    Vfs::new(std::env::temp_dir().join("fastshell")).unwrap_or_else(|_| {
-                        panic!("Failed to create default VFS")
-                    }),
+                    vfs,
                     true, false, permissions.clone(), plugin.clone(),
                 ),
                 None,
@@ -48,6 +52,25 @@ impl Fastshell {
         }
     }
 
+    /// Initializes the SDK with a sandbox directory and configuration.
+    ///
+    /// This is the main entry point. It sets up:
+    ///
+    /// 1. **VFS (Virtual File System)** — creates/appends to the sandbox directory.
+    ///    All file operations by shell commands and Python code are confined here.
+    ///
+    /// 2. **Shell Engine** — the built-in command executor (~180 commands).
+    ///    Configured with subprocess policy and network permission gating.
+    ///
+    /// 3. **Python Engine** — auto-detected based on platform:
+    ///    - Mobile (Android/iOS): embedded CPython 3.12 from vendor/python/
+    ///    - Desktop: system `python3` preferred, embedded CPython as fallback
+    ///
+    /// 4. **Shell-Python Bridge** — registers C ABI function pointers so
+    ///    Python code can call back into fastshell's shell executor.
+    ///    This is what makes `subprocess.run("ls")` work inside Python.
+    ///
+    /// Must be called before execute() / execute_python() / file APIs.
     pub fn init(&mut self, config: Config) -> Result<(), String> {
         if config.sandbox_path.is_empty() {
             return Err("sandbox_path is required".to_string());
@@ -74,6 +97,9 @@ impl Fastshell {
         self.permissions = permissions;
         self.plugin_ref = plugin;
 
+        // Register the shell bridge BEFORE any Python code runs.
+        // These function pointers are called from inside the CPython VM
+        // when Python code calls subprocess.run() / os.system() / etc.
         cpython::register_shell_execute(fastshell_shell_exec_c);
         cpython::register_shell_free(fastshell_shell_free_c);
 

@@ -16,7 +16,7 @@ fn setup_dir() -> std::path::PathBuf {
 
 #[test]
 fn test_python_detect_engine() {
-    let mut engine = fastshell::python::detect_python_engine(std::path::Path::new("/tmp"));
+    let engine = fastshell::python::detect_python_engine(std::path::Path::new("/tmp"));
     assert!(engine.is_available() || !engine.is_available());
 }
 
@@ -60,7 +60,7 @@ fn test_python_error_handling() {
 
 #[test]
 fn test_placeholder_unavailable() {
-    let mut engine = fastshell::python::PocketPyPlaceholder::new();
+    let engine = fastshell::python::PocketPyPlaceholder::new();
     assert!(!engine.is_available());
     assert!(engine.version().is_none());
 }

@@ -667,7 +667,6 @@ fn chunk_range(chunk: &[&Edit]) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::shell::Shell;
     use crate::vfs::Vfs;
     use std::fs;

@@ -1,3 +1,17 @@
+# Ignore uncompressed CPython libraries.
+# Only the .gz files are committed to git — include_bytes!() reads
+# the .gz at compile time and decompresses at runtime.
+#
+# BUILD INSTRUCTIONS (adding a new platform):
+#   1. Cross-compile CPython 3.12 for the target
+#   2. gzip the resulting .so/.dylib/.a:
+#        gzip -c libpython3.12.so > vendor/python/<target>/libpython3.12.so.gz
+#   3. Commit the .gz file
+#   4. Add a #[cfg(...)] block in src/python/cpython.rs
+#   5. Rebuild
+#
+# The .gz is compiled into the binary via include_bytes!().
+# No runtime download needed in production.
 *.dylib
 *.so
 *.a

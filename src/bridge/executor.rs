@@ -97,13 +97,20 @@ impl Runtime {
             };
 
             let handle = std::thread::spawn(move || -> std::thread::Result<(i32, String, String)> {
+                // Pipeline stdin is received as Vec<u8> chunks.
+                // Shell commands currently accept stdin as &str (text-oriented design).
+                // Non-UTF-8 bytes are replaced with U+FFFD at the pipe boundary.
+                // Binary pipelines (e.g. `gzip -c | base64`) are not yet fully supported;
+                // use file redirection for binary workflows instead.
                 let mut stdin_buf = String::new();
+                let mut got_stdin = false;
                 if let Some(rx) = rx {
                     while let Ok(chunk) = rx.recv() {
+                        got_stdin = true;
                         stdin_buf.push_str(&String::from_utf8_lossy(&chunk));
                     }
                 }
-                let stdin = if stdin_buf.is_empty() { None } else { Some(stdin_buf) };
+                let stdin = if got_stdin { Some(stdin_buf) } else { None };
                 let stdin_ref = stdin.as_deref();
                 let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 let result = shell.execute(&cmd, &args_refs, stdin_ref);

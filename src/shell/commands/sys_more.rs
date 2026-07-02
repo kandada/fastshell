@@ -316,7 +316,7 @@ impl Shell {
         let max_bytes = count.unwrap_or(usize::MAX) * bs;
         let to_write = &data[..max_bytes.min(data.len())];
 
-        let mut written = 0usize;
+        let written;
         if !ofile.is_empty() {
             let resolved = match self.vfs.resolve(&ofile, &self.cwd) {
                 Ok(p) => p,
@@ -412,7 +412,7 @@ impl Shell {
     }
 
     pub fn cmd_uptime(&self, _args: &[&str]) -> CommandOutput {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if let Ok(content) = std::fs::read_to_string("/proc/uptime") {
                 let uptime: f64 = content.split_whitespace().next().unwrap_or("0").parse().unwrap_or(0.0);
@@ -459,7 +459,7 @@ impl Shell {
     }
 
     pub fn cmd_free(&self, _args: &[&str]) -> CommandOutput {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
                 let mut total = 0u64; let mut free = 0u64; let mut avail = 0u64;
@@ -518,6 +518,7 @@ impl Shell {
             out.push_str(&format!("Mem: {:>9} {:>9} {:>9}\n", total, used, free));
             return CommandOutput::success(out);
         }
+        #[allow(unreachable_code)]
         CommandOutput::success(String::new())
     }
 

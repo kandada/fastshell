@@ -55,15 +55,12 @@ where
 
 pub struct StdioCapture {
     stdout: Vec<u8>,
-    #[allow(dead_code)]
-    stderr: Vec<u8>,
 }
 
 impl StdioCapture {
     pub fn new() -> Self {
         StdioCapture {
             stdout: Vec::new(),
-            stderr: Vec::new(),
         }
     }
 }

@@ -16,6 +16,7 @@ pub(crate) struct HttpResponse {
     pub body: String,
     pub status_code: u16,
     pub final_url: String,
+    #[allow(dead_code)]
     pub response_headers: Vec<(String, String)>,
     pub size_download: usize,
     pub verbose_log: String,

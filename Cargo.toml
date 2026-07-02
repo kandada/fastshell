@@ -13,6 +13,20 @@ crate-type = ["lib", "cdylib", "staticlib"]
 default = []
 git = ["git2", "openssl"]
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+
+[[bench]]
+name = "latency"
+harness = false
+path = "benches/latency.rs"
+
+[[bench]]
+name = "throughput"
+harness = false
+path = "benches/throughput.rs"
+
 [dependencies]
 filetime = "0.2"
 libc = "0.2"
