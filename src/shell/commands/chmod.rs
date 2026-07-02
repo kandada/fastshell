@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,25 +32,49 @@ impl SymbolicClause {
     fn apply(&self, current_mode: u32) -> u32 {
         let mut mask: u32 = 0;
         if self.perm_read {
-            if self.who_owner { mask |= 0o400; }
-            if self.who_group { mask |= 0o040; }
-            if self.who_other { mask |= 0o004; }
+            if self.who_owner {
+                mask |= 0o400;
+            }
+            if self.who_group {
+                mask |= 0o040;
+            }
+            if self.who_other {
+                mask |= 0o004;
+            }
         }
         if self.perm_write {
-            if self.who_owner { mask |= 0o200; }
-            if self.who_group { mask |= 0o020; }
-            if self.who_other { mask |= 0o002; }
+            if self.who_owner {
+                mask |= 0o200;
+            }
+            if self.who_group {
+                mask |= 0o020;
+            }
+            if self.who_other {
+                mask |= 0o002;
+            }
         }
         if self.perm_exec {
-            if self.who_owner { mask |= 0o100; }
-            if self.who_group { mask |= 0o010; }
-            if self.who_other { mask |= 0o001; }
+            if self.who_owner {
+                mask |= 0o100;
+            }
+            if self.who_group {
+                mask |= 0o010;
+            }
+            if self.who_other {
+                mask |= 0o001;
+            }
         }
 
         let mut who_mask: u32 = 0;
-        if self.who_owner { who_mask |= 0o700; }
-        if self.who_group { who_mask |= 0o070; }
-        if self.who_other { who_mask |= 0o007; }
+        if self.who_owner {
+            who_mask |= 0o700;
+        }
+        if self.who_group {
+            who_mask |= 0o070;
+        }
+        if self.who_other {
+            who_mask |= 0o007;
+        }
 
         match self.op {
             Op::Add => current_mode | mask,
@@ -102,7 +129,11 @@ fn parse_one_clause(s: &str) -> Result<SymbolicClause, String> {
                 'u' => u = true,
                 'g' => g = true,
                 'o' => o = true,
-                'a' => { u = true; g = true; o = true; }
+                'a' => {
+                    u = true;
+                    g = true;
+                    o = true;
+                }
                 _ => return Err(format!("chmod: {}: invalid who", s)),
             }
         }
@@ -136,7 +167,8 @@ fn parse_one_clause(s: &str) -> Result<SymbolicClause, String> {
 }
 
 fn is_symbolic(s: &str) -> bool {
-    s.chars().any(|c| c == '+' || c == '-' || c == '=' || c == ',')
+    s.chars()
+        .any(|c| c == '+' || c == '-' || c == '=' || c == ',')
 }
 
 fn is_octal(s: &str) -> bool {
@@ -207,10 +239,7 @@ impl Shell {
 
         #[cfg(not(unix))]
         {
-            return CommandOutput::error(
-                "chmod: not supported on this platform\n".to_string(),
-                1,
-            );
+            return CommandOutput::error("chmod: not supported on this platform\n".to_string(), 1);
         }
 
         #[cfg(unix)]
@@ -224,10 +253,7 @@ impl Shell {
                 let target = match self.vfs.resolve(path, &self.cwd) {
                     Ok(p) => p,
                     Err(e) => {
-                        return CommandOutput::error(
-                            format!("chmod: {}: {}\n", path, e),
-                            1,
-                        );
+                        return CommandOutput::error(format!("chmod: {}: {}\n", path, e), 1);
                     }
                 };
 
@@ -235,10 +261,7 @@ impl Shell {
                     let mut entries = match get_entries_recursive(&target) {
                         Ok(e) => e,
                         Err(e) => {
-                            return CommandOutput::error(
-                                format!("chmod: {}: {}\n", path, e),
-                                1,
-                            );
+                            return CommandOutput::error(format!("chmod: {}: {}\n", path, e), 1);
                         }
                     };
                     // Reverse so child entries (deeper paths) are processed before their parents
@@ -258,10 +281,7 @@ impl Shell {
                     let new_mode = compute_mode(&action, current);
                     let perms = fs::Permissions::from_mode(new_mode);
                     if let Err(e) = fs::set_permissions(entry, perms) {
-                        return CommandOutput::error(
-                            format!("chmod: {}: {}\n", path, e),
-                            1,
-                        );
+                        return CommandOutput::error(format!("chmod: {}: {}\n", path, e), 1);
                     }
                 }
             }

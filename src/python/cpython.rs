@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 //! # CPython 3.12 Embedded Engine
 //!
 //! This module embeds a full CPython 3.12 interpreter into the fastshell binary.
@@ -349,7 +352,8 @@ del _fs_exec, _fs_free, _fs_run, _FastShellProcess, _hooked_csp, _hooked_run, _h
 // If the shell execute function is not registered, Python calls will
 // return null and the Python wrapper will return error 127.
 
-static SHELL_EXECUTE_FN: OnceLock<unsafe extern "C" fn(*const c_char) -> *const c_char> = OnceLock::new();
+static SHELL_EXECUTE_FN: OnceLock<unsafe extern "C" fn(*const c_char) -> *const c_char> =
+    OnceLock::new();
 static SHELL_FREE_FN: OnceLock<unsafe extern "C" fn(*mut c_char)> = OnceLock::new();
 
 pub fn register_shell_execute(f: unsafe extern "C" fn(*const c_char) -> *const c_char) {
@@ -417,12 +421,31 @@ impl std::fmt::Debug for CpythonEngine {
 
 impl CpythonEngine {
     fn lib_name() -> &'static str {
-        #[cfg(target_os = "android")] { "libpython3.12.so" }
-        #[cfg(target_os = "linux")]  { "libpython3.12.so.1.0" }
-        #[cfg(target_os = "macos")]  { "libpython3.12.dylib" }
-        #[cfg(target_os = "ios")]    { "libpython3.12.a" }
-        #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "ios")))]
-        { "libpython3.12.so" }
+        #[cfg(target_os = "android")]
+        {
+            "libpython3.12.so"
+        }
+        #[cfg(target_os = "linux")]
+        {
+            "libpython3.12.so.1.0"
+        }
+        #[cfg(target_os = "macos")]
+        {
+            "libpython3.12.dylib"
+        }
+        #[cfg(target_os = "ios")]
+        {
+            "libpython3.12.a"
+        }
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios"
+        )))]
+        {
+            "libpython3.12.so"
+        }
     }
 
     // ── Library Discovery (tried in order) ──────────────────
@@ -433,20 +456,24 @@ impl CpythonEngine {
         if !HAS_EMBEDDED_CPYTHON {
             return Err(format!(
                 "no embedded CPython for {}-{}. Add the .so.gz to vendor/python/ and rebuild.",
-                std::env::consts::OS, std::env::consts::ARCH
+                std::env::consts::OS,
+                std::env::consts::ARCH
             ));
         }
         let lib_name = Self::lib_name();
         let lib_dir = sandbox.join("python/lib");
         let lib_path = lib_dir.join(lib_name);
         // Idempotent — don't re-extract if already present
-        if lib_path.exists() { return Ok(lib_path); }
+        if lib_path.exists() {
+            return Ok(lib_path);
+        }
         std::fs::create_dir_all(&lib_dir)
             .map_err(|e| format!("cannot create {}: {}", lib_dir.display(), e))?;
         let mut decoder = flate2::read::GzDecoder::new(EMBEDDED_CPYTHON);
         let mut decompressed = Vec::new();
         use std::io::Read;
-        decoder.read_to_end(&mut decompressed)
+        decoder
+            .read_to_end(&mut decompressed)
             .map_err(|e| format!("decompress embedded CPython: {}", e))?;
 
         // Validate that the decompressed data is a real shared library, not a placeholder.
@@ -457,7 +484,11 @@ impl CpythonEngine {
                  Real CPython .so/.dylib is 5-50MB after decompression.\n\
                  Add the real libpython3.12.{}.gz to vendor/python/ and rebuild.",
                 decompressed.len(),
-                if cfg!(target_os = "macos") { "dylib" } else { "so" }
+                if cfg!(target_os = "macos") {
+                    "dylib"
+                } else {
+                    "so"
+                }
             ));
         }
         let is_valid = Self::validate_library_format(&decompressed);
@@ -466,13 +497,18 @@ impl CpythonEngine {
                 "embedded CPython has invalid binary format (no ELF/Mach-O magic).\n\
                  The file in vendor/python/ may be a placeholder or corrupted.\n\
                  Replace it with a real libpython3.12.{}.gz and rebuild.",
-                if cfg!(target_os = "macos") { "dylib" } else { "so" }
+                if cfg!(target_os = "macos") {
+                    "dylib"
+                } else {
+                    "so"
+                }
             ));
         }
 
         std::fs::write(&lib_path, &decompressed)
             .map_err(|e| format!("write {}: {}", lib_path.display(), e))?;
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&lib_path, std::fs::Permissions::from_mode(0o755));
         }
@@ -483,20 +519,36 @@ impl CpythonEngine {
     /// ELF (.so): starts with \x7fELF
     /// Mach-O (.dylib): starts with \xcf\xfa\xed\xfe or \xfe\xed\xfa\xcf or \xca\xfe\xba\xbe or \xbe\xba\xfe\xca
     fn validate_library_format(data: &[u8]) -> bool {
-        if data.len() < 4 { return false; }
+        if data.len() < 4 {
+            return false;
+        }
         // ELF magic
-        if &data[0..4] == b"\x7fELF" { return true; }
+        if &data[0..4] == b"\x7fELF" {
+            return true;
+        }
         // Mach-O 32-bit big-endian
-        if &data[0..4] == b"\xfe\xed\xfa\xce" { return true; }
+        if &data[0..4] == b"\xfe\xed\xfa\xce" {
+            return true;
+        }
         // Mach-O 32-bit little-endian
-        if &data[0..4] == b"\xce\xfa\xed\xfe" { return true; }
+        if &data[0..4] == b"\xce\xfa\xed\xfe" {
+            return true;
+        }
         // Mach-O 64-bit big-endian
-        if &data[0..4] == b"\xfe\xed\xfa\xcf" { return true; }
+        if &data[0..4] == b"\xfe\xed\xfa\xcf" {
+            return true;
+        }
         // Mach-O 64-bit little-endian
-        if &data[0..4] == b"\xcf\xfa\xed\xfe" { return true; }
+        if &data[0..4] == b"\xcf\xfa\xed\xfe" {
+            return true;
+        }
         // Mach-O fat/universal binary
-        if &data[0..4] == b"\xca\xfe\xba\xbe" { return true; }
-        if &data[0..4] == b"\xbe\xba\xfe\xca" { return true; }
+        if &data[0..4] == b"\xca\xfe\xba\xbe" {
+            return true;
+        }
+        if &data[0..4] == b"\xbe\xba\xfe\xca" {
+            return true;
+        }
         false
     }
 
@@ -504,11 +556,15 @@ impl CpythonEngine {
     /// Validates file size to reject placeholder/garbage extracted by old builds.
     fn find_lib_in_sandbox(sandbox: &Path) -> Option<PathBuf> {
         let path = sandbox.join("python/lib").join(Self::lib_name());
-        if !path.exists() { return None; }
+        if !path.exists() {
+            return None;
+        }
         // Reject files that are too small to be a real CPython shared library (< 1MB).
         // This handles the case where a previous build wrote a placeholder/garbage file.
         let metadata = std::fs::metadata(&path).ok()?;
-        if metadata.len() < 1024 * 1024 { return None; }
+        if metadata.len() < 1024 * 1024 {
+            return None;
+        }
         Some(path)
     }
 
@@ -524,7 +580,9 @@ impl CpythonEngine {
             #[cfg(target_os = "android")] "/data/data/com.fastshell/python/lib/libpython3.12.so",
         ];
         for c in candidates {
-            if Path::new(c).exists() { return Some(c.to_string()); }
+            if Path::new(c).exists() {
+                return Some(c.to_string());
+            }
         }
         None
     }
@@ -536,7 +594,10 @@ impl CpythonEngine {
     pub fn new(sandbox: &Path) -> Self {
         match Self::try_new(sandbox) {
             Ok(engine) => engine,
-            Err(err) => CpythonEngine { lib: None, last_error: Some(err) },
+            Err(err) => CpythonEngine {
+                lib: None,
+                last_error: Some(err),
+            },
         }
     }
 
@@ -567,7 +628,11 @@ impl CpythonEngine {
                                  Development shortcut:\n\
                                  CpythonDownloader::ensure_available() downloads at runtime.",
                                 embedded_err,
-                                if cfg!(target_os = "macos") { "dylib" } else { "so" }
+                                if cfg!(target_os = "macos") {
+                                    "dylib"
+                                } else {
+                                    "so"
+                                }
                             )
                         } else {
                             format!(
@@ -577,7 +642,11 @@ impl CpythonEngine {
                                   3. Or install system Python 3.12 (desktop fallback)\n\
                                 \n(Development only: CpythonDownloader::ensure_available())",
                                 embedded_err,
-                                if cfg!(target_os = "macos") { "dylib" } else { "so" }
+                                if cfg!(target_os = "macos") {
+                                    "dylib"
+                                } else {
+                                    "so"
+                                }
                             )
                         }
                     })
@@ -590,13 +659,17 @@ impl CpythonEngine {
         let lib: &'static libloading::Library = unsafe {
             libloading::Library::new(&lib_path_str)
                 .map(|l| Box::leak(Box::new(l)) as &'static libloading::Library)
-                .map_err(|e| format!(
-                    "failed to load {}: {}\n\n\
+                .map_err(|e| {
+                    format!(
+                        "failed to load {}: {}\n\n\
                      The file exists but could not be loaded as a shared library.\n\
                      It may be corrupted or from an incompatible platform.\n\
                      Delete {}/python/lib/ and rebuild to re-extract the embedded library.",
-                    lib_path_str, e, sandbox.display(),
-                ))?
+                        lib_path_str,
+                        e,
+                        sandbox.display(),
+                    )
+                })?
         };
 
         // Py_Initialize() must be called exactly once per process.
@@ -607,18 +680,29 @@ impl CpythonEngine {
             }
         });
 
-        Ok(CpythonEngine { lib: Some(lib), last_error: None })
+        Ok(CpythonEngine {
+            lib: Some(lib),
+            last_error: None,
+        })
     }
 
     // ── Status ──────────────────────────────────────────────
 
-    pub fn is_available(&self) -> bool { self.lib.is_some() }
-
-    pub fn is_available_with_reason(&self) -> (bool, Option<String>) {
-        if self.lib.is_some() { (true, None) } else { (false, self.last_error.clone()) }
+    pub fn is_available(&self) -> bool {
+        self.lib.is_some()
     }
 
-    pub fn last_error(&self) -> Option<&str> { self.last_error.as_deref() }
+    pub fn is_available_with_reason(&self) -> (bool, Option<String>) {
+        if self.lib.is_some() {
+            (true, None)
+        } else {
+            (false, self.last_error.clone())
+        }
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
 
     pub fn version(&self) -> Option<String> {
         let lib = self.lib.as_ref()?;
@@ -626,8 +710,11 @@ impl CpythonEngine {
             let f: libloading::Symbol<unsafe extern "C" fn() -> *const c_char> =
                 lib.get(b"Py_GetVersion\0").ok()?;
             let ptr = f();
-            if ptr.is_null() { None }
-            else { Some(std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string()) }
+            if ptr.is_null() {
+                None
+            } else {
+                Some(std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string())
+            }
         }
     }
 
@@ -636,7 +723,10 @@ impl CpythonEngine {
     /// Injects the Python wrapper (hooks) into the CPython VM.
     /// Idempotent: WRAPPER_INJECTED ensures this runs at most once per process.
     fn inject_wrapper(&self) {
-        let lib = match &self.lib { Some(l) => l, None => return };
+        let lib = match &self.lib {
+            Some(l) => l,
+            None => return,
+        };
         let exec_addr = fastshell_python_shell_exec as *const () as usize;
         let free_addr = fastshell_python_shell_free as *const () as usize;
         let wrapper = PYTHON_WRAPPER
@@ -664,10 +754,14 @@ impl CpythonEngine {
     pub fn execute(&self, code: &str, cwd: &Path) -> ExecutionResult {
         let lib = match &self.lib {
             Some(l) => l,
-            None => return ExecutionResult::error(
-                self.last_error.clone().unwrap_or_else(|| "CPython library not loaded".to_string()),
-                127,
-            ),
+            None => {
+                return ExecutionResult::error(
+                    self.last_error
+                        .clone()
+                        .unwrap_or_else(|| "CPython library not loaded".to_string()),
+                    127,
+                )
+            }
         };
 
         // Inject wrapper on first execution (thread-safe, once per process)
@@ -707,7 +801,9 @@ finally:
     _fs_out.close()
     _fs_err.close()
 "#,
-            capture_out.display(), capture_err.display(), code,
+            capture_out.display(),
+            capture_err.display(),
+            code,
         );
 
         let code_c = match CString::new(wrapped) {
@@ -718,9 +814,12 @@ finally:
             let py_run: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> c_int> =
                 match lib.get(b"PyRun_SimpleString\0") {
                     Ok(f) => f,
-                    Err(e) => return ExecutionResult::error(
-                        format!("CPython library missing PyRun_SimpleString: {}", e), 127
-                    ),
+                    Err(e) => {
+                        return ExecutionResult::error(
+                            format!("CPython library missing PyRun_SimpleString: {}", e),
+                            127,
+                        )
+                    }
                 };
             py_run(code_c.as_ptr())
         };
@@ -729,18 +828,29 @@ finally:
         let _ = std::fs::remove_file(&capture_out);
         let _ = std::fs::remove_file(&capture_err);
         if exit_code != 0 {
-            ExecutionResult { stdout, stderr, exit_code: 1 }
+            ExecutionResult {
+                stdout,
+                stderr,
+                exit_code: 1,
+            }
         } else {
-            ExecutionResult { stdout, stderr, exit_code: 0 }
+            ExecutionResult {
+                stdout,
+                stderr,
+                exit_code: 0,
+            }
         }
     }
 
     pub fn execute_script(&self, script_path: &Path, cwd: &Path) -> ExecutionResult {
         let content = match std::fs::read_to_string(script_path) {
             Ok(c) => c,
-            Err(e) => return ExecutionResult::error(
-                format!("Cannot read {}: {}", script_path.display(), e), 1
-            ),
+            Err(e) => {
+                return ExecutionResult::error(
+                    format!("Cannot read {}: {}", script_path.display(), e),
+                    1,
+                )
+            }
         };
         self.execute(&content, cwd)
     }
@@ -780,12 +890,30 @@ impl CpythonDownloader {
     ];
 
     pub fn platform_triple() -> &'static str {
-        #[cfg(all(target_os = "android", target_arch = "aarch64"))] { return "android-arm64"; }
-        #[cfg(all(target_os = "android", target_arch = "arm"))]     { return "android-armv7"; }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]    { return "linux-x86_64"; }
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]   { return "linux-arm64"; }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]   { return "macos-arm64"; }
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]    { return "macos-x86_64"; }
+        #[cfg(all(target_os = "android", target_arch = "aarch64"))]
+        {
+            return "android-arm64";
+        }
+        #[cfg(all(target_os = "android", target_arch = "arm"))]
+        {
+            return "android-armv7";
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            return "linux-x86_64";
+        }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            return "linux-arm64";
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            return "macos-arm64";
+        }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            return "macos-x86_64";
+        }
         #[allow(unreachable_code)]
         "unknown"
     }
@@ -797,7 +925,7 @@ impl CpythonDownloader {
     /// Verifies SHA-256 checksum of downloaded data.
     /// Empty checksum constants (not yet populated) are treated as "skip".
     fn verify_checksum(data: &[u8], platform_triple: &str) -> Result<(), String> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(data);
         let hash = format!("{:x}", hasher.finalize());
@@ -805,19 +933,24 @@ impl CpythonDownloader {
         let expected = match platform_triple {
             "android-arm64" => CHECKSUM_ANDROID_ARM64,
             "android-armv7" => CHECKSUM_ANDROID_ARMV7,
-            "linux-x86_64"  => CHECKSUM_LINUX_X86_64,
-            "linux-arm64"   => CHECKSUM_LINUX_ARM64,
-            "macos-arm64"   => CHECKSUM_MACOS_ARM64,
-            "macos-x86_64"  => CHECKSUM_MACOS_X86_64,
+            "linux-x86_64" => CHECKSUM_LINUX_X86_64,
+            "linux-arm64" => CHECKSUM_LINUX_ARM64,
+            "macos-arm64" => CHECKSUM_MACOS_ARM64,
+            "macos-x86_64" => CHECKSUM_MACOS_X86_64,
             _ => return Ok(()),
         };
 
-        if expected.is_empty() { return Ok(()); }
+        if expected.is_empty() {
+            return Ok(());
+        }
 
         if hash == expected {
             Ok(())
         } else {
-            Err(format!("checksum mismatch for {}: expected {}, got {}", platform_triple, expected, hash))
+            Err(format!(
+                "checksum mismatch for {}: expected {}, got {}",
+                platform_triple, expected, hash
+            ))
         }
     }
 
@@ -827,13 +960,16 @@ impl CpythonDownloader {
             .timeout_read(std::time::Duration::from_secs(60))
             .timeout_write(std::time::Duration::from_secs(30))
             .build();
-        let response = agent.get(url)
+        let response = agent
+            .get(url)
             .set("User-Agent", "fastshell-cpython-dl/0.2")
             .call()
             .map_err(|e| format!("download failed: {}", e))?;
         use std::io::Read;
         let mut data = Vec::new();
-        response.into_reader().read_to_end(&mut data)
+        response
+            .into_reader()
+            .read_to_end(&mut data)
             .map_err(|e| format!("read failed: {}", e))?;
         Ok(data)
     }
@@ -847,18 +983,16 @@ impl CpythonDownloader {
             let path = entry.path().map_err(|e| e.to_string())?;
             let dest_path = python_dir.join(&*path);
             if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("create_dir: {}", e))?;
+                std::fs::create_dir_all(parent).map_err(|e| format!("create_dir: {}", e))?;
             }
             if entry.header().entry_type() == tar::EntryType::Directory {
-                std::fs::create_dir_all(&dest_path)
-                    .map_err(|e| format!("create_dir: {}", e))?;
+                std::fs::create_dir_all(&dest_path).map_err(|e| format!("create_dir: {}", e))?;
             } else {
                 let mut data = Vec::new();
-                entry.read_to_end(&mut data)
+                entry
+                    .read_to_end(&mut data)
                     .map_err(|e| format!("read_entry: {}", e))?;
-                std::fs::write(&dest_path, &data)
-                    .map_err(|e| format!("write: {}", e))?;
+                std::fs::write(&dest_path, &data).map_err(|e| format!("write: {}", e))?;
             }
         }
         Ok(())
@@ -874,29 +1008,41 @@ impl CpythonDownloader {
     ///     CPython at compile time via vendor/python/. This function exists
     ///     for developer convenience during testing/debugging only.
     pub fn ensure_available(sandbox: &Path) -> Result<(), String> {
-        if Self::is_bundled(sandbox) { return Ok(()); }
+        if Self::is_bundled(sandbox) {
+            return Ok(());
+        }
 
         let platform = Self::platform_triple();
         if platform == "unknown" {
-            return Err(format!("unsupported platform: {}-{}", std::env::consts::OS, std::env::consts::ARCH));
+            return Err(format!(
+                "unsupported platform: {}-{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ));
         }
 
         let python_dir = sandbox.join("python");
-        std::fs::create_dir_all(&python_dir)
-            .map_err(|e| format!("create_dir: {}", e))?;
+        std::fs::create_dir_all(&python_dir).map_err(|e| format!("create_dir: {}", e))?;
 
         let mut last_error = String::new();
         for &base_url in Self::CDN_URLS {
             let url = format!("{}/cpython-3.12-{}.tar.gz", base_url, platform);
             for attempt in 1..=Self::MAX_RETRIES {
                 if attempt > 1 {
-                    let delay = std::time::Duration::from_millis(Self::RETRY_DELAY_MS * attempt as u64);
+                    let delay =
+                        std::time::Duration::from_millis(Self::RETRY_DELAY_MS * attempt as u64);
                     std::thread::sleep(delay);
                 }
                 let compressed = match Self::download_one(&url, 15) {
                     Ok(c) => c,
                     Err(e) => {
-                        last_error = format!("attempt {}/{} from {}: {}", attempt, Self::MAX_RETRIES, base_url, e);
+                        last_error = format!(
+                            "attempt {}/{} from {}: {}",
+                            attempt,
+                            Self::MAX_RETRIES,
+                            base_url,
+                            e
+                        );
                         continue;
                     }
                 };
@@ -926,10 +1072,10 @@ impl CpythonDownloader {
 
 const CHECKSUM_ANDROID_ARM64: &str = "";
 const CHECKSUM_ANDROID_ARMV7: &str = "";
-const CHECKSUM_LINUX_X86_64:  &str = "";
-const CHECKSUM_LINUX_ARM64:   &str = "";
-const CHECKSUM_MACOS_ARM64:   &str = "";
-const CHECKSUM_MACOS_X86_64:  &str = "";
+const CHECKSUM_LINUX_X86_64: &str = "";
+const CHECKSUM_LINUX_ARM64: &str = "";
+const CHECKSUM_MACOS_ARM64: &str = "";
+const CHECKSUM_MACOS_X86_64: &str = "";
 
 // ═══════════════════════════════════════════════════════════
 // Tests
@@ -948,12 +1094,16 @@ mod tests {
 
     #[test]
     fn test_embedded_data_exists() {
-        if HAS_EMBEDDED_CPYTHON { assert!(!EMBEDDED_CPYTHON.is_empty()); }
+        if HAS_EMBEDDED_CPYTHON {
+            assert!(!EMBEDDED_CPYTHON.is_empty());
+        }
     }
 
     #[test]
     fn test_embedded_data_decompresses() {
-        if !HAS_EMBEDDED_CPYTHON { return; }
+        if !HAS_EMBEDDED_CPYTHON {
+            return;
+        }
         let mut decoder = flate2::read::GzDecoder::new(EMBEDDED_CPYTHON);
         let mut decompressed = Vec::new();
         use std::io::Read;
@@ -982,11 +1132,16 @@ mod tests {
         std::fs::create_dir_all(&tmp).ok();
         let result = CpythonEngine::try_new(&tmp);
         let _ = std::fs::remove_dir_all(&tmp);
-        if result.is_ok() { return; }
+        if result.is_ok() {
+            return;
+        }
         let err = result.unwrap_err();
         assert!(
-            err.contains("vendor/python/") || err.contains("no embedded") || err.contains("failed to load"),
-            "error should be descriptive: {}", err
+            err.contains("vendor/python/")
+                || err.contains("no embedded")
+                || err.contains("failed to load"),
+            "error should be descriptive: {}",
+            err
         );
     }
 
@@ -1005,7 +1160,10 @@ mod tests {
 
     #[test]
     fn test_is_available_with_reason() {
-        let engine = CpythonEngine { lib: None, last_error: Some("test error".into()) };
+        let engine = CpythonEngine {
+            lib: None,
+            last_error: Some("test error".into()),
+        };
         let (available, reason) = engine.is_available_with_reason();
         assert!(!available);
         assert_eq!(reason.unwrap(), "test error");

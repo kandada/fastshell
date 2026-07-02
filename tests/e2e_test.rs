@@ -1,8 +1,11 @@
-use std::fs;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use fastshell::sdk::Fastshell;
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use fastshell::sdk::types::{Config, EXIT_NEED_PERMISSION};
+use fastshell::sdk::Fastshell;
+use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -30,7 +33,8 @@ fn setup_default() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 30_000,
-    }).unwrap();
+    })
+    .unwrap();
     sdk
 }
 
@@ -116,7 +120,8 @@ fn e2e_shell_text_processing() {
 #[test]
 fn e2e_shell_grep_sed() {
     let sdk = setup_default();
-    sdk.write_file("data.txt", "hello world\nfoo bar\nhello again\n").unwrap();
+    sdk.write_file("data.txt", "hello world\nfoo bar\nhello again\n")
+        .unwrap();
 
     let r = sdk.execute("grep hello data.txt");
     assert!(r.stdout.contains("hello world"));
@@ -130,7 +135,8 @@ fn e2e_shell_grep_sed() {
 #[test]
 fn e2e_shell_compression() {
     let sdk = setup_default();
-    sdk.write_file("big.txt", &"compress me! ".repeat(200)).unwrap();
+    sdk.write_file("big.txt", &"compress me! ".repeat(200))
+        .unwrap();
 
     let r = sdk.execute("gzip -c big.txt");
     assert_eq!(r.exit_code, 0);
@@ -141,7 +147,8 @@ fn e2e_shell_compression() {
 #[test]
 fn e2e_shell_json() {
     let sdk = setup_default();
-    sdk.write_file("data.json", r#"{"name":"fastshell","version":"0.1.0"}"#).unwrap();
+    sdk.write_file("data.json", r#"{"name":"fastshell","version":"0.1.0"}"#)
+        .unwrap();
 
     let r = sdk.execute("cat data.json | jq .name");
     assert!(r.stdout.contains("fastshell"));
@@ -171,7 +178,8 @@ fn e2e_pipeline_three_stage() {
 #[test]
 fn e2e_pipeline_four_stage() {
     let sdk = setup_default();
-    sdk.write_file("lines.txt", "alpha\nbeta\nalpha\ngamma\nbeta\n").unwrap();
+    sdk.write_file("lines.txt", "alpha\nbeta\nalpha\ngamma\nbeta\n")
+        .unwrap();
     let r = sdk.execute("cat lines.txt | sort | uniq -c | wc -l");
     assert_eq!(r.exit_code, 0);
     assert_eq!(r.stdout.trim(), "3");
@@ -401,27 +409,43 @@ fn e2e_sqlite3_shell_command() {
 fn e2e_sqlite3_stdin() {
     let sdk = setup_default();
     // Test sqlite3 with stdin via file redirection
-    sdk.write_file("init.sql", "CREATE TABLE t (x TEXT);\nINSERT INTO t VALUES ('pipe_works');\nSELECT * FROM t;\n").unwrap();
+    sdk.write_file(
+        "init.sql",
+        "CREATE TABLE t (x TEXT);\nINSERT INTO t VALUES ('pipe_works');\nSELECT * FROM t;\n",
+    )
+    .unwrap();
     // Use cat to pipe SQL file content to sqlite3
     let r = sdk.execute("cat init.sql | sqlite3 test2.db");
-    assert!(r.exit_code == 0 || r.stdout.contains("pipe_works"),
-        "exit={} stdout={} stderr={}", r.exit_code, r.stdout, r.stderr);
+    assert!(
+        r.exit_code == 0 || r.stdout.contains("pipe_works"),
+        "exit={} stdout={} stderr={}",
+        r.exit_code,
+        r.stdout,
+        r.stderr
+    );
 }
 
 #[test]
 fn e2e_python_sqlite3_import() {
     let sdk = setup_default();
     let info = sdk.get_info();
-    if !info.python_available { return; }
+    if !info.python_available {
+        return;
+    }
 
     let r = sdk.execute_python(
         "import sqlite3; conn = sqlite3.connect(':memory:'); \
          conn.execute('CREATE TABLE t(x)'); \
          conn.execute('INSERT INTO t VALUES(42)'); \
-         print(conn.execute('SELECT x FROM t').fetchone()[0])"
+         print(conn.execute('SELECT x FROM t').fetchone()[0])",
     );
     if r.exit_code == 0 {
-        assert!(r.stdout.contains("42"), "sqlite3 import failed: stdout={} stderr={}", r.stdout, r.stderr);
+        assert!(
+            r.stdout.contains("42"),
+            "sqlite3 import failed: stdout={} stderr={}",
+            r.stdout,
+            r.stderr
+        );
     }
 }
 
@@ -434,13 +458,25 @@ fn e2e_config_defaults_mobile() {
     let cfg = Config::default();
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        assert!(!cfg.allow_subprocess, "mobile must disable subprocess by default");
-        assert!(cfg.network_ask_permission, "mobile must ask permission by default");
+        assert!(
+            !cfg.allow_subprocess,
+            "mobile must disable subprocess by default"
+        );
+        assert!(
+            cfg.network_ask_permission,
+            "mobile must ask permission by default"
+        );
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        assert!(cfg.allow_subprocess, "desktop must allow subprocess by default");
-        assert!(!cfg.network_ask_permission, "desktop must not ask permission by default");
+        assert!(
+            cfg.allow_subprocess,
+            "desktop must allow subprocess by default"
+        );
+        assert!(
+            !cfg.network_ask_permission,
+            "desktop must not ask permission by default"
+        );
     }
 }
 
@@ -572,10 +608,14 @@ fn e2e_env_vars() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
-    }).unwrap();
+    })
+    .unwrap();
 
     sdk.set_env("MY_TEST_VAR", "my_test_value");
-    assert_eq!(sdk.get_env("MY_TEST_VAR"), Some("my_test_value".to_string()));
+    assert_eq!(
+        sdk.get_env("MY_TEST_VAR"),
+        Some("my_test_value".to_string())
+    );
     assert_eq!(sdk.get_env("NONEXISTENT"), None);
 }
 
@@ -605,7 +645,8 @@ fn e2e_shutdown_cleans_up() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
-    }).unwrap();
+    })
+    .unwrap();
 
     let root = sdk.vfs_root();
     assert!(std::path::Path::new(&root).exists());

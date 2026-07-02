@@ -1,7 +1,10 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use fastshell::sdk::Fastshell;
-use fastshell::sdk::types::Config;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -10,8 +13,16 @@ fn setup() -> Fastshell {
     let dir = std::env::temp_dir().join(format!("fs_pybridge_{}_{}", std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
     let mut sdk = Fastshell::new();
-    sdk.init(Config { sandbox_path: dir.to_string_lossy().to_string(), python_enabled: true, allow_subprocess: true, network_ask_permission: false, command_timeout_ms: 0 }).unwrap();
-    sdk.write_file("hello.py", "print('hello from python')").unwrap();
+    sdk.init(Config {
+        sandbox_path: dir.to_string_lossy().to_string(),
+        python_enabled: true,
+        allow_subprocess: true,
+        network_ask_permission: false,
+        command_timeout_ms: 0,
+    })
+    .unwrap();
+    sdk.write_file("hello.py", "print('hello from python')")
+        .unwrap();
     sdk
 }
 
@@ -112,7 +123,9 @@ fn test_python_site_packages_import() {
         let rt = sdk.runtime_ref();
         let rt = rt.lock().unwrap();
         !rt.python_available()
-    } { return; }
+    } {
+        return;
+    }
 
     let root = sdk.vfs_root();
     let site_path = std::path::Path::new(&root).join("python/site-packages");
@@ -129,8 +142,18 @@ import myprebuilt
 print(myprebuilt.greet())
 "#;
     let r = sdk.execute_python(code);
-    assert!(r.is_success(), "import myprebuilt failed: stdout={:?} stderr={:?}", r.stdout, r.stderr);
-    assert!(r.stdout.contains("bundled_hello"), "stdout={:?} stderr={:?}", r.stdout, r.stderr);
+    assert!(
+        r.is_success(),
+        "import myprebuilt failed: stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("bundled_hello"),
+        "stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
 }
 
 #[test]
@@ -140,7 +163,9 @@ fn test_python_sandbox_root_import() {
         let rt = sdk.runtime_ref();
         let rt = rt.lock().unwrap();
         !rt.python_available()
-    } { return; }
+    } {
+        return;
+    }
 
     // Simulate aacode code bundled at sandbox root level
     let root = sdk.vfs_root();
@@ -156,6 +181,16 @@ from aacode.main import version
 print(version())
 "#;
     let r = sdk.execute_python(code);
-    assert!(r.is_success(), "import aacode.main failed: stdout={:?} stderr={:?}", r.stdout, r.stderr);
-    assert!(r.stdout.contains("1.0.0"), "stdout={:?} stderr={:?}", r.stdout, r.stderr);
+    assert!(
+        r.is_success(),
+        "import aacode.main failed: stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("1.0.0"),
+        "stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
 }

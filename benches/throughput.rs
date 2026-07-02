@@ -1,8 +1,11 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use fastshell::sdk::Fastshell;
-use fastshell::sdk::types::Config;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -17,7 +20,8 @@ fn setup() -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0,
-    }).unwrap();
+    })
+    .unwrap();
     sdk
 }
 
@@ -52,14 +56,19 @@ fn bench_grep_large(c: &mut Criterion) {
     let sdk = setup();
     let lines: Vec<String> = (0..5000).map(|i| format!("line {} data", i)).collect();
     sdk.write_file("large.txt", &lines.join("\n")).unwrap();
-    sdk.write_file("medium.txt", &lines[..1000].join("\n")).unwrap();
+    sdk.write_file("medium.txt", &lines[..1000].join("\n"))
+        .unwrap();
 
     group.bench_function("grep_5000_lines", |b| {
-        b.iter(|| { let _ = black_box(sdk.execute(black_box("grep line large.txt"))); })
+        b.iter(|| {
+            let _ = black_box(sdk.execute(black_box("grep line large.txt")));
+        })
     });
 
     group.bench_function("grep_1000_lines", |b| {
-        b.iter(|| { let _ = black_box(sdk.execute(black_box("grep line medium.txt"))); })
+        b.iter(|| {
+            let _ = black_box(sdk.execute(black_box("grep line medium.txt")));
+        })
     });
 
     group.finish();
@@ -69,11 +78,15 @@ fn bench_sort_awk(c: &mut Criterion) {
     let mut group = c.benchmark_group("sort_awk");
 
     let sdk = setup();
-    let nums: Vec<String> = (0..1000).map(|_| format!("{}", rand::random::<u32>())).collect();
+    let nums: Vec<String> = (0..1000)
+        .map(|_| format!("{}", rand::random::<u32>()))
+        .collect();
     sdk.write_file("nums.txt", &nums.join("\n")).unwrap();
 
     group.bench_function("sort_1000", |b| {
-        b.iter(|| { let _ = black_box(sdk.execute(black_box("sort -n nums.txt"))); })
+        b.iter(|| {
+            let _ = black_box(sdk.execute(black_box("sort -n nums.txt")));
+        })
     });
 
     group.finish();
@@ -89,15 +102,25 @@ fn bench_sed_diff(c: &mut Criterion) {
     sdk.write_file("text2.txt", &lines2.join("\n")).unwrap();
 
     group.bench_function("sed_replace_500", |b| {
-        b.iter(|| { let _ = black_box(sdk.execute(black_box("sed 's/original/replaced/g' text1.txt"))); })
+        b.iter(|| {
+            let _ = black_box(sdk.execute(black_box("sed 's/original/replaced/g' text1.txt")));
+        })
     });
 
     group.bench_function("diff_500", |b| {
-        b.iter(|| { let _ = black_box(sdk.execute(black_box("diff text1.txt text2.txt"))); })
+        b.iter(|| {
+            let _ = black_box(sdk.execute(black_box("diff text1.txt text2.txt")));
+        })
     });
 
     group.finish();
 }
 
-criterion_group!(benches, bench_bulk_file_ops, bench_grep_large, bench_sort_awk, bench_sed_diff);
+criterion_group!(
+    benches,
+    bench_bulk_file_ops,
+    bench_grep_large,
+    bench_sort_awk,
+    bench_sed_diff
+);
 criterion_main!(benches);

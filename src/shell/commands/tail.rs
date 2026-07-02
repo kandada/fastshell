@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_tail(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -37,7 +40,11 @@ impl Shell {
             i += 1;
         }
 
-        let count = if lines_count < 0 { 10usize } else { lines_count as usize };
+        let count = if lines_count < 0 {
+            10usize
+        } else {
+            lines_count as usize
+        };
 
         if files.is_empty() {
             match stdin {
@@ -47,7 +54,11 @@ impl Shell {
                         let start = (count.saturating_sub(1)).min(lines.len());
                         lines[start..].join("\n")
                     } else {
-                        let start = if lines.len() > count { lines.len() - count } else { 0 };
+                        let start = if lines.len() > count {
+                            lines.len() - count
+                        } else {
+                            0
+                        };
                         lines[start..].join("\n")
                     };
                     let mut result = String::new();
@@ -78,7 +89,11 @@ impl Shell {
                             output.push('\n');
                         }
                     } else {
-                        let start = if lines.len() > count { lines.len() - count } else { 0 };
+                        let start = if lines.len() > count {
+                            lines.len() - count
+                        } else {
+                            0
+                        };
                         for &line in &lines[start..] {
                             output.push_str(line);
                             output.push('\n');

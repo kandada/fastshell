@@ -1,7 +1,13 @@
-use crate::shell::{Shell, CommandOutput};
-use crate::sdk::plugin::DevicePlugin;
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
 
-fn plugin<T>(shell: &Shell, f: impl FnOnce(&Box<dyn DevicePlugin>) -> Result<T, String>) -> Result<T, CommandOutput> {
+use crate::sdk::plugin::DevicePlugin;
+use crate::shell::{CommandOutput, Shell};
+
+fn plugin<T>(
+    shell: &Shell,
+    f: impl FnOnce(&Box<dyn DevicePlugin>) -> Result<T, String>,
+) -> Result<T, CommandOutput> {
     let guard = match shell.plugin.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -15,7 +21,10 @@ fn plugin<T>(shell: &Shell, f: impl FnOnce(&Box<dyn DevicePlugin>) -> Result<T, 
 impl Shell {
     // ── camera ──
     pub fn cmd_camera(&self, args: &[&str]) -> CommandOutput {
-        let path = args.first().map(|s| s.to_string()).unwrap_or_else(|| "/photo.jpg".to_string());
+        let path = args
+            .first()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "/photo.jpg".to_string());
         if let Some(perm) = self.check_device_permission("camera", "photo") {
             return perm;
         }
@@ -27,7 +36,10 @@ impl Shell {
 
     // ── screencapture ──
     pub fn cmd_screencapture(&self, args: &[&str]) -> CommandOutput {
-        let path = args.first().map(|s| s.to_string()).unwrap_or_else(|| "/screenshot.png".to_string());
+        let path = args
+            .first()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "/screenshot.png".to_string());
         if let Some(perm) = self.check_device_permission("screen", "capture") {
             return perm;
         }
@@ -47,12 +59,20 @@ impl Shell {
             match args[i] {
                 "--video" => media_type = "video",
                 "-n" | "--count" => {
-                    if i + 1 < args.len() { count = args[i+1].parse().unwrap_or(1); i += 1; }
+                    if i + 1 < args.len() {
+                        count = args[i + 1].parse().unwrap_or(1);
+                        i += 1;
+                    }
                 }
                 "-o" | "--output" => {
-                    if i + 1 < args.len() { output_dir = args[i+1].to_string(); i += 1; }
+                    if i + 1 < args.len() {
+                        output_dir = args[i + 1].to_string();
+                        i += 1;
+                    }
                 }
-                arg if !arg.starts_with('-') => { output_dir = arg.to_string(); }
+                arg if !arg.starts_with('-') => {
+                    output_dir = arg.to_string();
+                }
                 _ => {}
             }
             i += 1;
@@ -62,10 +82,9 @@ impl Shell {
         }
         match plugin(self, |p| {
             if media_type == "video" {
-                p.pick_video(&output_dir)
-                    .map(|p| {
-                        serde_json::to_string_pretty(&serde_json::json!({"video": p})).unwrap_or(p)
-                    })
+                p.pick_video(&output_dir).map(|p| {
+                    serde_json::to_string_pretty(&serde_json::json!({"video": p})).unwrap_or(p)
+                })
             } else {
                 let files = p.pick_photo(&output_dir, count)?;
                 let json = serde_json::json!({"photos": files});
@@ -85,12 +104,20 @@ impl Shell {
         while i < args.len() {
             match args[i] {
                 "-d" | "--duration" => {
-                    if i + 1 < args.len() { duration = args[i+1].parse().unwrap_or(10); i += 1; }
+                    if i + 1 < args.len() {
+                        duration = args[i + 1].parse().unwrap_or(10);
+                        i += 1;
+                    }
                 }
                 "-o" | "--output" => {
-                    if i + 1 < args.len() { path = args[i+1].to_string(); i += 1; }
+                    if i + 1 < args.len() {
+                        path = args[i + 1].to_string();
+                        i += 1;
+                    }
                 }
-                arg if !arg.starts_with('-') => { path = arg.to_string(); }
+                arg if !arg.starts_with('-') => {
+                    path = arg.to_string();
+                }
                 _ => {}
             }
             i += 1;
@@ -132,7 +159,9 @@ impl Shell {
     pub fn cmd_speech(&self, args: &[&str]) -> CommandOutput {
         let path = match args.first() {
             Some(p) => p.to_string(),
-            None => return CommandOutput::error("speech: missing audio file path\n".to_string(), 1),
+            None => {
+                return CommandOutput::error("speech: missing audio file path\n".to_string(), 1)
+            }
         };
         if let Some(perm) = self.check_device_permission("microphone", "speech") {
             return perm;
@@ -152,13 +181,22 @@ impl Shell {
         while i < args.len() {
             match args[i] {
                 "get" => {
-                    if i + 1 < args.len() { contact_id = Some(args[i+1].to_string()); i += 1; }
+                    if i + 1 < args.len() {
+                        contact_id = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
                 }
                 "search" => {
-                    if i + 1 < args.len() { query = args[i+1].to_string(); i += 1; }
+                    if i + 1 < args.len() {
+                        query = args[i + 1].to_string();
+                        i += 1;
+                    }
                 }
                 "-n" | "--limit" => {
-                    if i + 1 < args.len() { limit = args[i+1].parse().unwrap_or(50); i += 1; }
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().unwrap_or(50);
+                        i += 1;
+                    }
                 }
                 _ => {}
             }
@@ -265,7 +303,7 @@ impl Shell {
     pub fn cmd_notify(&self, args: &[&str]) -> CommandOutput {
         let (title, body) = if let Some(pos) = args.iter().position(|&a| a == "--") {
             let title = args[..pos].join(" ");
-            let body = args[pos+1..].join(" ");
+            let body = args[pos + 1..].join(" ");
             (title, body)
         } else if args.len() >= 2 {
             (args[0].to_string(), args[1..].join(" "))
@@ -290,12 +328,20 @@ impl Shell {
         while i < args.len() {
             match args[i] {
                 "--text" => {
-                    if i + 1 < args.len() { text = Some(args[i+1].to_string()); i += 1; }
+                    if i + 1 < args.len() {
+                        text = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
                 }
                 "--mime" => {
-                    if i + 1 < args.len() { mime = args[i+1].to_string(); i += 1; }
+                    if i + 1 < args.len() {
+                        mime = args[i + 1].to_string();
+                        i += 1;
+                    }
                 }
-                arg if !arg.starts_with('-') => { path = Some(arg.to_string()); }
+                arg if !arg.starts_with('-') => {
+                    path = Some(arg.to_string());
+                }
                 _ => {}
             }
             i += 1;
@@ -328,7 +374,9 @@ impl Shell {
     // ── auth ──
     pub fn cmd_auth(&self, args: &[&str]) -> CommandOutput {
         let reason = if args.first() == Some(&"bio") {
-            args.get(1).map(|s| s.to_string()).unwrap_or_else(|| "Authenticate".to_string())
+            args.get(1)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Authenticate".to_string())
         } else {
             args.join(" ")
         };
@@ -369,7 +417,7 @@ impl Shell {
             match args[i] {
                 "brightness" => {
                     if i + 1 < args.len() {
-                        if let Ok(level) = args[i+1].parse::<f64>() {
+                        if let Ok(level) = args[i + 1].parse::<f64>() {
                             let level = level.clamp(0.0, 1.0);
                             return match plugin(self, |p| p.set_brightness(level)) {
                                 Ok(()) => CommandOutput::success(String::new()),
@@ -377,7 +425,10 @@ impl Shell {
                             };
                         }
                     }
-                    return CommandOutput::error("screen brightness: missing or invalid level (0.0-1.0)\n".to_string(), 1);
+                    return CommandOutput::error(
+                        "screen brightness: missing or invalid level (0.0-1.0)\n".to_string(),
+                        1,
+                    );
                 }
                 "on" => {
                     return match plugin(self, |p| p.keep_screen_on(true)) {
@@ -395,7 +446,10 @@ impl Shell {
             }
             i += 1;
         }
-        CommandOutput::error("screen: usage: screen brightness <0.0-1.0> | on | off\n".to_string(), 1)
+        CommandOutput::error(
+            "screen: usage: screen brightness <0.0-1.0> | on | off\n".to_string(),
+            1,
+        )
     }
 
     // ── device ──
@@ -417,7 +471,8 @@ impl Shell {
                 Err(e) => e,
             },
             _ => CommandOutput::error(
-                "device: usage: device info | device network\n".to_string(), 1
+                "device: usage: device info | device network\n".to_string(),
+                1,
             ),
         }
     }

@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -60,6 +63,7 @@ impl Vfs {
             fs::create_dir_all(&root)?;
         }
         let root = root.canonicalize()?;
+        // (c) 2025 xiefujin <490021684@qq.com>
         Ok(Vfs { root })
     }
 
@@ -68,6 +72,7 @@ impl Vfs {
     }
 
     pub fn resolve(&self, path: &str, cwd: &str) -> Result<PathBuf> {
+        // (c) 2025 xiefujin <490021684@qq.com>
         let candidate = if path.starts_with('/') {
             self.root.join(path.trim_start_matches('/'))
         } else {
@@ -130,15 +135,11 @@ impl Vfs {
     }
 
     pub fn exists(&self, path: &str, cwd: &str) -> bool {
-        self.resolve(path, cwd)
-            .map(|p| p.exists())
-            .unwrap_or(false)
+        self.resolve(path, cwd).map(|p| p.exists()).unwrap_or(false)
     }
 
     pub fn is_dir(&self, path: &str, cwd: &str) -> bool {
-        self.resolve(path, cwd)
-            .map(|p| p.is_dir())
-            .unwrap_or(false)
+        self.resolve(path, cwd).map(|p| p.is_dir()).unwrap_or(false)
     }
 
     pub fn is_file(&self, path: &str, cwd: &str) -> bool {
@@ -150,9 +151,7 @@ impl Vfs {
     pub fn create_dir(&self, path: &str, cwd: &str) -> Result<()> {
         let target = self.resolve(path, cwd)?;
         if target.exists() {
-            return Err(VfsError::AlreadyExists(
-                self.to_vpath(&target),
-            ));
+            return Err(VfsError::AlreadyExists(self.to_vpath(&target)));
         }
         fs::create_dir(&target)?;
         Ok(())
@@ -350,8 +349,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_vfs_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_vfs_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }

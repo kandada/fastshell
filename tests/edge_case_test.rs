@@ -1,7 +1,10 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use fastshell::sdk::Fastshell;
-use fastshell::sdk::types::Config;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -16,7 +19,8 @@ fn setup() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 30_000,
-    }).unwrap();
+    })
+    .unwrap();
     sdk
 }
 
@@ -86,7 +90,8 @@ fn edge_tr_upper_to_lower() {
 #[test]
 fn edge_xargs_null_delimited() {
     let sdk = setup();
-    sdk.write_file("items.txt", "file1.txt\nfile2.txt\nfile3.txt\n").unwrap();
+    sdk.write_file("items.txt", "file1.txt\nfile2.txt\nfile3.txt\n")
+        .unwrap();
     let r = sdk.execute("cat items.txt | xargs -n1 echo");
     assert_eq!(r.exit_code, 0);
 }
@@ -153,8 +158,12 @@ fn edge_which_builtins() {
     assert_eq!(r.exit_code, 0, "which ls failed: stderr={}", r.stderr);
 
     let r = sdk.execute("which nonexistent_command_xyz");
-    assert!(r.exit_code != 0 || !r.stdout.contains("/"),
-        "which nonexistent should fail or not find path, got code={} stdout={:?}", r.exit_code, r.stdout);
+    assert!(
+        r.exit_code != 0 || !r.stdout.contains("/"),
+        "which nonexistent should fail or not find path, got code={} stdout={:?}",
+        r.exit_code,
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════
@@ -174,7 +183,11 @@ fn edge_zip_unzip() {
     sdk.execute("mkdir extract_dir");
     sdk.execute("cd extract_dir");
     let r = sdk.execute("unzip ../archive.zip");
-    assert!(r.exit_code == 0 || r.exit_code == 1, "unzip failed: {}", r.stderr);
+    assert!(
+        r.exit_code == 0 || r.exit_code == 1,
+        "unzip failed: {}",
+        r.stderr
+    );
 }
 
 // ═══════════════════════════════════════════════════════
@@ -237,7 +250,8 @@ fn edge_seq_reverse() {
 fn edge_sqlite3_crud() {
     let sdk = setup();
 
-    let r = sdk.execute("sqlite3 test.db 'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);'");
+    let r =
+        sdk.execute("sqlite3 test.db 'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);'");
     assert_eq!(r.exit_code, 0);
 
     let r = sdk.execute("sqlite3 test.db \"INSERT INTO users VALUES (1, 'Alice');\"");
@@ -268,18 +282,33 @@ fn edge_sqlite3_dot_commands() {
     sdk.execute("sqlite3 test.db 'CREATE TABLE t (id INT);'");
 
     let r = sdk.execute("sqlite3 test.db '.tables'");
-    assert!(r.exit_code == 0, "sqlite3 .tables failed: code={} stderr={}", r.exit_code, r.stderr);
-    assert!(r.stdout.contains("t") || r.stdout.contains("id"),
-        ".tables output: {:?}", r.stdout);
+    assert!(
+        r.exit_code == 0,
+        "sqlite3 .tables failed: code={} stderr={}",
+        r.exit_code,
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("t") || r.stdout.contains("id"),
+        ".tables output: {:?}",
+        r.stdout
+    );
 
     let r = sdk.execute("sqlite3 test.db '.schema'");
-    assert!(r.exit_code == 0, "sqlite3 .schema failed: code={} stderr={}", r.exit_code, r.stderr);
+    assert!(
+        r.exit_code == 0,
+        "sqlite3 .schema failed: code={} stderr={}",
+        r.exit_code,
+        r.stderr
+    );
 }
 
 #[test]
 fn edge_sqlite3_csv_mode() {
     let sdk = setup();
-    sdk.execute("sqlite3 test.db 'CREATE TABLE t (a TEXT, b TEXT); INSERT INTO t VALUES (\"x\", \"y\");'");
+    sdk.execute(
+        "sqlite3 test.db 'CREATE TABLE t (a TEXT, b TEXT); INSERT INTO t VALUES (\"x\", \"y\");'",
+    );
 
     let r = sdk.execute("sqlite3 -csv -header test.db 'SELECT * FROM t;'");
     assert_eq!(r.exit_code, 0);
@@ -339,15 +368,24 @@ fn edge_curl_permission_boundary() {
         allow_subprocess: false,
         network_ask_permission: true,
         command_timeout_ms: 5_000,
-    }).unwrap();
+    })
+    .unwrap();
 
     let r = sdk.execute("curl http://example.com");
-    assert!(r.exit_code == 100 || r.stderr.contains("PERMISSION_NEEDED") || r.exit_code != 0,
-        "expected permission denied, got code={} stderr={}", r.exit_code, r.stderr);
+    assert!(
+        r.exit_code == 100 || r.stderr.contains("PERMISSION_NEEDED") || r.exit_code != 0,
+        "expected permission denied, got code={} stderr={}",
+        r.exit_code,
+        r.stderr
+    );
 
     sdk.set_permission("network:example.com", true);
     let r = sdk.execute("curl http://example.com");
-    assert_eq!(r.exit_code, 0, "curl should succeed after permission grant: stderr={}", r.stderr);
+    assert_eq!(
+        r.exit_code, 0,
+        "curl should succeed after permission grant: stderr={}",
+        r.stderr
+    );
 }
 
 // ═══════════════════════════════════════════════════════

@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
@@ -59,7 +62,9 @@ impl Shell {
 
         let socket_addr = match addr.parse() {
             Ok(a) => a,
-            Err(_) => return CommandOutput::error(format!("ping: cannot resolve {}\n", hostname), 1),
+            Err(_) => {
+                return CommandOutput::error(format!("ping: cannot resolve {}\n", hostname), 1)
+            }
         };
 
         let mut detail = String::new();
@@ -107,10 +112,7 @@ impl Shell {
         };
 
         let mut output = detail;
-        output += &format!(
-            "TCP ping {} ({}:{})\n",
-            hostname, hostname, port
-        );
+        output += &format!("TCP ping {} ({}:{})\n", hostname, hostname, port);
         output += &format!(
             "{} packets transmitted, {} received, {:.0}% loss\n",
             count, success, loss_pct

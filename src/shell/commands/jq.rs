@@ -1,5 +1,8 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use serde_json::Value;
-use crate::shell::{Shell, CommandOutput};
 
 impl Shell {
     pub fn cmd_jq(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -178,7 +181,8 @@ fn apply_jq_array_op(value: &Value, op: &str) -> Vec<JqResult> {
         match value {
             Value::Array(arr) => {
                 if let Ok(idx) = index_str.parse::<usize>() {
-                    return arr.get(idx)
+                    return arr
+                        .get(idx)
                         .map(|v| vec![JqResult::Value(v.clone())])
                         .unwrap_or_default();
                 }

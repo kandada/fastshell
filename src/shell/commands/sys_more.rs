@@ -1,7 +1,10 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{list_processes, CommandOutput, Shell};
 use sha1::Sha1;
 use sha2::Digest;
 use std::io::Read;
-use crate::shell::{Shell, CommandOutput, list_processes};
 
 impl Shell {
     pub fn cmd_sha1sum(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -11,7 +14,9 @@ impl Shell {
     pub fn cmd_sum(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut files = Vec::new();
         for arg in args {
-            if !arg.starts_with('-') { files.push(arg.to_string()); }
+            if !arg.starts_with('-') {
+                files.push(arg.to_string());
+            }
         }
 
         if files.is_empty() {
@@ -50,7 +55,9 @@ impl Shell {
 
         let mut output = String::new();
         for arg in args {
-            if arg.starts_with('-') { continue; }
+            if arg.starts_with('-') {
+                continue;
+            }
             let name = arg;
             for proc in &procs {
                 if &proc.comm == name || proc.comm.starts_with(name) {
@@ -60,7 +67,11 @@ impl Shell {
         }
 
         if output.is_empty() {
-            CommandOutput { stdout: String::new(), stderr: String::new(), exit_code: 1 }
+            CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 1,
+            }
         } else {
             output.pop();
             output.push('\n');
@@ -71,7 +82,9 @@ impl Shell {
     pub fn cmd_nproc(&self, args: &[&str]) -> CommandOutput {
         let mut all = false;
         for arg in args {
-            if *arg == "--all" { all = true; }
+            if *arg == "--all" {
+                all = true;
+            }
         }
 
         let count = if all {
@@ -100,7 +113,11 @@ impl Shell {
         }
         #[cfg(not(unix))]
         {
-            CommandOutput { stdout: "not a tty\n".to_string(), stderr: String::new(), exit_code: 1 }
+            CommandOutput {
+                stdout: "not a tty\n".to_string(),
+                stderr: String::new(),
+                exit_code: 1,
+            }
         }
     }
 
@@ -110,7 +127,9 @@ impl Shell {
 
     pub fn cmd_sync(&self, _args: &[&str]) -> CommandOutput {
         #[cfg(unix)]
-        unsafe { libc::sync(); }
+        unsafe {
+            libc::sync();
+        }
         CommandOutput::success(String::new())
     }
 
@@ -150,14 +169,20 @@ impl Shell {
         #[cfg(unix)]
         {
             if adjustment != 0 {
-                unsafe { libc::nice(adjustment); }
+                unsafe {
+                    libc::nice(adjustment);
+                }
             }
         }
 
         match command {
             Some(cmd) => {
                 let vfs_root = self.vfs.root().to_path_buf();
-                let cwd = if self.cwd == "/" { vfs_root.clone() } else { vfs_root.join(self.cwd.trim_start_matches('/')) };
+                let cwd = if self.cwd == "/" {
+                    vfs_root.clone()
+                } else {
+                    vfs_root.join(self.cwd.trim_start_matches('/'))
+                };
                 let cmd_args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
                 let output = std::process::Command::new(&cmd)
                     .args(&cmd_args_ref)
@@ -188,7 +213,9 @@ impl Shell {
         {
             let (uid, gid) = parse_owner(owner_spec);
             for file in files {
-                if file.starts_with('-') { continue; }
+                if file.starts_with('-') {
+                    continue;
+                }
                 let resolved = match self.vfs.resolve(file, &self.cwd) {
                     Ok(p) => p,
                     Err(e) => return CommandOutput::error(format!("chown: {}: {}\n", file, e), 1),
@@ -219,13 +246,17 @@ impl Shell {
         {
             let gid = parse_group(group_spec);
             for file in files {
-                if file.starts_with('-') { continue; }
+                if file.starts_with('-') {
+                    continue;
+                }
                 let resolved = match self.vfs.resolve(file, &self.cwd) {
                     Ok(p) => p,
                     Err(e) => return CommandOutput::error(format!("chgrp: {}: {}\n", file, e), 1),
                 };
                 let path_c = std::ffi::CString::new(resolved.to_string_lossy().as_bytes()).unwrap();
-                unsafe { libc::chown(path_c.as_ptr(), u32::MAX, gid); }
+                unsafe {
+                    libc::chown(path_c.as_ptr(), u32::MAX, gid);
+                }
             }
         }
 
@@ -242,15 +273,25 @@ impl Shell {
             unsafe { libc::getgroups(groups, gids.as_mut_ptr()) };
 
             let pw = unsafe { libc::getpwuid(libc::getuid()) };
-            let user_name = if pw.is_null() { "?".to_string() } else {
-                unsafe { std::ffi::CStr::from_ptr((*pw).pw_name).to_string_lossy().to_string() }
+            let user_name = if pw.is_null() {
+                "?".to_string()
+            } else {
+                unsafe {
+                    std::ffi::CStr::from_ptr((*pw).pw_name)
+                        .to_string_lossy()
+                        .to_string()
+                }
             };
 
             let mut names = Vec::new();
             for &g in &gids {
                 let gr = unsafe { libc::getgrgid(g) };
                 if !gr.is_null() {
-                    let name = unsafe { std::ffi::CStr::from_ptr((*gr).gr_name).to_string_lossy().to_string() };
+                    let name = unsafe {
+                        std::ffi::CStr::from_ptr((*gr).gr_name)
+                            .to_string_lossy()
+                            .to_string()
+                    };
                     names.push(name);
                 }
             }
@@ -274,12 +315,42 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             match args[i] {
-                "if" => { if i + 1 < args.len() { ifile = args[i + 1].to_string(); i += 1; } }
-                "of" => { if i + 1 < args.len() { ofile = args[i + 1].to_string(); i += 1; } }
-                "bs" => { if i + 1 < args.len() { bs = parse_dd_size(args[i + 1]); i += 1; } }
-                "count" => { if i + 1 < args.len() { count = Some(args[i + 1].parse().unwrap_or(0)); i += 1; } }
-                "skip" => { if i + 1 < args.len() { skip = args[i + 1].parse().unwrap_or(0); i += 1; } }
-                "seek" => { if i + 1 < args.len() { seek = args[i + 1].parse().unwrap_or(0); i += 1; } }
+                "if" => {
+                    if i + 1 < args.len() {
+                        ifile = args[i + 1].to_string();
+                        i += 1;
+                    }
+                }
+                "of" => {
+                    if i + 1 < args.len() {
+                        ofile = args[i + 1].to_string();
+                        i += 1;
+                    }
+                }
+                "bs" => {
+                    if i + 1 < args.len() {
+                        bs = parse_dd_size(args[i + 1]);
+                        i += 1;
+                    }
+                }
+                "count" => {
+                    if i + 1 < args.len() {
+                        count = Some(args[i + 1].parse().unwrap_or(0));
+                        i += 1;
+                    }
+                }
+                "skip" => {
+                    if i + 1 < args.len() {
+                        skip = args[i + 1].parse().unwrap_or(0);
+                        i += 1;
+                    }
+                }
+                "seek" => {
+                    if i + 1 < args.len() {
+                        seek = args[i + 1].parse().unwrap_or(0);
+                        i += 1;
+                    }
+                }
                 arg if arg.contains('=') => {
                     let parts: Vec<&str> = arg.splitn(2, '=').collect();
                     match parts[0] {
@@ -298,7 +369,10 @@ impl Shell {
         }
 
         let input = if ifile.is_empty() {
-            std::io::stdin().bytes().filter_map(|b| b.ok()).collect::<Vec<u8>>()
+            std::io::stdin()
+                .bytes()
+                .filter_map(|b| b.ok())
+                .collect::<Vec<u8>>()
         } else {
             match self.vfs.read(&ifile, &self.cwd) {
                 Ok(d) => d,
@@ -322,7 +396,12 @@ impl Shell {
                 Ok(p) => p,
                 Err(e) => return CommandOutput::error(format!("dd: {}: {}\n", ofile, e), 1),
             };
-            let mut f = match std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&resolved) {
+            let mut f = match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&resolved)
+            {
                 Ok(f) => f,
                 Err(e) => return CommandOutput::error(format!("dd: {}: {}\n", ofile, e), 1),
             };
@@ -340,7 +419,10 @@ impl Shell {
 
         let blocks = (written + bs - 1) / bs;
         CommandOutput {
-            stdout: format!("{}+0 records in\n{}+0 records out\n{} bytes transferred\n", blocks, blocks, written),
+            stdout: format!(
+                "{}+0 records in\n{}+0 records out\n{} bytes transferred\n",
+                blocks, blocks, written
+            ),
             stderr: String::new(),
             exit_code: 0,
         }
@@ -354,9 +436,14 @@ impl Shell {
         while i < args.len() {
             match args[i] {
                 "-t" => {
-                    if i + 1 < args.len() { format = args[i + 1]; i += 1; }
+                    if i + 1 < args.len() {
+                        format = args[i + 1];
+                        i += 1;
+                    }
                 }
-                "-A" | "-j" | "-N" | "-w" => { i += 1; } // skip these flags
+                "-A" | "-j" | "-N" | "-w" => {
+                    i += 1;
+                } // skip these flags
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
             }
@@ -415,12 +502,23 @@ impl Shell {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if let Ok(content) = std::fs::read_to_string("/proc/uptime") {
-                let uptime: f64 = content.split_whitespace().next().unwrap_or("0").parse().unwrap_or(0.0);
+                let uptime: f64 = content
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0.0);
                 let days = (uptime / 86400.0) as u64;
                 let hours = ((uptime % 86400.0) / 3600.0) as u64;
                 let mins = ((uptime % 3600.0) / 60.0) as u64;
                 let up = if days > 0 {
-                    format!("{} day{}, {:>2}:{:02}", days, if days > 1 { "s" } else { "" }, hours, mins)
+                    format!(
+                        "{} day{}, {:>2}:{:02}",
+                        days,
+                        if days > 1 { "s" } else { "" },
+                        hours,
+                        mins
+                    )
                 } else {
                     format!("{:>2}:{:02}", hours, mins)
                 };
@@ -430,8 +528,10 @@ impl Shell {
         #[cfg(target_os = "macos")]
         {
             let output = std::process::Command::new("sysctl")
-                .arg("-n").arg("kern.boottime")
-                .output().ok();
+                .arg("-n")
+                .arg("kern.boottime")
+                .output()
+                .ok();
             if let Some(out) = output {
                 let s = String::from_utf8_lossy(&out.stdout);
                 if let Some(rest) = s.trim().strip_prefix("{ sec = ") {
@@ -439,13 +539,20 @@ impl Shell {
                         if let Ok(boot_secs) = rest[..pos].parse::<f64>() {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default().as_secs_f64();
+                                .unwrap_or_default()
+                                .as_secs_f64();
                             let uptime = now - boot_secs;
                             let days = (uptime / 86400.0) as u64;
                             let hours = ((uptime % 86400.0) / 3600.0) as u64;
                             let mins = ((uptime % 3600.0) / 60.0) as u64;
                             let up = if days > 0 {
-                                format!("{} day{}, {:>2}:{:02}", days, if days > 1 { "s" } else { "" }, hours, mins)
+                                format!(
+                                    "{} day{}, {:>2}:{:02}",
+                                    days,
+                                    if days > 1 { "s" } else { "" },
+                                    hours,
+                                    mins
+                                )
                             } else {
                                 format!("{:>2}:{:02}", hours, mins)
                             };
@@ -462,19 +569,39 @@ impl Shell {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
-                let mut total = 0u64; let mut free = 0u64; let mut avail = 0u64;
+                let mut total = 0u64;
+                let mut free = 0u64;
+                let mut avail = 0u64;
                 for line in content.lines() {
                     if line.starts_with("MemTotal:") {
-                        total = line.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
+                        total = line
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(0);
                     } else if line.starts_with("MemFree:") {
-                        free = line.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
+                        free = line
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(0);
                     } else if line.starts_with("MemAvailable:") {
-                        avail = line.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
+                        avail = line
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(0);
                     }
                 }
                 let used = total.saturating_sub(if avail > 0 { avail } else { free });
                 let mut out = String::new();
-                out.push_str(&format!("{:>10} {:>10} {:>10} {:>10} {:>10} {:>10}\n", "total", "used", "free", "shared", "buff/cache", "available"));
+                out.push_str(&format!(
+                    "{:>10} {:>10} {:>10} {:>10} {:>10} {:>10}\n",
+                    "total", "used", "free", "shared", "buff/cache", "available"
+                ));
                 out.push_str(&format!("Mem: {:>9} {:>9} {:>9}\n", total, used, free));
                 return CommandOutput::success(out);
             }
@@ -492,19 +619,48 @@ impl Shell {
                 let s = String::from_utf8_lossy(&o.stdout);
                 for line in s.lines() {
                     if line.contains("page size") {
-                        page_size = line.split_whitespace().last().unwrap_or("4096").parse().unwrap_or(4096);
+                        page_size = line
+                            .split_whitespace()
+                            .last()
+                            .unwrap_or("4096")
+                            .parse()
+                            .unwrap_or(4096);
                     }
                     if line.starts_with("Pages free:") {
-                        free_pages = line.split_whitespace().last().unwrap_or("0").parse::<u64>().unwrap_or(0) % 1000000;
+                        free_pages = line
+                            .split_whitespace()
+                            .last()
+                            .unwrap_or("0")
+                            .parse::<u64>()
+                            .unwrap_or(0)
+                            % 1000000;
                     }
                     if line.starts_with("Pages active:") {
-                        active_pages = line.split_whitespace().last().unwrap_or("0").parse::<u64>().unwrap_or(0) % 1000000;
+                        active_pages = line
+                            .split_whitespace()
+                            .last()
+                            .unwrap_or("0")
+                            .parse::<u64>()
+                            .unwrap_or(0)
+                            % 1000000;
                     }
                     if line.starts_with("Pages inactive:") {
-                        inactive_pages = line.split_whitespace().last().unwrap_or("0").parse::<u64>().unwrap_or(0) % 1000000;
+                        inactive_pages = line
+                            .split_whitespace()
+                            .last()
+                            .unwrap_or("0")
+                            .parse::<u64>()
+                            .unwrap_or(0)
+                            % 1000000;
                     }
                     if line.starts_with("Pages wired down:") {
-                        wired_pages = line.split_whitespace().last().unwrap_or("0").parse::<u64>().unwrap_or(0) % 1000000;
+                        wired_pages = line
+                            .split_whitespace()
+                            .last()
+                            .unwrap_or("0")
+                            .parse::<u64>()
+                            .unwrap_or(0)
+                            % 1000000;
                     }
                 }
             }
@@ -514,7 +670,10 @@ impl Shell {
             let total = free + used;
 
             let mut out = String::new();
-            out.push_str(&format!("{:>10} {:>10} {:>10} {:>10} {:>10} {:>10}\n", "total", "used", "free", "shared", "buff/cache", "available"));
+            out.push_str(&format!(
+                "{:>10} {:>10} {:>10} {:>10} {:>10} {:>10}\n",
+                "total", "used", "free", "shared", "buff/cache", "available"
+            ));
             out.push_str(&format!("Mem: {:>9} {:>9} {:>9}\n", total, used, free));
             return CommandOutput::success(out);
         }
@@ -523,7 +682,11 @@ impl Shell {
     }
 
     pub fn cmd_nslookup(&self, args: &[&str]) -> CommandOutput {
-        let host = args.iter().find(|a| !a.starts_with('-')).copied().unwrap_or("");
+        let host = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .copied()
+            .unwrap_or("");
         if host.is_empty() {
             return CommandOutput::error("nslookup: missing hostname\n".to_string(), 1);
         }
@@ -532,9 +695,7 @@ impl Shell {
             return perm;
         }
 
-        let output = std::process::Command::new("nslookup")
-            .arg(host)
-            .output();
+        let output = std::process::Command::new("nslookup").arg(host).output();
 
         match output {
             Ok(o) => CommandOutput {
@@ -549,10 +710,15 @@ impl Shell {
 
 fn parse_dd_size(s: &str) -> usize {
     let s = s.trim();
-    if let Some(rest) = s.strip_suffix('K') { rest.parse::<f64>().unwrap_or(0.0) as usize * 1024 }
-    else if let Some(rest) = s.strip_suffix('M') { rest.parse::<f64>().unwrap_or(0.0) as usize * 1024 * 1024 }
-    else if let Some(rest) = s.strip_suffix('G') { rest.parse::<f64>().unwrap_or(0.0) as usize * 1024 * 1024 * 1024 }
-    else { s.parse().unwrap_or(512) }
+    if let Some(rest) = s.strip_suffix('K') {
+        rest.parse::<f64>().unwrap_or(0.0) as usize * 1024
+    } else if let Some(rest) = s.strip_suffix('M') {
+        rest.parse::<f64>().unwrap_or(0.0) as usize * 1024 * 1024
+    } else if let Some(rest) = s.strip_suffix('G') {
+        rest.parse::<f64>().unwrap_or(0.0) as usize * 1024 * 1024 * 1024
+    } else {
+        s.parse().unwrap_or(512)
+    }
 }
 
 fn bsd_sum(data: &[u8]) -> u16 {
@@ -579,24 +745,35 @@ fn cmd_hashsum_sha1(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Comman
         let input = if files.is_empty() {
             match stdin {
                 Some(s) => s.to_string(),
-                None => return CommandOutput::error("sha1sum: missing checksum file\n".to_string(), 1),
+                None => {
+                    return CommandOutput::error("sha1sum: missing checksum file\n".to_string(), 1)
+                }
             }
         } else {
             match shell.vfs.read_to_string(&files[0], &shell.cwd) {
                 Ok(c) => c,
-                Err(e) => return CommandOutput::error(format!("sha1sum: {}: {}\n", files[0], e), 1),
+                Err(e) => {
+                    return CommandOutput::error(format!("sha1sum: {}: {}\n", files[0], e), 1)
+                }
             }
         };
         let mut output = String::new();
         let mut fail = 0usize;
         for line in input.lines() {
             let line = line.trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
-            if parts.len() < 2 { fail += 1; continue; }
+            if parts.len() < 2 {
+                fail += 1;
+                continue;
+            }
             let expected = parts[0];
             let path = parts[parts.len() - 1];
-            if path == "-" { continue; }
+            if path == "-" {
+                continue;
+            }
             match shell.vfs.read(path, &shell.cwd) {
                 Ok(data) => {
                     let actual = format!("{:x}", Sha1::digest(&data));
@@ -614,11 +791,18 @@ fn cmd_hashsum_sha1(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Comman
             }
         }
         let ec = if fail > 0 { 1 } else { 0 };
-        return CommandOutput { stdout: output, stderr: String::new(), exit_code: ec };
+        return CommandOutput {
+            stdout: output,
+            stderr: String::new(),
+            exit_code: ec,
+        };
     }
 
     if files.is_empty() {
-        let input = match stdin { Some(s) => s, None => return CommandOutput::error("sha1sum: missing operand\n".to_string(), 1) };
+        let input = match stdin {
+            Some(s) => s,
+            None => return CommandOutput::error("sha1sum: missing operand\n".to_string(), 1),
+        };
         let hash = format!("{:x}", Sha1::digest(input.as_bytes()));
         return CommandOutput::success(format!("{}  -\n", hash));
     }
@@ -626,7 +810,11 @@ fn cmd_hashsum_sha1(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Comman
     let mut output = String::new();
     for file in &files {
         match shell.vfs.read(file, &shell.cwd) {
-            Ok(data) => output.push_str(&format!("{}  {}\n", format!("{:x}", Sha1::digest(&data)), file)),
+            Ok(data) => output.push_str(&format!(
+                "{}  {}\n",
+                format!("{:x}", Sha1::digest(&data)),
+                file
+            )),
             Err(e) => output.push_str(&format!("sha1sum: {}: {}\n", file, e)),
         }
     }
@@ -644,22 +832,38 @@ fn parse_owner(spec: &str) -> (u32, u32) {
     };
 
     let uid = parse_user(user_str).unwrap_or(u32::MAX);
-    let gid = if group_str.is_empty() { u32::MAX } else { parse_group(group_str) };
+    let gid = if group_str.is_empty() {
+        u32::MAX
+    } else {
+        parse_group(group_str)
+    };
     (uid, gid)
 }
 
 #[cfg(unix)]
 fn parse_user(s: &str) -> Option<u32> {
-    if let Ok(uid) = s.parse::<u32>() { return Some(uid); }
+    if let Ok(uid) = s.parse::<u32>() {
+        return Some(uid);
+    }
     let cname = std::ffi::CString::new(s).ok()?;
     let pw = unsafe { libc::getpwnam(cname.as_ptr()) };
-    if pw.is_null() { None } else { Some(unsafe { (*pw).pw_uid }) }
+    if pw.is_null() {
+        None
+    } else {
+        Some(unsafe { (*pw).pw_uid })
+    }
 }
 
 #[cfg(unix)]
 fn parse_group(s: &str) -> u32 {
-    if let Ok(gid) = s.parse::<u32>() { return gid; }
+    if let Ok(gid) = s.parse::<u32>() {
+        return gid;
+    }
     let cname = std::ffi::CString::new(s).ok().unwrap_or_default();
     let gr = unsafe { libc::getgrnam(cname.as_ptr()) };
-    if gr.is_null() { u32::MAX } else { unsafe { (*gr).gr_gid } }
+    if gr.is_null() {
+        u32::MAX
+    } else {
+        unsafe { (*gr).gr_gid }
+    }
 }

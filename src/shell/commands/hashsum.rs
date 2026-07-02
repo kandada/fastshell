@@ -1,6 +1,9 @@
-use sha2::{Sha256, Sha512, Digest};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use md5::Md5;
-use crate::shell::{Shell, CommandOutput};
+use sha2::{Digest, Sha256, Sha512};
 
 impl Shell {
     pub fn cmd_sha256sum(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -37,12 +40,16 @@ fn cmd_hashsum_sha<H: Digest>(
         let input = if files.is_empty() {
             match stdin {
                 Some(s) => s.to_string(),
-                None => return CommandOutput::error(format!("{}: missing checksum file\n", name), 1),
+                None => {
+                    return CommandOutput::error(format!("{}: missing checksum file\n", name), 1)
+                }
             }
         } else {
             match shell.vfs.read_to_string(&files[0], &shell.cwd) {
                 Ok(c) => c,
-                Err(e) => return CommandOutput::error(format!("{}: {}: {}\n", name, files[0], e), 1),
+                Err(e) => {
+                    return CommandOutput::error(format!("{}: {}: {}\n", name, files[0], e), 1)
+                }
             }
         };
         return verify_checksums_sha::<H>(shell, &input, name);
@@ -72,11 +79,7 @@ fn cmd_hashsum_sha<H: Digest>(
     CommandOutput::success(output)
 }
 
-fn cmd_hashsum_md5(
-    shell: &Shell,
-    args: &[&str],
-    stdin: Option<&str>,
-) -> CommandOutput {
+fn cmd_hashsum_md5(shell: &Shell, args: &[&str], stdin: Option<&str>) -> CommandOutput {
     let mut check = false;
     let mut files = Vec::new();
 
@@ -92,7 +95,9 @@ fn cmd_hashsum_md5(
         let input = if files.is_empty() {
             match stdin {
                 Some(s) => s.to_string(),
-                None => return CommandOutput::error("md5sum: missing checksum file\n".to_string(), 1),
+                None => {
+                    return CommandOutput::error("md5sum: missing checksum file\n".to_string(), 1)
+                }
             }
         } else {
             match shell.vfs.read_to_string(&files[0], &shell.cwd) {
@@ -127,11 +132,7 @@ fn cmd_hashsum_md5(
     CommandOutput::success(output)
 }
 
-fn verify_checksums_sha<H: Digest>(
-    shell: &Shell,
-    input: &str,
-    name: &str,
-) -> CommandOutput {
+fn verify_checksums_sha<H: Digest>(shell: &Shell, input: &str, name: &str) -> CommandOutput {
     let mut output = String::new();
     let mut fail = 0usize;
 
@@ -177,10 +178,7 @@ fn verify_checksums_sha<H: Digest>(
     }
 }
 
-fn verify_checksums_md5(
-    shell: &Shell,
-    input: &str,
-) -> CommandOutput {
+fn verify_checksums_md5(shell: &Shell, input: &str) -> CommandOutput {
     let mut output = String::new();
     let mut fail = 0usize;
 
@@ -228,6 +226,11 @@ fn verify_checksums_md5(
 
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes.as_ref().iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("")
+        bytes
+            .as_ref()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("")
     }
 }

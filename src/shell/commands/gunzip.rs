@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::io::Read;
 
 impl Shell {
@@ -41,7 +44,11 @@ impl Shell {
                     .strip_suffix(".gz")
                     .or_else(|| file.strip_suffix(".GZ"))
                     .unwrap_or(file);
-                let out_name = if out_name.is_empty() { "uncompressed" } else { out_name };
+                let out_name = if out_name.is_empty() {
+                    "uncompressed"
+                } else {
+                    out_name
+                };
 
                 if let Err(e) = self.vfs.write_bytes(out_name, &self.cwd, &decompressed) {
                     return CommandOutput::error(format!("gunzip: {}: {}\n", out_name, e), 1);

@@ -1,12 +1,13 @@
-use crate::shell::{Shell, CommandOutput, list_processes};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{list_processes, CommandOutput, Shell};
 
 fn get_hostname() -> String {
     #[cfg(unix)]
     {
         let mut buf = vec![0u8; 256];
-        let ret = unsafe {
-            libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-        };
+        let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
         if ret == 0 {
             let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
             String::from_utf8_lossy(&buf[..len]).to_string()
@@ -33,10 +34,22 @@ impl Shell {
         for arg in args {
             match *arg {
                 "-a" => show_all = true,
-                "-s" => { show_kernel = true; show_all = false; }
-                "-n" => { show_node = true; show_all = false; }
-                "-r" => { show_release = true; show_all = false; }
-                "-m" => { show_machine = true; show_all = false; }
+                "-s" => {
+                    show_kernel = true;
+                    show_all = false;
+                }
+                "-n" => {
+                    show_node = true;
+                    show_all = false;
+                }
+                "-r" => {
+                    show_release = true;
+                    show_all = false;
+                }
+                "-m" => {
+                    show_machine = true;
+                    show_all = false;
+                }
                 _ => {}
             }
         }
@@ -55,10 +68,18 @@ impl Shell {
             parts.push(release.to_string());
             parts.push(machine.to_string());
         } else {
-            if show_kernel { parts.push(kernel.to_string()); }
-            if show_node { parts.push(node); }
-            if show_release { parts.push(release.to_string()); }
-            if show_machine { parts.push(machine.to_string()); }
+            if show_kernel {
+                parts.push(kernel.to_string());
+            }
+            if show_node {
+                parts.push(node);
+            }
+            if show_release {
+                parts.push(release.to_string());
+            }
+            if show_machine {
+                parts.push(machine.to_string());
+            }
         }
 
         CommandOutput::success(parts.join(" ") + "\n")
@@ -125,7 +146,8 @@ impl Shell {
             return CommandOutput::error("pgrep: missing pattern\n".to_string(), 1);
         }
 
-        let pattern = args.iter()
+        let pattern = args
+            .iter()
             .find(|a| !a.starts_with('-'))
             .copied()
             .unwrap_or("");
@@ -144,7 +166,11 @@ impl Shell {
         }
 
         if output.is_empty() {
-            CommandOutput { stdout: String::new(), stderr: String::new(), exit_code: 1 }
+            CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 1,
+            }
         } else {
             CommandOutput::success(output)
         }

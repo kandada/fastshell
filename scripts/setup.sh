@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2025 xiefujin <490021684@qq.com>
+# Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 # fastshell build environment setup
 # Run once after cloning: ./scripts/setup.sh
 set -e

@@ -1,5 +1,8 @@
-use fastshell::sdk::Fastshell;
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 
 fn main() {
     let mut s = Fastshell::new();
@@ -23,9 +26,6 @@ fn main() {
     for cmd in cmds {
         let r = s.execute(cmd);
         let first_line = r.stdout.lines().next().unwrap_or("(empty)");
-        println!(
-            "[{}] exit={} | {}",
-            cmd, r.exit_code, first_line
-        );
+        println!("[{}] exit={} | {}", cmd, r.exit_code, first_line);
     }
 }

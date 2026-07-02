@@ -1,5 +1,8 @@
-use fastshell::sdk::Fastshell;
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 
 fn main() {
     let mut sdk = Fastshell::new();
@@ -18,7 +21,14 @@ fn main() {
     let info = sdk.get_info();
     println!("Version : {}", info.version);
     println!("Platform: {}", info.platform);
-    println!("Python  : {}", if info.python_available { "available" } else { "not available" });
+    println!(
+        "Python  : {}",
+        if info.python_available {
+            "available"
+        } else {
+            "not available"
+        }
+    );
     println!("Sandbox : {}", info.sandbox_path);
     println!();
 

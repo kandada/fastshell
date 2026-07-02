@@ -1,9 +1,12 @@
-use crate::vfs::Vfs;
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use crate::sdk::plugin::DevicePlugin;
+use crate::vfs::Vfs;
+use std::collections::HashMap;
 use std::fs;
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 
 pub mod commands;
 
@@ -100,6 +103,7 @@ impl Shell {
         permissions: Arc<Mutex<HashMap<String, bool>>>,
         plugin: Arc<Mutex<Option<Box<dyn DevicePlugin>>>>,
     ) -> Self {
+        // (c) 2025 xiefujin <490021684@qq.com>
         Shell {
             vfs,
             cwd: "/".to_string(),
@@ -110,13 +114,18 @@ impl Shell {
         }
     }
 
-    pub fn check_device_permission(&self, resource_type: &str, resource: &str) -> Option<CommandOutput> {
+    pub fn check_device_permission(
+        &self,
+        resource_type: &str,
+        resource: &str,
+    ) -> Option<CommandOutput> {
         let full = format!("{}:{}", resource_type, resource);
         if let Ok(perms) = self.permissions.lock() {
             match perms.get(&full) {
                 Some(&true) => None,
                 Some(&false) => Some(CommandOutput::error(
-                    format!("Permission denied for {}\n", full), 1,
+                    format!("Permission denied for {}\n", full),
+                    1,
                 )),
                 None => Some(CommandOutput::permission_needed(resource_type, resource)),
             }
@@ -126,6 +135,7 @@ impl Shell {
     }
 
     pub fn check_network_permission(&self, host: &str) -> Option<CommandOutput> {
+        // (c) 2025 xiefujin <490021684@qq.com>
         if !self.network_ask_permission {
             return None;
         }
@@ -134,7 +144,8 @@ impl Shell {
             match perms.get(&resource) {
                 Some(&true) => None,
                 Some(&false) => Some(CommandOutput::error(
-                    format!("Permission denied for {}\n", resource), 1,
+                    format!("Permission denied for {}\n", resource),
+                    1,
                 )),
                 None => Some(CommandOutput::permission_needed("network", host)),
             }
@@ -144,6 +155,7 @@ impl Shell {
     }
 
     pub fn execute(&mut self, command: &str, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        // (c) 2025 xiefujin <490021684@qq.com>
         match command {
             "ls" => self.cmd_ls(args),
             "cd" => self.cmd_cd(args),
@@ -346,6 +358,7 @@ impl Shell {
     }
 
     fn run_subprocess(&self, command: &str, args: &[&str]) -> CommandOutput {
+        // (c) 2025 xiefujin <490021684@qq.com>
         let vfs_root = self.vfs.root().to_path_buf();
         let cwd = if self.cwd == "/" {
             vfs_root.clone()
@@ -377,7 +390,7 @@ impl Shell {
                     stderr: String::from_utf8_lossy(&out.stderr).to_string(),
                     exit_code,
                 }
-            },
+            }
             Err(e) => CommandOutput {
                 stdout: String::new(),
                 stderr: format!("{}: command not found ({})\n", command, e),
@@ -527,9 +540,7 @@ pub(crate) fn extract_repo_name(url: &str) -> String {
 #[cfg(feature = "git")]
 pub(crate) fn status_code(status: git2::Status, staged: bool) -> char {
     if staged {
-        if status.contains(git2::Status::INDEX_NEW)
-            || status.contains(git2::Status::WT_NEW)
-        {
+        if status.contains(git2::Status::INDEX_NEW) || status.contains(git2::Status::WT_NEW) {
             'A'
         } else if status.contains(git2::Status::INDEX_MODIFIED) {
             'M'
@@ -703,12 +714,7 @@ fn list_processes_macos() -> Result<Vec<ProcInfo>, String> {
     let mut pids: Vec<libc::c_int> = vec![0; 4096];
     let bufsize = (pids.len() * std::mem::size_of::<libc::c_int>()) as i32;
 
-    let used = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr() as *mut libc::c_void,
-            bufsize,
-        )
-    };
+    let used = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, bufsize) };
 
     if used <= 0 {
         return Err("ps: proc_listallpids failed".to_string());
@@ -773,7 +779,11 @@ fn get_proc_info_macos(pid: libc::c_int) -> Option<ProcInfo> {
         }
 
         let mut name_buf: [libc::c_char; MAXCOMLEN * 2] = [0; MAXCOMLEN * 2];
-        let ret = libc::proc_name(pid, name_buf.as_mut_ptr() as *mut libc::c_void, (MAXCOMLEN * 2) as u32);
+        let ret = libc::proc_name(
+            pid,
+            name_buf.as_mut_ptr() as *mut libc::c_void,
+            (MAXCOMLEN * 2) as u32,
+        );
         let comm = if ret == 0 {
             std::ffi::CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()
@@ -826,7 +836,11 @@ fn get_proc_info_macos(pid: libc::c_int) -> Option<ProcInfo> {
                 &mut bsd2 as *mut _ as *mut libc::c_void,
                 std::mem::size_of::<ProcBsdShortInfo>() as i32,
             );
-            if sz2 > 0 { bsd2.pbsi_uid } else { 0 }
+            if sz2 > 0 {
+                bsd2.pbsi_uid
+            } else {
+                0
+            }
         };
 
         Some(ProcInfo {
@@ -834,8 +848,7 @@ fn get_proc_info_macos(pid: libc::c_int) -> Option<ProcInfo> {
             ppid,
             comm,
             rss: ti.pti_resident_size / 1024,
-            cpu_pct: (ti.pti_total_user + ti.pti_total_system) as f64 / 1_000_000_000.0
-                * 100.0,
+            cpu_pct: (ti.pti_total_user + ti.pti_total_system) as f64 / 1_000_000_000.0 * 100.0,
             uid,
         })
     }
@@ -885,10 +898,7 @@ pub(crate) async fn ssh_exec_russh(
                 return CommandOutput::error(format!("ssh: cannot load key: {}\n", e), 1);
             }
         };
-        if let Err(e) = handle
-            .authenticate_publickey(user, Arc::new(key))
-            .await
-        {
+        if let Err(e) = handle.authenticate_publickey(user, Arc::new(key)).await {
             return CommandOutput::error(format!("ssh: auth error: {}\n", e), 1);
         }
     } else {
@@ -985,8 +995,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_shell_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_shell_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }
@@ -1093,7 +1103,9 @@ mod tests {
     #[test]
     fn test_grep() {
         let shell = mk_shell();
-        let _ = shell.vfs.write("/data.txt", "", "hello world\nfoo bar\nHELLO again\n");
+        let _ = shell
+            .vfs
+            .write("/data.txt", "", "hello world\nfoo bar\nHELLO again\n");
         let out = shell.cmd_grep(&["hello", "data.txt"], None);
         assert_eq!(out.stdout, "hello world\n");
 
@@ -1187,7 +1199,7 @@ mod tests {
         let shell = mk_shell();
         shell
             .vfs
-            .write("/data.txt", "", "hello gzip world! " .repeat(100).as_str())
+            .write("/data.txt", "", "hello gzip world! ".repeat(100).as_str())
             .unwrap();
 
         let out = shell.cmd_gzip(&["/data.txt"]);
@@ -1235,18 +1247,9 @@ mod tests {
 
         let out = shell.cmd_tar(&["-xf", "test.tar"]);
         assert_eq!(out.exit_code, 0);
-        assert_eq!(
-            shell.vfs.read_to_string("a.txt", "").unwrap(),
-            "alpha"
-        );
-        assert_eq!(
-            shell.vfs.read_to_string("b.txt", "").unwrap(),
-            "beta"
-        );
-        assert_eq!(
-            shell.vfs.read_to_string("sub/c.txt", "").unwrap(),
-            "gamma"
-        );
+        assert_eq!(shell.vfs.read_to_string("a.txt", "").unwrap(), "alpha");
+        assert_eq!(shell.vfs.read_to_string("b.txt", "").unwrap(), "beta");
+        assert_eq!(shell.vfs.read_to_string("sub/c.txt", "").unwrap(), "gamma");
     }
 
     #[test]
@@ -1262,10 +1265,7 @@ mod tests {
 
         let out = shell.cmd_tar(&["-xzf", "test.tar.gz"]);
         assert_eq!(out.exit_code, 0);
-        assert_eq!(
-            shell.vfs.read_to_string("hello.txt", "").unwrap(),
-            "world"
-        );
+        assert_eq!(shell.vfs.read_to_string("hello.txt", "").unwrap(), "world");
     }
 
     #[test]
@@ -1285,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-#[cfg(feature = "git")]
+    #[cfg(feature = "git")]
     fn test_git_init_and_status() {
         let mut shell = mk_shell();
         let out = shell.execute("git", &["init"], None);
@@ -1304,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-#[cfg(feature = "git")]
+    #[cfg(feature = "git")]
     fn test_git_clone_usage_error() {
         let mut shell = mk_shell();
         let out = shell.execute("git", &["clone"], None);
@@ -1321,7 +1321,10 @@ mod tests {
     #[test]
     fn test_head_tail() {
         let shell = mk_shell();
-        let content = (1..=20).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n");
+        let content = (1..=20)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         shell.vfs.write("/nums.txt", "", &content).unwrap();
 
         let out = shell.cmd_head(&["-n", "3", "/nums.txt"], None);
@@ -1337,7 +1340,10 @@ mod tests {
     #[test]
     fn test_wc() {
         let shell = mk_shell();
-        shell.vfs.write("/a.txt", "", "hello world\nfoo bar\nbaz").unwrap();
+        shell
+            .vfs
+            .write("/a.txt", "", "hello world\nfoo bar\nbaz")
+            .unwrap();
         let out = shell.cmd_wc(&["/a.txt"], None);
         assert!(out.stdout.contains("3"));
         assert!(out.stdout.contains("5"));
@@ -1346,8 +1352,14 @@ mod tests {
     #[test]
     fn test_diff() {
         let shell = mk_shell();
-        shell.vfs.write("/a.txt", "", "line1\nline2\nline3\n").unwrap();
-        shell.vfs.write("/b.txt", "", "line1\nmodified\nline3\n").unwrap();
+        shell
+            .vfs
+            .write("/a.txt", "", "line1\nline2\nline3\n")
+            .unwrap();
+        shell
+            .vfs
+            .write("/b.txt", "", "line1\nmodified\nline3\n")
+            .unwrap();
         let out = shell.cmd_diff(&["/a.txt", "/b.txt"]);
         assert!(out.stdout.contains("modified"));
         assert_ne!(out.exit_code, 0);
@@ -1365,7 +1377,10 @@ mod tests {
     #[test]
     fn test_sed() {
         let shell = mk_shell();
-        shell.vfs.write("/t.txt", "", "hello world\nfoo bar\nhello again\n").unwrap();
+        shell
+            .vfs
+            .write("/t.txt", "", "hello world\nfoo bar\nhello again\n")
+            .unwrap();
         let out = shell.cmd_sed(&["s/hello/hi/g", "/t.txt"], None);
         assert!(out.stdout.contains("hi world"));
         assert!(out.stdout.contains("hi again"));
@@ -1415,9 +1430,18 @@ mod tests {
 
     #[test]
     fn test_extract_filename() {
-        assert_eq!(extract_filename_from_url("http://example.com/file.txt"), "file.txt");
-        assert_eq!(extract_filename_from_url("http://example.com/path/to/file.tar.gz"), "file.tar.gz");
-        assert_eq!(extract_filename_from_url("http://example.com/"), "index.html");
+        assert_eq!(
+            extract_filename_from_url("http://example.com/file.txt"),
+            "file.txt"
+        );
+        assert_eq!(
+            extract_filename_from_url("http://example.com/path/to/file.tar.gz"),
+            "file.tar.gz"
+        );
+        assert_eq!(
+            extract_filename_from_url("http://example.com/"),
+            "index.html"
+        );
         assert_eq!(extract_filename_from_url("http://example.com/a?q=1"), "a");
     }
 
@@ -1649,7 +1673,10 @@ mod tests {
     #[test]
     fn test_sort_by_column() {
         let shell = mk_shell();
-        shell.vfs.write("/f.txt", "", "apple 3\nbanana 1\ncherry 2\n").unwrap();
+        shell
+            .vfs
+            .write("/f.txt", "", "apple 3\nbanana 1\ncherry 2\n")
+            .unwrap();
         let out = shell.cmd_sort(&["-k", "2", "/f.txt"], None);
         let lines: Vec<&str> = out.stdout.trim().lines().collect();
         assert_eq!(lines[0], "banana 1");
@@ -1660,7 +1687,10 @@ mod tests {
     #[test]
     fn test_sort_by_column_range() {
         let shell = mk_shell();
-        shell.vfs.write("/f.txt", "", "a x y 1\nb x z 2\na x a 3\n").unwrap();
+        shell
+            .vfs
+            .write("/f.txt", "", "a x y 1\nb x z 2\na x a 3\n")
+            .unwrap();
         let out = shell.cmd_sort(&["-k", "2,3", "/f.txt"], None);
         let lines: Vec<&str> = out.stdout.trim().lines().collect();
         assert_eq!(lines[0], "a x a 3");
@@ -1682,7 +1712,10 @@ mod tests {
     #[test]
     fn test_sort_case_insensitive() {
         let shell = mk_shell();
-        shell.vfs.write("/f.txt", "", "Zebra\nalpha\nBeta\n").unwrap();
+        shell
+            .vfs
+            .write("/f.txt", "", "Zebra\nalpha\nBeta\n")
+            .unwrap();
         let out = shell.cmd_sort(&["-f", "/f.txt"], None);
         let lines: Vec<&str> = out.stdout.trim().lines().collect();
         assert_eq!(lines[0], "alpha");

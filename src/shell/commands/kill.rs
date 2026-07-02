@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_kill(&self, args: &[&str]) -> CommandOutput {
@@ -16,7 +19,10 @@ impl Shell {
             let sig_str = &args[0][1..];
             if sig_str.eq_ignore_ascii_case("s") {
                 if args.len() < 2 {
-                    return CommandOutput::error("kill: -s requires a signal name\n".to_string(), 1);
+                    return CommandOutput::error(
+                        "kill: -s requires a signal name\n".to_string(),
+                        1,
+                    );
                 }
                 signal = match crate::shell::parse_signal(args[1]) {
                     Some(s) => s,
@@ -54,10 +60,7 @@ impl Shell {
             let pid: libc::pid_t = match pid_str.parse() {
                 Ok(p) => p,
                 Err(_) => {
-                    return CommandOutput::error(
-                        format!("kill: {}: invalid pid\n", pid_str),
-                        1,
-                    );
+                    return CommandOutput::error(format!("kill: {}: invalid pid\n", pid_str), 1);
                 }
             };
 
@@ -66,15 +69,15 @@ impl Shell {
                 let ret = unsafe { libc::kill(pid, signal) };
                 if ret != 0 {
                     let err = std::io::Error::last_os_error();
-                    return CommandOutput::error(
-                        format!("kill: {}: {}\n", pid, err),
-                        1,
-                    );
+                    return CommandOutput::error(format!("kill: {}: {}\n", pid, err), 1);
                 }
             }
             #[cfg(not(unix))]
             {
-                return CommandOutput::error("kill: not supported on this platform\n".to_string(), 1);
+                return CommandOutput::error(
+                    "kill: not supported on this platform\n".to_string(),
+                    1,
+                );
             }
         }
 

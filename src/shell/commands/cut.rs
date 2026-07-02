@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_cut(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -172,7 +175,10 @@ fn parse_field_spec(spec: &str) -> Vec<FieldRange> {
             fields.push(FieldRange { start, end });
         } else {
             let n: usize = part.parse().unwrap_or(1);
-            fields.push(FieldRange { start: n, end: Some(n) });
+            fields.push(FieldRange {
+                start: n,
+                end: Some(n),
+            });
         }
     }
     fields

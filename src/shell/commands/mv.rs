@@ -1,8 +1,15 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_mv(&self, args: &[&str]) -> CommandOutput {
-        let operands: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let operands: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
 
         if operands.len() < 2 {
             return CommandOutput::error("mv: missing file operand\n".to_string(), 1);

@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_tr(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -146,7 +149,11 @@ fn unescape_tr(s: &str) -> String {
                 '0' => {
                     let mut octal = String::new();
                     let mut j = i + 1;
-                    while j < chars.len() && j < i + 4 && chars[j].is_ascii_digit() && chars[j] < '8' {
+                    while j < chars.len()
+                        && j < i + 4
+                        && chars[j].is_ascii_digit()
+                        && chars[j] < '8'
+                    {
                         octal.push(chars[j]);
                         j += 1;
                     }

@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::process::Command as ProcessCommand;
 use std::time::SystemTime;
 
@@ -48,7 +51,10 @@ impl Shell {
                         let pat = args[i + 1].to_string();
                         add_condition(
                             &mut conditions,
-                            Condition { negate: negate_next, kind: ConditionKind::Name(pat) },
+                            Condition {
+                                negate: negate_next,
+                                kind: ConditionKind::Name(pat),
+                            },
                         );
                         negate_next = false;
                         i += 1;
@@ -59,7 +65,10 @@ impl Shell {
                         if let Some(ch) = args[i + 1].chars().next() {
                             add_condition(
                                 &mut conditions,
-                                Condition { negate: negate_next, kind: ConditionKind::Type(ch) },
+                                Condition {
+                                    negate: negate_next,
+                                    kind: ConditionKind::Type(ch),
+                                },
                             );
                         }
                         negate_next = false;
@@ -71,7 +80,10 @@ impl Shell {
                         if let Some(cond) = parse_mtime(args[i + 1]) {
                             add_condition(
                                 &mut conditions,
-                                Condition { negate: negate_next, kind: cond },
+                                Condition {
+                                    negate: negate_next,
+                                    kind: cond,
+                                },
                             );
                         }
                         negate_next = false;
@@ -83,7 +95,10 @@ impl Shell {
                         if let Some(cond) = parse_size(args[i + 1]) {
                             add_condition(
                                 &mut conditions,
-                                Condition { negate: negate_next, kind: cond },
+                                Condition {
+                                    negate: negate_next,
+                                    kind: cond,
+                                },
                             );
                         }
                         negate_next = false;
@@ -258,10 +273,7 @@ fn apply_actions(actions: &[Action], entry_path: &str, output: &mut String, exit
                     }
                     Err(e) => {
                         *exit_code = 1;
-                        output.push_str(&format!(
-                            "find: '{}' failed: {}\n",
-                            args[0], e
-                        ));
+                        output.push_str(&format!("find: '{}' failed: {}\n", args[0], e));
                     }
                 }
             }
@@ -292,28 +304,29 @@ fn evaluate_conditions(
                     'f' => !entry.is_dir,
                     _ => true,
                 },
-                ConditionKind::Mtime { days, greater_than } => {
-                    match entry.modified {
-                        Some(mod_time) => {
-                            let now = SystemTime::now();
-                            let file_age_secs = match now.duration_since(mod_time) {
-                                Ok(d) => d.as_secs() as i64,
-                                Err(_) => -1,
-                            };
-                            if file_age_secs < 0 {
-                                return false;
-                            }
-                            let file_days = file_age_secs / 86400;
-                            if *greater_than {
-                                file_days > *days
-                            } else {
-                                file_days < *days
-                            }
+                ConditionKind::Mtime { days, greater_than } => match entry.modified {
+                    Some(mod_time) => {
+                        let now = SystemTime::now();
+                        let file_age_secs = match now.duration_since(mod_time) {
+                            Ok(d) => d.as_secs() as i64,
+                            Err(_) => -1,
+                        };
+                        if file_age_secs < 0 {
+                            return false;
                         }
-                        None => false,
+                        let file_days = file_age_secs / 86400;
+                        if *greater_than {
+                            file_days > *days
+                        } else {
+                            file_days < *days
+                        }
                     }
-                }
-                ConditionKind::Size { bytes, greater_than } => {
+                    None => false,
+                },
+                ConditionKind::Size {
+                    bytes,
+                    greater_than,
+                } => {
                     let size = entry.size as i64;
                     if *greater_than {
                         size > *bytes
@@ -322,7 +335,11 @@ fn evaluate_conditions(
                     }
                 }
             };
-            if *negate { !result } else { result }
+            if *negate {
+                !result
+            } else {
+                result
+            }
         });
 
         if group_match {
@@ -423,7 +440,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_find_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_find_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }
@@ -512,7 +530,16 @@ mod tests {
         shell.cmd_touch(&["b.md"]);
         shell.cmd_touch(&["c.rs"]);
 
-        let out = shell.cmd_find(&[".", "-name", "*.txt", "-o", "-name", "*.md", "-maxdepth", "1"]);
+        let out = shell.cmd_find(&[
+            ".",
+            "-name",
+            "*.txt",
+            "-o",
+            "-name",
+            "*.md",
+            "-maxdepth",
+            "1",
+        ]);
         assert!(out.stdout.contains("a.txt"));
         assert!(out.stdout.contains("b.md"));
         assert!(!out.stdout.contains("c.rs"));

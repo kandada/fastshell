@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use crate::vfs::{self, Vfs};
 
 #[derive(Debug, Clone)]
@@ -128,8 +131,11 @@ mod tests {
 
     fn setup_bridge() -> FsBridge {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_bridge_fs_test_{}_{}", std::process::id(), n));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_bridge_fs_test_{}_{}",
+            std::process::id(),
+            n
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         FsBridge::new(vfs)

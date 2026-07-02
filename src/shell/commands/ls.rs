@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -74,7 +77,12 @@ impl Shell {
         CommandOutput::success(output)
     }
 
-    fn format_ls_entry(&self, path: &Path, long_format: bool, human_readable: bool) -> Option<String> {
+    fn format_ls_entry(
+        &self,
+        path: &Path,
+        long_format: bool,
+        human_readable: bool,
+    ) -> Option<String> {
         let metadata = match path.symlink_metadata() {
             Ok(m) => m,
             Err(_) => return None,

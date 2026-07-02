@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::io::{Read, Write};
 
 impl Shell {
@@ -18,7 +21,10 @@ impl Shell {
         }
 
         if zip_name.is_empty() || files.is_empty() {
-            return CommandOutput::error("zip: usage: zip archive.zip file1 [file2 ...]\n".to_string(), 1);
+            return CommandOutput::error(
+                "zip: usage: zip archive.zip file1 [file2 ...]\n".to_string(),
+                1,
+            );
         }
 
         let resolved_zip = match self.vfs.resolve(&zip_name, &self.cwd) {
@@ -32,8 +38,8 @@ impl Shell {
         };
 
         let mut zip_writer = zip::ZipWriter::new(zip_file);
-        let options = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         for file in &files {
             match self.vfs.read(file, &self.cwd) {
@@ -42,7 +48,10 @@ impl Shell {
                         return CommandOutput::error(format!("zip: {}: {}\n", file, e), 1);
                     }
                     if let Err(e) = zip_writer.write_all(&data) {
-                        return CommandOutput::error(format!("zip: {}: write error: {}\n", file, e), 1);
+                        return CommandOutput::error(
+                            format!("zip: {}: write error: {}\n", file, e),
+                            1,
+                        );
                     }
                 }
                 Err(e) => {

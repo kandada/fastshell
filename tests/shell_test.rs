@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -5,8 +8,8 @@ static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn setup_dir() -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir()
-        .join(format!("fastshell_int_shell_{}_{}", std::process::id(), n));
+    let dir =
+        std::env::temp_dir().join(format!("fastshell_int_shell_{}_{}", std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
     dir
 }
@@ -50,7 +53,9 @@ fn test_shell_grep_and_cat() {
     let vfs = fastshell::vfs::Vfs::new(dir).unwrap();
     let mut shell = fastshell::shell::Shell::new(vfs);
 
-    let _ = shell.vfs.write("/text.txt", "", "line one\nline two\nLINE THREE\n");
+    let _ = shell
+        .vfs
+        .write("/text.txt", "", "line one\nline two\nLINE THREE\n");
     let out = shell.execute("cat", &["text.txt"], None);
     assert!(out.stdout.contains("line one"));
     assert!(out.stdout.contains("line two"));

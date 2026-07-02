@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_uniq(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -34,7 +37,14 @@ impl Shell {
         if files.is_empty() {
             match stdin {
                 Some(input) => {
-                    return uniq_process(input, count, dup_only, uniq_only, ignore_case, skip_fields);
+                    return uniq_process(
+                        input,
+                        count,
+                        dup_only,
+                        uniq_only,
+                        ignore_case,
+                        skip_fields,
+                    );
                 }
                 None => return CommandOutput::error("uniq: missing file operand\n".to_string(), 1),
             }
@@ -46,8 +56,19 @@ impl Shell {
                 Ok(c) => c,
                 Err(e) => return CommandOutput::error(format!("uniq: {}: {}\n", file, e), 1),
             };
-            match uniq_process(&content, count, dup_only, uniq_only, ignore_case, skip_fields) {
-                CommandOutput { stdout, exit_code: 0, .. } => output.push_str(&stdout),
+            match uniq_process(
+                &content,
+                count,
+                dup_only,
+                uniq_only,
+                ignore_case,
+                skip_fields,
+            ) {
+                CommandOutput {
+                    stdout,
+                    exit_code: 0,
+                    ..
+                } => output.push_str(&stdout),
                 err => return err,
             }
         }
@@ -66,24 +87,27 @@ fn uniq_process(
 ) -> CommandOutput {
     let lines: Vec<&str> = input.lines().collect();
     let lines: Vec<(&str, String)> = if skip_fields > 0 || ignore_case {
-        lines.into_iter().map(|l| {
-            let cmp_part = if skip_fields > 0 {
-                let parts: Vec<&str> = l.split_whitespace().collect();
-                if parts.len() > skip_fields {
-                    parts[skip_fields..].join(" ")
+        lines
+            .into_iter()
+            .map(|l| {
+                let cmp_part = if skip_fields > 0 {
+                    let parts: Vec<&str> = l.split_whitespace().collect();
+                    if parts.len() > skip_fields {
+                        parts[skip_fields..].join(" ")
+                    } else {
+                        String::new()
+                    }
                 } else {
-                    String::new()
-                }
-            } else {
-                l.to_string()
-            };
-            let key = if ignore_case {
-                cmp_part.to_lowercase()
-            } else {
-                cmp_part
-            };
-            (l, key)
-        }).collect()
+                    l.to_string()
+                };
+                let key = if ignore_case {
+                    cmp_part.to_lowercase()
+                } else {
+                    cmp_part
+                };
+                (l, key)
+            })
+            .collect()
     } else {
         lines.into_iter().map(|l| (l, l.to_string())).collect()
     };
@@ -118,16 +142,16 @@ fn uniq_process(
 
 #[cfg(test)]
 mod tests {
-    use crate::vfs::Vfs;
     use crate::shell::Shell;
+    use crate::vfs::Vfs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_uniq_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_uniq_test_{}_{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         Shell::new(Vfs::new(dir).unwrap())
     }
@@ -170,7 +194,10 @@ mod tests {
     #[test]
     fn test_uniq_ignore_case() {
         let shell = mk_shell();
-        shell.vfs.write("/f.txt", "", "Hello\nhello\nHELLO\nworld\n").unwrap();
+        shell
+            .vfs
+            .write("/f.txt", "", "Hello\nhello\nHELLO\nworld\n")
+            .unwrap();
         let out = shell.cmd_uniq(&["-i", "/f.txt"], None);
         assert_eq!(out.stdout.trim().lines().count(), 2);
     }
@@ -178,7 +205,10 @@ mod tests {
     #[test]
     fn test_uniq_skip_fields() {
         let shell = mk_shell();
-        shell.vfs.write("/f.txt", "", "1 a\n2 a\n3 b\n4 b\n").unwrap();
+        shell
+            .vfs
+            .write("/f.txt", "", "1 a\n2 a\n3 b\n4 b\n")
+            .unwrap();
         let out = shell.cmd_uniq(&["-f", "1", "/f.txt"], None);
         let lines: Vec<&str> = out.stdout.trim().lines().collect();
         assert_eq!(lines, vec!["1 a", "3 b"]);

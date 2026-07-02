@@ -1,7 +1,10 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use fastshell::sdk::Fastshell;
-use fastshell::sdk::types::Config;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -10,29 +13,60 @@ fn setup() -> Fastshell {
     let dir = std::env::temp_dir().join(format!("fs_compat_{}_{}", std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
     let mut sdk = Fastshell::new();
-    sdk.init(Config { sandbox_path: dir.to_string_lossy().to_string(), python_enabled: false, allow_subprocess: true, network_ask_permission: false, command_timeout_ms: 0 }).unwrap();
+    sdk.init(Config {
+        sandbox_path: dir.to_string_lossy().to_string(),
+        python_enabled: false,
+        allow_subprocess: true,
+        network_ask_permission: false,
+        command_timeout_ms: 0,
+    })
+    .unwrap();
 
-    sdk.write_file("hello.txt", "hello world\nfoo bar\nHELLO again\n").unwrap();
+    sdk.write_file("hello.txt", "hello world\nfoo bar\nHELLO again\n")
+        .unwrap();
     sdk.write_file("nums.txt", "3\n1\n2\n2\n").unwrap();
     sdk.write_file("cols.txt", "a,b,c\nd,e,f\ng,h,i\n").unwrap();
-    sdk.write_file("lorem.txt", "Lorem ipsum dolor sit amet\nconsectetur adipiscing elit\nsed do eiusmod tempor\n").unwrap();
+    sdk.write_file(
+        "lorem.txt",
+        "Lorem ipsum dolor sit amet\nconsectetur adipiscing elit\nsed do eiusmod tempor\n",
+    )
+    .unwrap();
     sdk
 }
 
 macro_rules! check {
     ($name:expr, $sdk:expr, $cmd:expr, $expect_ok:expr) => {
         let r = $sdk.execute($cmd);
-        let sys = std::process::Command::new("sh").arg("-c")
+        let sys = std::process::Command::new("sh")
+            .arg("-c")
             .arg(format!("cd {} && {}", $sdk.vfs_root(), $cmd))
-            .output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-        let status = if r.is_success() == $expect_ok { "OK" } else { "EXIT" };
-        let match_status = if r.stdout.trim() == sys.trim() { "OK" } else { "DIFF" };
-        println!("[{}] {} | exit={}, sys_match={}", status, $name, match_status, $cmd);
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let status = if r.is_success() == $expect_ok {
+            "OK"
+        } else {
+            "EXIT"
+        };
+        let match_status = if r.stdout.trim() == sys.trim() {
+            "OK"
+        } else {
+            "DIFF"
+        };
+        println!(
+            "[{}] {} | exit={}, sys_match={}",
+            status, $name, match_status, $cmd
+        );
         if match_status != "OK" {
             println!("  fastshell: {:?}", r.stdout);
             println!("  system:    {:?}", sys);
         }
-        assert!(r.is_success() == $expect_ok, "{}: exit code mismatch for '{}'", $name, $cmd);
+        assert!(
+            r.is_success() == $expect_ok,
+            "{}: exit code mismatch for '{}'",
+            $name,
+            $cmd
+        );
     };
 
     ($name:expr, $sdk:expr, $cmd:expr) => {

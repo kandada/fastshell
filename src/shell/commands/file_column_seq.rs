@@ -1,8 +1,15 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_file(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
-        let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let files: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
 
         let mut output = String::new();
         if files.is_empty() {
@@ -35,7 +42,7 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             match args[i] {
-                "-t" => {},
+                "-t" => {}
                 "-s" => {
                     if i + 1 < args.len() {
                         delimiter = args[i + 1].chars().next().unwrap_or(' ');
@@ -67,7 +74,8 @@ impl Shell {
             content
         };
 
-        let lines: Vec<Vec<&str>> = input.lines()
+        let lines: Vec<Vec<&str>> = input
+            .lines()
             .map(|line| line.split(delimiter).collect())
             .collect();
 
@@ -154,13 +162,19 @@ fn detect_type(data: &[u8]) -> String {
         return "empty".to_string();
     }
 
-    let text_chars = data.iter().filter(|&&b| b >= 0x20 || b == b'\n' || b == b'\r' || b == b'\t').count();
+    let text_chars = data
+        .iter()
+        .filter(|&&b| b >= 0x20 || b == b'\n' || b == b'\r' || b == b'\t')
+        .count();
     if text_chars as f64 / data.len() as f64 > 0.95 {
         if data.starts_with(b"{") || data.starts_with(b"[") {
             return "JSON text".to_string();
         }
         if data.starts_with(b"<") {
-            if data.starts_with(b"<?xml") || data.starts_with(b"<!DOCTYPE") || data.starts_with(b"<html") {
+            if data.starts_with(b"<?xml")
+                || data.starts_with(b"<!DOCTYPE")
+                || data.starts_with(b"<html")
+            {
                 return "HTML/XML text".to_string();
             }
         }
@@ -182,12 +196,16 @@ fn detect_type(data: &[u8]) -> String {
         [b'P', b'K', 0x05, 0x06, ..] => return "Zip archive (empty)".to_string(),
         [0x75, 0x73, 0x74, 0x61, 0x72, ..] => return "tar archive (POSIX)".to_string(),
         [0x7F, b'E', b'L', b'F', ..] => return "ELF binary".to_string(),
-        [0xCF, 0xFA, 0xED, 0xFE, ..] | [0xFE, 0xED, 0xFA, 0xCF, ..] => return "Mach-O binary".to_string(),
+        [0xCF, 0xFA, 0xED, 0xFE, ..] | [0xFE, 0xED, 0xFA, 0xCF, ..] => {
+            return "Mach-O binary".to_string()
+        }
         [0xCA, 0xFE, 0xBA, 0xBE, ..] => return "Mach-O fat binary".to_string(),
         [b'S', b'Q', b'L', b'i', b't', b'e', ..] => return "SQLite database".to_string(),
         [0x25, 0x50, 0x44, 0x46, ..] => return "PDF document".to_string(),
         [b'R', b'a', b'r', b'!', ..] => return "RAR archive".to_string(),
-        [0x00, 0x00, 0x01, 0xBA, ..] | [0x00, 0x00, 0x01, 0xB3, ..] => return "MPEG video".to_string(),
+        [0x00, 0x00, 0x01, 0xBA, ..] | [0x00, 0x00, 0x01, 0xB3, ..] => {
+            return "MPEG video".to_string()
+        }
         _ => {}
     }
 

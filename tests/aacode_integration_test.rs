@@ -1,7 +1,10 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use fastshell::sdk::Fastshell;
-use fastshell::sdk::types::Config;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -16,7 +19,8 @@ fn setup() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 30_000,
-    }).unwrap();
+    })
+    .unwrap();
     sdk
 }
 
@@ -36,7 +40,8 @@ fn python_available(sdk: &Fastshell) -> bool {
 fn aacode_pattern_ls_variants() {
     let sdk = setup();
     sdk.execute("mkdir -p project/src");
-    sdk.write_file("project/src/main.py", "print('hello')").unwrap();
+    sdk.write_file("project/src/main.py", "print('hello')")
+        .unwrap();
 
     let cmds = vec!["ls", "ls -la", "ls -R", "ls project", "ls project/src"];
     for c in cmds {
@@ -48,7 +53,11 @@ fn aacode_pattern_ls_variants() {
 #[test]
 fn aacode_pattern_cat_file() {
     let sdk = setup();
-    sdk.write_file("setup.py", "from setuptools import setup\nsetup(name='test')\n").unwrap();
+    sdk.write_file(
+        "setup.py",
+        "from setuptools import setup\nsetup(name='test')\n",
+    )
+    .unwrap();
     let r = sdk.execute("cat setup.py");
     assert_eq!(r.exit_code, 0);
     assert!(r.stdout.contains("setuptools"));
@@ -57,7 +66,11 @@ fn aacode_pattern_cat_file() {
 #[test]
 fn aacode_pattern_grep_search() {
     let sdk = setup();
-    sdk.write_file("requirements.txt", "openai>=1.0\nanthropic>=0.25\naiohttp\n").unwrap();
+    sdk.write_file(
+        "requirements.txt",
+        "openai>=1.0\nanthropic>=0.25\naiohttp\n",
+    )
+    .unwrap();
 
     let r = sdk.execute("grep openai requirements.txt");
     assert_eq!(r.exit_code, 0);
@@ -77,7 +90,8 @@ fn aacode_pattern_find_files() {
     let sdk = setup();
     sdk.execute("mkdir -p project/tests");
     sdk.write_file("project/main.py", "print(1)").unwrap();
-    sdk.write_file("project/tests/test_main.py", "def test(): pass").unwrap();
+    sdk.write_file("project/tests/test_main.py", "def test(): pass")
+        .unwrap();
     sdk.write_file("project/README.md", "# Project").unwrap();
 
     let r = sdk.execute("find project -name '*.py'");
@@ -144,7 +158,11 @@ fn aacode_pattern_wc_head_tail() {
 #[test]
 fn aacode_pattern_sed_replace() {
     let sdk = setup();
-    sdk.write_file("config.py", "DEBUG = True\nPORT = 8080\nHOST = 'localhost'\n").unwrap();
+    sdk.write_file(
+        "config.py",
+        "DEBUG = True\nPORT = 8080\nHOST = 'localhost'\n",
+    )
+    .unwrap();
 
     let r = sdk.execute("sed 's/True/False/' config.py");
     assert_eq!(r.exit_code, 0);
@@ -160,7 +178,11 @@ fn aacode_pattern_sed_replace() {
 #[test]
 fn aacode_pattern_awk_processing() {
     let sdk = setup();
-    sdk.write_file("data.csv", "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,SF\n").unwrap();
+    sdk.write_file(
+        "data.csv",
+        "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,SF\n",
+    )
+    .unwrap();
 
     let r = sdk.execute("awk -F, '{print $1}' data.csv");
     assert_eq!(r.exit_code, 0);
@@ -175,7 +197,8 @@ fn aacode_pattern_awk_processing() {
 #[test]
 fn aacode_pattern_sort_uniq() {
     let sdk = setup();
-    sdk.write_file("items.txt", "apple\nbanana\nApple\napple\ncherry\nBanana\n").unwrap();
+    sdk.write_file("items.txt", "apple\nbanana\nApple\napple\ncherry\nBanana\n")
+        .unwrap();
 
     let r = sdk.execute("sort items.txt | uniq");
     assert_eq!(r.exit_code, 0);
@@ -201,7 +224,8 @@ fn aacode_pattern_diff_files() {
 #[test]
 fn aacode_pattern_chmod_executable() {
     let sdk = setup();
-    sdk.write_file("run.sh", "#!/bin/bash\necho hello\n").unwrap();
+    sdk.write_file("run.sh", "#!/bin/bash\necho hello\n")
+        .unwrap();
 
     let r = sdk.execute("chmod +x run.sh");
     assert_eq!(r.exit_code, 0);
@@ -210,7 +234,9 @@ fn aacode_pattern_chmod_executable() {
 #[test]
 fn aacode_pattern_complex_pipeline() {
     let sdk = setup();
-    let lines: Vec<String> = (1..=50).map(|i| format!("log: event_{} status=ok", i % 3)).collect();
+    let lines: Vec<String> = (1..=50)
+        .map(|i| format!("log: event_{} status=ok", i % 3))
+        .collect();
     sdk.write_file("app.log", &lines.join("\n")).unwrap();
 
     let r = sdk.execute("cat app.log | grep 'status=ok' | wc -l");
@@ -227,7 +253,11 @@ fn aacode_pattern_complex_pipeline() {
 #[test]
 fn aacode_pattern_jq_json() {
     let sdk = setup();
-    sdk.write_file("response.json", r#"{"key": "Hello", "nested": {"value": 42}}"#).unwrap();
+    sdk.write_file(
+        "response.json",
+        r#"{"key": "Hello", "nested": {"value": 42}}"#,
+    )
+    .unwrap();
 
     let r = sdk.execute("cat response.json | jq .key");
     assert_eq!(r.exit_code, 0, "jq failed: stderr={}", r.stderr);
@@ -235,7 +265,11 @@ fn aacode_pattern_jq_json() {
 
     let r = sdk.execute("cat response.json | jq '.nested'");
     assert_eq!(r.exit_code, 0, "jq .nested failed: stderr={}", r.stderr);
-    assert!(r.stdout.contains("42"), "jq .nested output was: {}", r.stdout);
+    assert!(
+        r.stdout.contains("42"),
+        "jq .nested output was: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -259,7 +293,9 @@ fn aacode_pattern_curl_fetch() {
 #[test]
 fn aacode_pattern_python_subprocess() {
     let sdk = setup();
-    if !python_available(&sdk) { return; }
+    if !python_available(&sdk) {
+        return;
+    }
 
     let code = r#"
 import subprocess
@@ -277,7 +313,9 @@ print('WC:' + r2.stdout.strip())
 #[test]
 fn aacode_pattern_python_async_subprocess() {
     let sdk = setup();
-    if !python_available(&sdk) { return; }
+    if !python_available(&sdk) {
+        return;
+    }
 
     let code = r#"
 import asyncio
@@ -299,7 +337,9 @@ asyncio.run(main())
 #[test]
 fn aacode_pattern_python_file_workflow() {
     let sdk = setup();
-    if !python_available(&sdk) { return; }
+    if !python_available(&sdk) {
+        return;
+    }
 
     let code = r#"
 import subprocess
@@ -319,7 +359,9 @@ print('GREP:' + str(len(r.stdout.splitlines())))
 #[test]
 fn aacode_pattern_python_env_and_config() {
     let sdk = setup();
-    if !python_available(&sdk) { return; }
+    if !python_available(&sdk) {
+        return;
+    }
 
     let code = r#"
 import os, subprocess
@@ -335,7 +377,8 @@ print('ENV:' + r.stdout.strip())
 fn aacode_pattern_echo_and_redirect() {
     let sdk = setup();
 
-    sdk.write_file("agent_init.py", "from main import MainAgent\n").unwrap();
+    sdk.write_file("agent_init.py", "from main import MainAgent\n")
+        .unwrap();
     let content = sdk.read_file("agent_init.py").unwrap();
     assert!(content.contains("from main import MainAgent"));
 }
@@ -396,7 +439,9 @@ fn aacode_pattern_env_path_resolution() {
 #[test]
 fn aacode_pattern_python_pip_simulate() {
     let sdk = setup();
-    if !python_available(&sdk) { return; }
+    if !python_available(&sdk) {
+        return;
+    }
 
     let code = r#"
 import sys
@@ -413,7 +458,8 @@ print('WHICH:' + r.stdout.strip())
 fn aacode_pattern_bulk_git_like_operations() {
     let sdk = setup();
     sdk.execute("mkdir -p repo/src");
-    sdk.write_file("repo/src/main.py", "def main(): pass\n").unwrap();
+    sdk.write_file("repo/src/main.py", "def main(): pass\n")
+        .unwrap();
     sdk.write_file("repo/README.md", "# Repo\n").unwrap();
 
     let r = sdk.execute("ls repo/src");
@@ -462,7 +508,12 @@ fn aacode_pattern_large_codebase_scenario() {
     let r = sdk.execute("find project -name '*.py' | wc -l");
     assert_eq!(r.exit_code, 0);
     let count: i32 = r.stdout.trim().parse().unwrap_or(0);
-    assert!(count >= 8, "expected >=8 .py files, got {}: stdout={}", count, r.stdout);
+    assert!(
+        count >= 8,
+        "expected >=8 .py files, got {}: stdout={}",
+        count,
+        r.stdout
+    );
 
     let r = sdk.execute("find project -type d | wc -l");
     assert_eq!(r.exit_code, 0);
@@ -477,7 +528,8 @@ fn aacode_pattern_large_codebase_scenario() {
 #[test]
 fn aacode_pattern_xargs_exec_pattern() {
     let sdk = setup();
-    sdk.write_file("files.txt", "a.txt\nb.txt\nc.txt\n").unwrap();
+    sdk.write_file("files.txt", "a.txt\nb.txt\nc.txt\n")
+        .unwrap();
 
     let r = sdk.execute("cat files.txt | xargs touch");
     assert_eq!(r.exit_code, 0);

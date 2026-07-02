@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_wget(&self, args: &[&str]) -> CommandOutput {
@@ -25,7 +28,16 @@ impl Shell {
             None => return CommandOutput::error("wget: missing URL\n".to_string(), 1),
         };
 
-        let wget_host = url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or(&url).split(':').next().unwrap_or(&url);
+        let wget_host = url
+            .split("://")
+            .nth(1)
+            .unwrap_or(&url)
+            .split('/')
+            .next()
+            .unwrap_or(&url)
+            .split(':')
+            .next()
+            .unwrap_or(&url);
         if let Some(perm) = self.check_network_permission(wget_host) {
             return perm;
         }
@@ -43,9 +55,7 @@ impl Shell {
                         filename,
                         body.len()
                     )),
-                    Err(e) => {
-                        CommandOutput::error(format!("wget: {}: {}\n", filename, e), 1)
-                    }
+                    Err(e) => CommandOutput::error(format!("wget: {}: {}\n", filename, e), 1),
                 }
             }
             Err(e) => CommandOutput::error(format!("wget: {}\n", e), 1),

@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_sleep(&self, args: &[&str]) -> CommandOutput {
@@ -39,6 +42,8 @@ fn parse_duration(s: &str) -> Result<f64, String> {
         (s, 1.0)
     };
 
-    let num: f64 = num_str.parse().map_err(|_| format!("invalid time interval '{}'", s))?;
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid time interval '{}'", s))?;
     Ok(num * suffix)
 }

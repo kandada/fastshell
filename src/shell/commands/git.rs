@@ -1,5 +1,8 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 #[cfg(feature = "git")]
-use crate::shell::{Shell, CommandOutput};
+use crate::shell::{CommandOutput, Shell};
 
 #[cfg(feature = "git")]
 impl Shell {
@@ -54,10 +57,7 @@ impl Shell {
         let dest_path = self.git_repo_path().join(&dest);
 
         match git2::Repository::clone(url, &dest_path) {
-            Ok(_) => CommandOutput::success(format!(
-                "Cloned into '{}'\n",
-                dest
-            )),
+            Ok(_) => CommandOutput::success(format!("Cloned into '{}'\n", dest)),
             Err(e) => CommandOutput::error(format!("git clone: {}\n", e), 1),
         }
     }
@@ -103,10 +103,7 @@ impl Shell {
         let repo = match git2::Repository::open(self.git_repo_path()) {
             Ok(r) => r,
             Err(e) => {
-                return CommandOutput::error(
-                    format!("git add: not a git repository: {}\n", e),
-                    1,
-                );
+                return CommandOutput::error(format!("git add: not a git repository: {}\n", e), 1);
             }
         };
 
@@ -115,7 +112,11 @@ impl Shell {
             Err(e) => return CommandOutput::error(format!("git add: {}\n", e), 1),
         };
 
-        if args.is_empty() || args.iter().any(|a| *a == "." || *a == "-A" || *a == "--all") {
+        if args.is_empty()
+            || args
+                .iter()
+                .any(|a| *a == "." || *a == "-A" || *a == "--all")
+        {
             if let Err(e) = index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None) {
                 return CommandOutput::error(format!("git add: {}\n", e), 1);
             }
@@ -125,10 +126,7 @@ impl Shell {
                     continue;
                 }
                 if let Err(e) = index.add_path(std::path::Path::new(path)) {
-                    return CommandOutput::error(
-                        format!("git add: {}: {}\n", path, e),
-                        1,
-                    );
+                    return CommandOutput::error(format!("git add: {}: {}\n", path, e), 1);
                 }
             }
         }
@@ -226,10 +224,7 @@ impl Shell {
         let repo = match git2::Repository::open(self.git_repo_path()) {
             Ok(r) => r,
             Err(e) => {
-                return CommandOutput::error(
-                    format!("git push: not a git repository: {}\n", e),
-                    1,
-                );
+                return CommandOutput::error(format!("git push: not a git repository: {}\n", e), 1);
             }
         };
 
@@ -257,10 +252,7 @@ impl Shell {
         let repo = match git2::Repository::open(self.git_repo_path()) {
             Ok(r) => r,
             Err(e) => {
-                return CommandOutput::error(
-                    format!("git pull: not a git repository: {}\n", e),
-                    1,
-                );
+                return CommandOutput::error(format!("git pull: not a git repository: {}\n", e), 1);
             }
         };
 
@@ -317,11 +309,17 @@ impl Shell {
                         Err(_) => {}
                     }
                     repo.set_head(&format!("refs/heads/{}", branch)).ok();
-                    CommandOutput::success(format!("Pulled {} {} (fast-forward)\n", remote_name, branch))
+                    CommandOutput::success(format!(
+                        "Pulled {} {} (fast-forward)\n",
+                        remote_name, branch
+                    ))
                 } else if analysis.is_normal() {
                     repo.merge(&[&fetch_annotated], None, None).ok();
                     if repo.index().map_or(false, |idx| idx.has_conflicts()) {
-                        CommandOutput::success(format!("Pulled {} {} (merge conflicts)\n", remote_name, branch))
+                        CommandOutput::success(format!(
+                            "Pulled {} {} (merge conflicts)\n",
+                            remote_name, branch
+                        ))
                     } else {
                         let tree_id = repo.index().and_then(|mut idx| idx.write_tree()).ok();
                         if let Some(tid) = tree_id {
@@ -330,7 +328,15 @@ impl Shell {
                                 let sig = repo.signature().ok();
                                 if let (Some(head), Some(sig)) = (head, sig) {
                                     let msg = format!("Merge branch '{}'", remote_name);
-                                    repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &[&head, &fetch_commit]).ok();
+                                    repo.commit(
+                                        Some("HEAD"),
+                                        &sig,
+                                        &sig,
+                                        &msg,
+                                        &tree,
+                                        &[&head, &fetch_commit],
+                                    )
+                                    .ok();
                                     repo.cleanup_state().ok();
                                 }
                             }
@@ -338,7 +344,10 @@ impl Shell {
                         CommandOutput::success(format!("Pulled {} {}\n", remote_name, branch))
                     }
                 } else {
-                    CommandOutput::success(format!("Pulled {} {} (up to date)\n", remote_name, branch))
+                    CommandOutput::success(format!(
+                        "Pulled {} {} (up to date)\n",
+                        remote_name, branch
+                    ))
                 }
             }
             Err(e) => CommandOutput::error(format!("git pull: {}\n", e), 1),
@@ -360,10 +369,7 @@ impl Shell {
         let repo = match git2::Repository::open(self.git_repo_path()) {
             Ok(r) => r,
             Err(e) => {
-                return CommandOutput::error(
-                    format!("git log: not a git repository: {}\n", e),
-                    1,
-                );
+                return CommandOutput::error(format!("git log: not a git repository: {}\n", e), 1);
             }
         };
 
@@ -423,7 +429,11 @@ impl Shell {
                 let time = commit.time();
                 let seconds = time.seconds();
                 output.push_str(&format!("commit {}\n", oid));
-                output.push_str(&format!("Author: {} <{}>\n", author.name().unwrap_or(""), author.email().unwrap_or("")));
+                output.push_str(&format!(
+                    "Author: {} <{}>\n",
+                    author.name().unwrap_or(""),
+                    author.email().unwrap_or("")
+                ));
                 output.push_str(&format!("Date:   {}\n", format_timestamp(seconds)));
                 output.push('\n');
                 for line in message.lines() {
@@ -445,10 +455,7 @@ impl Shell {
         let repo = match git2::Repository::open(self.git_repo_path()) {
             Ok(r) => r,
             Err(e) => {
-                return CommandOutput::error(
-                    format!("git diff: not a git repository: {}\n", e),
-                    1,
-                );
+                return CommandOutput::error(format!("git diff: not a git repository: {}\n", e), 1);
             }
         };
 
@@ -481,22 +488,27 @@ impl Shell {
         } else if let Some(commit_str) = commit_arg {
             let obj = match repo.revparse_single(commit_str) {
                 Ok(o) => o,
-                Err(e) => return CommandOutput::error(format!("git diff: {}: {}\n", commit_str, e), 1),
+                Err(e) => {
+                    return CommandOutput::error(format!("git diff: {}: {}\n", commit_str, e), 1)
+                }
             };
             let commit = match obj.peel_to_commit() {
                 Ok(c) => c,
-                Err(_) => {
-                    match obj.peel_to_tree() {
-                        Ok(t) => {
-                            let diff = match repo.diff_tree_to_workdir(Some(&t), None) {
-                                Ok(d) => d,
-                                Err(e) => return CommandOutput::error(format!("git diff: {}\n", e), 1),
-                            };
-                            return self.format_git_diff(&repo, &diff);
-                        }
-                        Err(e) => return CommandOutput::error(format!("git diff: {}: {}\n", commit_str, e), 1),
+                Err(_) => match obj.peel_to_tree() {
+                    Ok(t) => {
+                        let diff = match repo.diff_tree_to_workdir(Some(&t), None) {
+                            Ok(d) => d,
+                            Err(e) => return CommandOutput::error(format!("git diff: {}\n", e), 1),
+                        };
+                        return self.format_git_diff(&repo, &diff);
                     }
-                }
+                    Err(e) => {
+                        return CommandOutput::error(
+                            format!("git diff: {}: {}\n", commit_str, e),
+                            1,
+                        )
+                    }
+                },
             };
             let tree = match commit.tree() {
                 Ok(t) => t,
@@ -590,10 +602,7 @@ impl Shell {
         let branch_name = match branch_name {
             Some(b) => b,
             None => {
-                return CommandOutput::error(
-                    "git checkout: missing branch name\n".to_string(),
-                    1,
-                );
+                return CommandOutput::error("git checkout: missing branch name\n".to_string(), 1);
             }
         };
 
@@ -626,10 +635,7 @@ impl Shell {
                         let _ = repo.set_head(&refname);
                     } else {
                         return CommandOutput::error(
-                            format!(
-                                "git checkout: branch '{}' not found\n",
-                                branch_name
-                            ),
+                            format!("git checkout: branch '{}' not found\n", branch_name),
                             1,
                         );
                     }
@@ -682,10 +688,7 @@ impl Shell {
                 Ok(b) => b,
                 Err(_) => {
                     return CommandOutput::error(
-                        format!(
-                            "git branch: branch '{}' not found\n",
-                            branch_name
-                        ),
+                        format!("git branch: branch '{}' not found\n", branch_name),
                         1,
                     );
                 }
@@ -773,7 +776,9 @@ fn format_timestamp(seconds: i64) -> String {
     }
 
     let day = remaining_days + 1;
-    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month_names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let month_name = month_names[month];
 
     let time_of_day = seconds.rem_euclid(86400);

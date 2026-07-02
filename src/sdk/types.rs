@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 pub const EXIT_NEED_PERMISSION: i32 = 100;
 
 #[derive(Debug, Clone)]
@@ -9,15 +12,27 @@ pub struct CommandResult {
 
 impl CommandResult {
     pub fn success(stdout: String) -> Self {
-        CommandResult { stdout, stderr: String::new(), exit_code: 0 }
+        CommandResult {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+        }
     }
 
     pub fn error(message: String) -> Self {
-        CommandResult { stdout: String::new(), stderr: message, exit_code: 1 }
+        CommandResult {
+            stdout: String::new(),
+            stderr: message,
+            exit_code: 1,
+        }
     }
 
     pub fn from_code(stdout: String, stderr: String, exit_code: i32) -> Self {
-        CommandResult { stdout, stderr, exit_code }
+        CommandResult {
+            stdout,
+            stderr,
+            exit_code,
+        }
     }
 
     pub fn is_success(&self) -> bool {

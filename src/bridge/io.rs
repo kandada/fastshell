@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use std::io::{self, Read, Write};
 
 pub struct IoRedirect {
@@ -59,9 +62,7 @@ pub struct StdioCapture {
 
 impl StdioCapture {
     pub fn new() -> Self {
-        StdioCapture {
-            stdout: Vec::new(),
-        }
+        StdioCapture { stdout: Vec::new() }
     }
 }
 

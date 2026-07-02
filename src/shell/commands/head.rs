@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_head(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -36,7 +39,11 @@ impl Shell {
                         }
                     } else if lines_count < 0 {
                         let skip = (-lines_count) as usize;
-                        let take = if skip < lines.len() { lines.len() - skip } else { 0 };
+                        let take = if skip < lines.len() {
+                            lines.len() - skip
+                        } else {
+                            0
+                        };
                         for &line in &lines[..take] {
                             output.push_str(line);
                             output.push('\n');
@@ -64,7 +71,11 @@ impl Shell {
                         }
                     } else if lines_count < 0 {
                         let skip = (-lines_count) as usize;
-                        let take = if skip < lines.len() { lines.len() - skip } else { 0 };
+                        let take = if skip < lines.len() {
+                            lines.len() - skip
+                        } else {
+                            0
+                        };
                         for &line in &lines[..take] {
                             output.push_str(line);
                             output.push('\n');

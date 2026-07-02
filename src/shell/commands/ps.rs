@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_ps(&self, args: &[&str]) -> CommandOutput {
@@ -39,14 +42,17 @@ impl Shell {
         let processes = crate::shell::list_processes();
         match processes {
             Ok(procs) => {
-                let filtered: Vec<&crate::shell::ProcInfo> = procs.iter().filter(|p| {
-                    let pid_ok = pids.is_empty() || pids.contains(&p.pid);
-                    let user_ok = match user_filter {
-                        Some(uid) => p.uid == uid,
-                        None => true,
-                    };
-                    pid_ok && user_ok
-                }).collect();
+                let filtered: Vec<&crate::shell::ProcInfo> = procs
+                    .iter()
+                    .filter(|p| {
+                        let pid_ok = pids.is_empty() || pids.contains(&p.pid);
+                        let user_ok = match user_filter {
+                            Some(uid) => p.uid == uid,
+                            None => true,
+                        };
+                        pid_ok && user_ok
+                    })
+                    .collect();
 
                 if let Some(ref fmt) = format {
                     let fields: Vec<&str> = fmt.split(',').map(|s| s.trim()).collect();
@@ -78,7 +84,11 @@ impl Shell {
                 for p in &filtered {
                     output.push_str(&format!(
                         "{:>8} {:>8} {:>7.1} {:>8} {}\n",
-                        p.pid, p.ppid, p.cpu_pct, crate::shell::human_size(p.rss * 1024), p.comm
+                        p.pid,
+                        p.ppid,
+                        p.cpu_pct,
+                        crate::shell::human_size(p.rss * 1024),
+                        p.comm
                     ));
                 }
                 CommandOutput::success(output)

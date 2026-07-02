@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 //! # Python Engine Abstraction Layer
 //!
 //! Provides a unified interface for executing Python code across different
@@ -144,7 +147,8 @@ impl PythonEngine for SubprocessPython {
     fn execute_script(&mut self, script_path: &Path, cwd: &Path) -> ExecutionResult {
         if !self.available {
             return ExecutionResult::error(
-                "Python is not available on this system".to_string(), 127
+                "Python is not available on this system".to_string(),
+                127,
             );
         }
 
@@ -177,7 +181,9 @@ impl PythonEngine for SubprocessPython {
             .ok()
             .map(|o| {
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !s.is_empty() { return s; }
+                if !s.is_empty() {
+                    return s;
+                }
                 String::from_utf8_lossy(&o.stderr).trim().to_string()
             })
     }
@@ -215,7 +221,7 @@ impl PythonEngine for PocketPyPlaceholder {
     }
 }
 
-pub use cpython::{CpythonEngine, CpythonDownloader};
+pub use cpython::{CpythonDownloader, CpythonEngine};
 
 /// Selects the best available Python engine for the current platform.
 ///
@@ -246,7 +252,9 @@ pub fn detect_python_engine(sandbox: &Path) -> Box<dyn PythonEngine> {
         eprintln!("[fastshell]   2. gzip libpython3.12.{{so,dylib}} → vendor/python/<target>/");
         eprintln!("[fastshell]   3. Rebuild the app — CPython is now embedded, works offline");
         eprintln!("[fastshell] See docs/integration.md#cpython-embedding-production-build");
-        eprintln!("[fastshell] Development: CpythonDownloader::ensure_available() downloads at runtime.");
+        eprintln!(
+            "[fastshell] Development: CpythonDownloader::ensure_available() downloads at runtime."
+        );
         return Box::new(CpythonEngineWrapper::new(cpython));
     }
 
@@ -264,7 +272,10 @@ pub fn detect_python_engine(sandbox: &Path) -> Box<dyn PythonEngine> {
         }
         // Neither available → report the combined error
         let (_, reason) = cpython.is_available_with_reason();
-        eprintln!("[fastshell] No Python available: system python3 not found, {}", reason.as_deref().unwrap_or("embedded CPython also missing"));
+        eprintln!(
+            "[fastshell] No Python available: system python3 not found, {}",
+            reason.as_deref().unwrap_or("embedded CPython also missing")
+        );
         return Box::new(CpythonEngineWrapper::new(cpython));
     }
 }
@@ -311,8 +322,11 @@ mod tests {
 
     fn setup_dir() -> std::path::PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_python_test_{}_{}", std::process::id(), n));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_python_test_{}_{}",
+            std::process::id(),
+            n
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -362,7 +376,11 @@ mod tests {
         let mut f = fs::File::create(&script_path).unwrap();
         writeln!(f, "import sys").unwrap();
         writeln!(f, "print('script output')").unwrap();
-        writeln!(f, "print('arg:', sys.argv[1] if len(sys.argv) > 1 else 'none')").unwrap();
+        writeln!(
+            f,
+            "print('arg:', sys.argv[1] if len(sys.argv) > 1 else 'none')"
+        )
+        .unwrap();
 
         let result = engine.execute_script(&script_path, &dir);
         assert_eq!(result.exit_code, 0);

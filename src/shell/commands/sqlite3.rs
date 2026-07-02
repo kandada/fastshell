@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_sqlite3(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -30,9 +33,13 @@ impl Shell {
 
         let db_path = match db_path {
             Some(p) => p,
-            None => return CommandOutput::error(
-                "sqlite3: missing database path\nUsage: sqlite3 <database> [query]\n".to_string(), 1
-            ),
+            None => {
+                return CommandOutput::error(
+                    "sqlite3: missing database path\nUsage: sqlite3 <database> [query]\n"
+                        .to_string(),
+                    1,
+                )
+            }
         };
 
         // Resolve VFS path
@@ -53,9 +60,11 @@ impl Shell {
             stdin_data.to_string()
         } else {
             // Try reading SQL from args if no stdin
-            let remaining: Vec<&str> = args.iter().skip_while(|a| {
-                !a.starts_with('-') || **a == db_path
-            }).copied().collect();
+            let remaining: Vec<&str> = args
+                .iter()
+                .skip_while(|a| !a.starts_with('-') || **a == db_path)
+                .copied()
+                .collect();
             if remaining.len() > 1 {
                 remaining[1..].join(" ")
             } else {
@@ -142,7 +151,13 @@ impl Shell {
         }
     }
 
-    fn sqlite3_execute(&self, db_path: &std::path::Path, sql: &str, csv_mode: bool, header_mode: bool) -> CommandOutput {
+    fn sqlite3_execute(
+        &self,
+        db_path: &std::path::Path,
+        sql: &str,
+        csv_mode: bool,
+        header_mode: bool,
+    ) -> CommandOutput {
         let conn = match rusqlite::Connection::open(db_path) {
             Ok(c) => c,
             Err(e) => return CommandOutput::error(format!("sqlite3: {}\n", e), 1),
@@ -151,7 +166,8 @@ impl Shell {
         let mut output = String::new();
         let mut stderr = String::new();
 
-        let statements: Vec<&str> = sql.split(';')
+        let statements: Vec<&str> = sql
+            .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
@@ -159,7 +175,10 @@ impl Shell {
         for stmt_str in &statements {
             let sql_upper = stmt_str.trim().to_uppercase();
 
-            if sql_upper.starts_with("SELECT") || sql_upper.starts_with("PRAGMA") || sql_upper.starts_with("EXPLAIN") {
+            if sql_upper.starts_with("SELECT")
+                || sql_upper.starts_with("PRAGMA")
+                || sql_upper.starts_with("EXPLAIN")
+            {
                 match conn.prepare(stmt_str) {
                     Ok(mut stmt) => {
                         let col_count = stmt.column_count();
@@ -187,7 +206,12 @@ impl Shell {
                                         String::from_utf8_lossy(t).to_string()
                                     }
                                     Ok(rusqlite::types::ValueRef::Blob(b)) => {
-                                        format!("x'{}'", b.iter().map(|byte| format!("{:02x}", byte)).collect::<String>())
+                                        format!(
+                                            "x'{}'",
+                                            b.iter()
+                                                .map(|byte| format!("{:02x}", byte))
+                                                .collect::<String>()
+                                        )
                                     }
                                     Err(_) => "ERROR".to_string(),
                                 };
@@ -243,14 +267,15 @@ impl Shell {
 mod tests {
     use super::*;
     use crate::vfs::Vfs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn setup() -> Shell {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fs_sqlite3_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fs_sqlite3_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)
@@ -259,7 +284,13 @@ mod tests {
     #[test]
     fn test_sqlite3_create_and_select() {
         let shell = setup();
-        shell.cmd_sqlite3(&["test.db", "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"], None);
+        shell.cmd_sqlite3(
+            &[
+                "test.db",
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+            ],
+            None,
+        );
         shell.cmd_sqlite3(&["test.db", "INSERT INTO users VALUES (1, 'Alice')"], None);
         shell.cmd_sqlite3(&["test.db", "INSERT INTO users VALUES (2, 'Bob')"], None);
 
@@ -336,7 +367,10 @@ mod tests {
     fn test_sqlite3_pipe_sql() {
         let shell = setup();
         // Use stdin to pass SQL
-        let out = shell.cmd_sqlite3(&["test.db"], Some("CREATE TABLE x (n INTEGER); INSERT INTO x VALUES (42); SELECT * FROM x"));
+        let out = shell.cmd_sqlite3(
+            &["test.db"],
+            Some("CREATE TABLE x (n INTEGER); INSERT INTO x VALUES (42); SELECT * FROM x"),
+        );
         assert_eq!(out.exit_code, 0);
         assert!(out.stdout.contains("42"));
     }

@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_which(&self, args: &[&str]) -> CommandOutput {
@@ -7,21 +10,88 @@ impl Shell {
         }
 
         let known_cmds: &[&str] = &[
-            "ls", "cd", "pwd", "mkdir", "rm", "cp", "mv", "cat", "find", "grep",
-            "echo", "touch", "chmod", "ps", "kill", "curl", "wget", "gzip",
-            "gunzip", "tar", "ping", "ssh", "git", "head", "tail", "wc", "diff",
-            "sed", "sort", "uniq", "tee", "xargs", "which",
-            "cut", "awk", "tr", "sleep", "date", "true", "false", "test",
-            "base64", "sha256sum", "sha512sum", "md5sum", "du", "df", "stat",
-            "jq", "env", "printenv", "printf", "basename", "dirname", "realpath",
-            "file", "column", "seq", "zip", "unzip",
-            "shuf", "uuidgen", "rev", "split", "comm", "xxd", "expr",
-            "uname", "hostname", "whoami", "id", "pgrep", "pkill", "paste", "timeout",
+            "ls",
+            "cd",
+            "pwd",
+            "mkdir",
+            "rm",
+            "cp",
+            "mv",
+            "cat",
+            "find",
+            "grep",
+            "echo",
+            "touch",
+            "chmod",
+            "ps",
+            "kill",
+            "curl",
+            "wget",
+            "gzip",
+            "gunzip",
+            "tar",
+            "ping",
+            "ssh",
+            "git",
+            "head",
+            "tail",
+            "wc",
+            "diff",
+            "sed",
+            "sort",
+            "uniq",
+            "tee",
+            "xargs",
+            "which",
+            "cut",
+            "awk",
+            "tr",
+            "sleep",
+            "date",
+            "true",
+            "false",
+            "test",
+            "base64",
+            "sha256sum",
+            "sha512sum",
+            "md5sum",
+            "du",
+            "df",
+            "stat",
+            "jq",
+            "env",
+            "printenv",
+            "printf",
+            "basename",
+            "dirname",
+            "realpath",
+            "file",
+            "column",
+            "seq",
+            "zip",
+            "unzip",
+            "shuf",
+            "uuidgen",
+            "rev",
+            "split",
+            "comm",
+            "xxd",
+            "expr",
+            "uname",
+            "hostname",
+            "whoami",
+            "id",
+            "pgrep",
+            "pkill",
+            "paste",
+            "timeout",
         ];
 
         let mut output = String::new();
         for arg in args {
-            if arg.starts_with('-') { continue; }
+            if arg.starts_with('-') {
+                continue;
+            }
             if known_cmds.contains(arg) {
                 output.push_str(&format!("{}: built-in fastshell command\n", arg));
             } else {

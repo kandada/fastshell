@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use crate::sdk::Fastshell;
 use std::sync::{Mutex, OnceLock};
 
@@ -76,6 +79,7 @@ pub mod android {
         _class: *mut std::os::raw::c_void,
         command: *const std::os::raw::c_char,
     ) -> *const std::os::raw::c_char {
+        // (c) 2025 xiefujin <490021684@qq.com>
         let command = unsafe {
             std::ffi::CStr::from_ptr(command)
                 .to_string_lossy()
@@ -105,7 +109,9 @@ pub mod android {
         allowed: u8,
     ) {
         let resource = unsafe {
-            std::ffi::CStr::from_ptr(resource).to_string_lossy().to_string()
+            std::ffi::CStr::from_ptr(resource)
+                .to_string_lossy()
+                .to_string()
         };
         let sdk = get_sdk().lock().unwrap();
         sdk.set_permission(&resource, allowed != 0);
@@ -126,7 +132,9 @@ pub mod ios {
     use super::*;
 
     #[no_mangle]
-    pub extern "C" fn fastshell_ios_init(sandbox_path: *const std::os::raw::c_char) -> *const std::os::raw::c_char {
+    pub extern "C" fn fastshell_ios_init(
+        sandbox_path: *const std::os::raw::c_char,
+    ) -> *const std::os::raw::c_char {
         let sandbox_path = unsafe {
             std::ffi::CStr::from_ptr(sandbox_path)
                 .to_string_lossy()
@@ -149,7 +157,9 @@ pub mod ios {
     }
 
     #[no_mangle]
-    pub extern "C" fn fastshell_ios_execute(command: *const std::os::raw::c_char) -> *const std::os::raw::c_char {
+    pub extern "C" fn fastshell_ios_execute(
+        command: *const std::os::raw::c_char,
+    ) -> *const std::os::raw::c_char {
         let command = unsafe {
             std::ffi::CStr::from_ptr(command)
                 .to_string_lossy()
@@ -162,9 +172,14 @@ pub mod ios {
     }
 
     #[no_mangle]
-    pub extern "C" fn fastshell_ios_set_permission(resource: *const std::os::raw::c_char, allowed: u8) {
+    pub extern "C" fn fastshell_ios_set_permission(
+        resource: *const std::os::raw::c_char,
+        allowed: u8,
+    ) {
         let resource = unsafe {
-            std::ffi::CStr::from_ptr(resource).to_string_lossy().to_string()
+            std::ffi::CStr::from_ptr(resource)
+                .to_string_lossy()
+                .to_string()
         };
         let sdk = get_sdk().lock().unwrap();
         sdk.set_permission(&resource, allowed != 0);
@@ -182,7 +197,9 @@ pub mod c_ffi {
     use super::*;
 
     #[no_mangle]
-    pub extern "C" fn fastshell_init(sandbox_path: *const std::os::raw::c_char) -> *const std::os::raw::c_char {
+    pub extern "C" fn fastshell_init(
+        sandbox_path: *const std::os::raw::c_char,
+    ) -> *const std::os::raw::c_char {
         let sandbox_path = unsafe {
             std::ffi::CStr::from_ptr(sandbox_path)
                 .to_string_lossy()
@@ -205,7 +222,10 @@ pub mod c_ffi {
     }
 
     #[no_mangle]
-    pub extern "C" fn fastshell_execute(command: *const std::os::raw::c_char) -> *const std::os::raw::c_char {
+    pub extern "C" fn fastshell_execute(
+        command: *const std::os::raw::c_char,
+    ) -> *const std::os::raw::c_char {
+        // (c) 2025 xiefujin <490021684@qq.com>
         let command = unsafe {
             std::ffi::CStr::from_ptr(command)
                 .to_string_lossy()
@@ -220,7 +240,9 @@ pub mod c_ffi {
     #[no_mangle]
     pub extern "C" fn fastshell_set_permission(resource: *const std::os::raw::c_char, allowed: u8) {
         let resource = unsafe {
-            std::ffi::CStr::from_ptr(resource).to_string_lossy().to_string()
+            std::ffi::CStr::from_ptr(resource)
+                .to_string_lossy()
+                .to_string()
         };
         let sdk = get_sdk().lock().unwrap();
         sdk.set_permission(&resource, allowed != 0);

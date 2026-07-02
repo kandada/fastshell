@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_cd(&mut self, args: &[&str]) -> CommandOutput {
@@ -14,10 +17,7 @@ impl Shell {
         };
 
         if !resolved.is_dir() {
-            return CommandOutput::error(
-                format!("cd: {}: Not a directory", target),
-                1,
-            );
+            return CommandOutput::error(format!("cd: {}: Not a directory", target), 1);
         }
 
         self.cwd = self.vfs.to_vpath(&resolved);

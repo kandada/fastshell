@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_xargs(&mut self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -67,11 +70,16 @@ impl Shell {
             None => {
                 if replace_str.is_some() {
                     // With -I, xargs runs the command even with empty input
-                    let cmd = build_command_with_replace(&target_cmd, "", replace_str.as_ref().unwrap());
+                    let cmd =
+                        build_command_with_replace(&target_cmd, "", replace_str.as_ref().unwrap());
                     if verbose {
                         eprintln!("{}", cmd.join(" "));
                     }
-                    return self.execute(&cmd[0], &cmd[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>(), None);
+                    return self.execute(
+                        &cmd[0],
+                        &cmd[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        None,
+                    );
                 }
                 return CommandOutput::error("xargs: no input\n".to_string(), 1);
             }
@@ -84,7 +92,11 @@ impl Shell {
                 input.split('\0').map(|s| s.to_string()).collect()
             }
         } else if replace_str.is_some() {
-            input.lines().map(|s| s.to_string()).filter(|s| !s.is_empty()).collect()
+            input
+                .lines()
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
         } else {
             input.split_whitespace().map(|s| s.to_string()).collect()
         };
@@ -104,8 +116,15 @@ impl Shell {
     }
 }
 
-fn build_command_with_replace(target_cmd: &[String], replacement: &str, replace_str: &str) -> Vec<String> {
-    target_cmd.iter().map(|arg| arg.replace(replace_str, replacement)).collect()
+fn build_command_with_replace(
+    target_cmd: &[String],
+    replacement: &str,
+    replace_str: &str,
+) -> Vec<String> {
+    target_cmd
+        .iter()
+        .map(|arg| arg.replace(replace_str, replacement))
+        .collect()
 }
 
 fn exec_xargs_replace(
@@ -128,7 +147,11 @@ fn exec_xargs_replace(
             if verbose {
                 eprintln!("{}", cmd.join(" "));
             }
-            let out = shell.execute(&cmd[0], &cmd[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>(), None);
+            let out = shell.execute(
+                &cmd[0],
+                &cmd[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                None,
+            );
             combined_stdout.push_str(&out.stdout);
             combined_stderr.push_str(&out.stderr);
             if out.exit_code != 0 {
@@ -211,7 +234,10 @@ fn run_parallel_replace(
 
     {
         let mut handles = Vec::new();
-        let items_chunks: Vec<Vec<String>> = items_clone.chunks((items_clone.len() + max_parallel - 1) / max_parallel).map(|c| c.to_vec()).collect();
+        let items_chunks: Vec<Vec<String>> = items_clone
+            .chunks((items_clone.len() + max_parallel - 1) / max_parallel)
+            .map(|c| c.to_vec())
+            .collect();
 
         for chunk in items_chunks {
             let cmd = cmd_clone.clone();
@@ -284,7 +310,10 @@ fn run_parallel_chunks(
     verbose: bool,
 ) -> CommandOutput {
     let cmd_clone = target_cmd.to_vec();
-    let chunks_clone: Vec<Vec<String>> = chunks.iter().map(|c| c.iter().map(|s| s.to_string()).collect()).collect();
+    let chunks_clone: Vec<Vec<String>> = chunks
+        .iter()
+        .map(|c| c.iter().map(|s| s.to_string()).collect())
+        .collect();
 
     let mut outputs: Vec<(String, String, i32)> = Vec::new();
 
@@ -366,8 +395,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_xargs_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_xargs_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }

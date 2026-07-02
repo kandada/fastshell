@@ -1,5 +1,8 @@
-use fastshell::sdk::Fastshell;
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 use std::time::Instant;
 
 fn main() {
@@ -43,9 +46,21 @@ fn main() {
     let echo_elapsed = start.elapsed();
 
     println!("=== Latency ({} iterations) ===", iterations);
-    println!("ls   : {:>8.1} µs avg  (total {:?})", ls_elapsed.as_micros() as f64 / iterations as f64, ls_elapsed);
-    println!("pwd  : {:>8.1} µs avg  (total {:?})", pwd_elapsed.as_micros() as f64 / iterations as f64, pwd_elapsed);
-    println!("echo : {:>8.1} µs avg  (total {:?})", echo_elapsed.as_micros() as f64 / iterations as f64, echo_elapsed);
+    println!(
+        "ls   : {:>8.1} µs avg  (total {:?})",
+        ls_elapsed.as_micros() as f64 / iterations as f64,
+        ls_elapsed
+    );
+    println!(
+        "pwd  : {:>8.1} µs avg  (total {:?})",
+        pwd_elapsed.as_micros() as f64 / iterations as f64,
+        pwd_elapsed
+    );
+    println!(
+        "echo : {:>8.1} µs avg  (total {:?})",
+        echo_elapsed.as_micros() as f64 / iterations as f64,
+        echo_elapsed
+    );
 
     println!();
     println!("=== Memory ===");

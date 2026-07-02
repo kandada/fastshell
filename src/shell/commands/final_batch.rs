@@ -1,9 +1,18 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_whois(&self, args: &[&str]) -> CommandOutput {
-        let host = args.iter().find(|a| !a.starts_with('-')).copied().unwrap_or("");
-        if host.is_empty() { return CommandOutput::error("whois: missing hostname\n".to_string(), 1); }
+        let host = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .copied()
+            .unwrap_or("");
+        if host.is_empty() {
+            return CommandOutput::error("whois: missing hostname\n".to_string(), 1);
+        }
         run_system(self, "whois", &[host])
     }
 
@@ -20,8 +29,11 @@ impl Shell {
     pub fn cmd_bc(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let input: String;
         if args.is_empty() {
-            if let Some(s) = stdin { input = s.to_string(); }
-            else { return CommandOutput::error("bc: missing expression\n".to_string(), 1); }
+            if let Some(s) = stdin {
+                input = s.to_string();
+            } else {
+                return CommandOutput::error("bc: missing expression\n".to_string(), 1);
+            }
         } else {
             input = args.join(" ");
         }
@@ -29,7 +41,9 @@ impl Shell {
         let mut output = String::new();
         for line in input.lines() {
             let line = line.trim();
-            if line.is_empty() || line == "quit" { continue; }
+            if line.is_empty() || line == "quit" {
+                continue;
+            }
             match eval_bc_expr(line) {
                 Ok(val) => output.push_str(&format!("{}\n", format_bc_val(val))),
                 Err(e) => output.push_str(&format!("bc: {}\n", e)),
@@ -48,7 +62,10 @@ impl Shell {
         {
             let mut out = String::new();
             if let Ok(s) = std::fs::read_to_string("/proc/vmstat") {
-                for line in s.lines().take(30) { out.push_str(line); out.push('\n'); }
+                for line in s.lines().take(30) {
+                    out.push_str(line);
+                    out.push('\n');
+                }
                 return CommandOutput::success(out);
             }
         }
@@ -124,34 +141,62 @@ impl Shell {
 
 fn run_system(shell: &Shell, cmd: &str, args: &[&str]) -> CommandOutput {
     let vfs_root = shell.vfs.root().to_path_buf();
-    let cwd = if shell.cwd == "/" { vfs_root.clone() } else { vfs_root.join(shell.cwd.trim_start_matches('/')) };
-    match std::process::Command::new(cmd).args(args).current_dir(&cwd).output() {
-        Ok(o) => CommandOutput { stdout: String::from_utf8_lossy(&o.stdout).to_string(), stderr: String::from_utf8_lossy(&o.stderr).to_string(), exit_code: o.status.code().unwrap_or(-1) },
+    let cwd = if shell.cwd == "/" {
+        vfs_root.clone()
+    } else {
+        vfs_root.join(shell.cwd.trim_start_matches('/'))
+    };
+    match std::process::Command::new(cmd)
+        .args(args)
+        .current_dir(&cwd)
+        .output()
+    {
+        Ok(o) => CommandOutput {
+            stdout: String::from_utf8_lossy(&o.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&o.stderr).to_string(),
+            exit_code: o.status.code().unwrap_or(-1),
+        },
         Err(e) => CommandOutput::error(format!("{}: {}\n", cmd, e), 1),
     }
 }
 
 fn eval_bc_expr(expr: &str) -> Result<f64, String> {
     let expr = expr.trim();
-    if let Some(pos) = expr.find('+') { return Ok(eval_bc_expr(&expr[..pos])? + eval_bc_expr(&expr[pos+1..])?); }
-    if let Some(pos) = expr.rfind('-').filter(|&p| p > 0) {
-        return Ok(eval_bc_expr(&expr[..pos])? - eval_bc_expr(&expr[pos+1..])?);
+    if let Some(pos) = expr.find('+') {
+        return Ok(eval_bc_expr(&expr[..pos])? + eval_bc_expr(&expr[pos + 1..])?);
     }
-    if let Some(pos) = expr.find('*') { return Ok(eval_bc_expr(&expr[..pos])? * eval_bc_expr(&expr[pos+1..])?); }
+    if let Some(pos) = expr.rfind('-').filter(|&p| p > 0) {
+        return Ok(eval_bc_expr(&expr[..pos])? - eval_bc_expr(&expr[pos + 1..])?);
+    }
+    if let Some(pos) = expr.find('*') {
+        return Ok(eval_bc_expr(&expr[..pos])? * eval_bc_expr(&expr[pos + 1..])?);
+    }
     if let Some(pos) = expr.find('/') {
-        let b = eval_bc_expr(&expr[pos+1..])?;
-        if b == 0.0 { return Err("divide by zero".to_string()); }
+        let b = eval_bc_expr(&expr[pos + 1..])?;
+        if b == 0.0 {
+            return Err("divide by zero".to_string());
+        }
         return Ok(eval_bc_expr(&expr[..pos])? / b);
     }
     if let Some(pos) = expr.find('%') {
-        let b = eval_bc_expr(&expr[pos+1..])?;
-        if b == 0.0 { return Err("divide by zero".to_string()); }
+        let b = eval_bc_expr(&expr[pos + 1..])?;
+        if b == 0.0 {
+            return Err("divide by zero".to_string());
+        }
         return Ok(eval_bc_expr(&expr[..pos])? % b);
     }
-    if let Some(pos) = expr.find('^') { return Ok(eval_bc_expr(&expr[..pos])?.powf(eval_bc_expr(&expr[pos+1..])?)); }
-    expr.trim().parse::<f64>().map_err(|_| format!("syntax error: {}", expr))
+    if let Some(pos) = expr.find('^') {
+        return Ok(eval_bc_expr(&expr[..pos])?.powf(eval_bc_expr(&expr[pos + 1..])?));
+    }
+    expr.trim()
+        .parse::<f64>()
+        .map_err(|_| format!("syntax error: {}", expr))
 }
 
 fn format_bc_val(v: f64) -> String {
-    if (v - v.round()).abs() < 1e-10 { format!("{}", v as i64) } else { format!("{}", v) }
+    if (v - v.round()).abs() < 1e-10 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
 }

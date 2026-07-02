@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_paste(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -46,7 +49,8 @@ impl Shell {
         let max_rows = columns.iter().map(|c| c.len()).max().unwrap_or(0);
         let mut output = String::new();
         for row in 0..max_rows {
-            let parts: Vec<&str> = columns.iter()
+            let parts: Vec<&str> = columns
+                .iter()
                 .map(|col| col.get(row).map(|s| s.as_str()).unwrap_or(""))
                 .collect();
             output.push_str(&parts.join(&delimiter.to_string()));
@@ -131,6 +135,8 @@ fn parse_timeout_duration(s: &str) -> Result<std::time::Duration, String> {
         (s, 1.0)
     };
 
-    let secs: f64 = num_str.parse().map_err(|_| format!("invalid duration '{}'", s))?;
+    let secs: f64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid duration '{}'", s))?;
     Ok(std::time::Duration::from_secs_f64(secs * multiplier))
 }

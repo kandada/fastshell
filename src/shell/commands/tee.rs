@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_tee(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -36,7 +39,9 @@ impl Shell {
                     .map_err(|e| e.to_string())
                     .and_then(|mut f| f.write_all(input.as_bytes()).map_err(|e| e.to_string()))
             } else {
-                self.vfs.write(file, &self.cwd, &input).map_err(|e| e.to_string())
+                self.vfs
+                    .write(file, &self.cwd, &input)
+                    .map_err(|e| e.to_string())
             };
             if let Err(e) = result {
                 return CommandOutput::error(format!("tee: {}: {}\n", file, e), 1);

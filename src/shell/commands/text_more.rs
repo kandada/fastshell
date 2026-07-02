@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_truncate(&self, args: &[&str]) -> CommandOutput {
@@ -80,17 +83,28 @@ impl Shell {
                 let byte = (k % 16) + 1;
                 if !silent {
                     return CommandOutput {
-                        stdout: format!("{} {} differ: byte {}, line {}\n", files[0], files[1], byte, line),
+                        stdout: format!(
+                            "{} {} differ: byte {}, line {}\n",
+                            files[0], files[1], byte, line
+                        ),
                         stderr: String::new(),
                         exit_code: 1,
                     };
                 }
-                return CommandOutput { stdout: String::new(), stderr: String::new(), exit_code: 1 };
+                return CommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 1,
+                };
             }
         }
 
         if data1.len() != data2.len() {
-            let shorter = if data1.len() < data2.len() { &files[0] } else { &files[1] };
+            let shorter = if data1.len() < data2.len() {
+                &files[0]
+            } else {
+                &files[1]
+            };
             if !silent {
                 return CommandOutput {
                     stdout: format!("cmp: EOF on {} after byte {}\n", shorter, len + 1),
@@ -98,7 +112,11 @@ impl Shell {
                     exit_code: 1,
                 };
             }
-            return CommandOutput { stdout: String::new(), stderr: String::new(), exit_code: 1 };
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 1,
+            };
         }
 
         CommandOutput::success(String::new())
@@ -136,7 +154,9 @@ impl Shell {
             for file in &files {
                 match self.vfs.read(file, &self.cwd) {
                     Ok(d) => all.extend_from_slice(&d),
-                    Err(e) => return CommandOutput::error(format!("strings: {}: {}\n", file, e), 1),
+                    Err(e) => {
+                        return CommandOutput::error(format!("strings: {}: {}\n", file, e), 1)
+                    }
                 }
             }
             all
@@ -357,7 +377,12 @@ fn get_file_content(
         for file in files {
             match shell.vfs.read_to_string(file, &shell.cwd) {
                 Ok(c) => all.push_str(&c),
-                Err(e) => return Err(CommandOutput::error(format!("{}: {}: {}\n", cmd, file, e), 1)),
+                Err(e) => {
+                    return Err(CommandOutput::error(
+                        format!("{}: {}: {}\n", cmd, file, e),
+                        1,
+                    ))
+                }
             }
         }
         Ok(all)

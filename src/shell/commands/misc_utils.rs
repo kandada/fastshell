@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_shuf(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -157,7 +160,11 @@ impl Shell {
     }
 
     pub fn cmd_comm(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
-        let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let files: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
 
         if files.len() < 2 && stdin.is_none() {
             return CommandOutput::error("comm: missing file operands\n".to_string(), 1);
@@ -280,7 +287,11 @@ impl Shell {
         };
 
         let data = if let Some(lim) = limit {
-            if lim < data.len() { &data[..lim] } else { data }
+            if lim < data.len() {
+                &data[..lim]
+            } else {
+                data
+            }
         } else {
             data
         };
@@ -394,7 +405,9 @@ fn shuffle<T>(items: &mut Vec<T>) {
     let mut seed = hasher.finish();
     let len = items.len();
     for i in (1..len).rev() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (seed as usize) % (i + 1);
         items.swap(i, j);
     }
@@ -430,11 +443,17 @@ fn parse_size(s: &str) -> usize {
 
 fn evaluate_expr(args: &[&str]) -> Result<i64, String> {
     if args.len() == 1 {
-        return args[0].parse::<i64>().map_err(|_| format!("syntax error: {}", args[0]));
+        return args[0]
+            .parse::<i64>()
+            .map_err(|_| format!("syntax error: {}", args[0]));
     }
     if args.len() == 3 {
-        let left: i64 = args[0].parse().map_err(|_| format!("non-integer argument: {}", args[0]))?;
-        let right: i64 = args[2].parse().map_err(|_| format!("non-integer argument: {}", args[2]))?;
+        let left: i64 = args[0]
+            .parse()
+            .map_err(|_| format!("non-integer argument: {}", args[0]))?;
+        let right: i64 = args[2]
+            .parse()
+            .map_err(|_| format!("non-integer argument: {}", args[2]))?;
         match args[1] {
             "+" => Ok(left + right),
             "-" => Ok(left - right),

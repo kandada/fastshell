@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_env(&self, args: &[&str]) -> CommandOutput {
@@ -46,16 +49,25 @@ impl Shell {
     }
 
     pub fn cmd_basename(&self, args: &[&str]) -> CommandOutput {
-        let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let files: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
         if files.is_empty() {
             return CommandOutput::error("basename: missing operand\n".to_string(), 1);
         }
 
         let path = files[0];
-        let suffix = if files.len() > 1 { Some(files[1]) } else { None };
+        let suffix = if files.len() > 1 {
+            Some(files[1])
+        } else {
+            None
+        };
 
         let path = std::path::Path::new(path);
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -68,13 +80,18 @@ impl Shell {
     }
 
     pub fn cmd_dirname(&self, args: &[&str]) -> CommandOutput {
-        let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let files: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
         if files.is_empty() {
             return CommandOutput::error("dirname: missing operand\n".to_string(), 1);
         }
 
         let path = std::path::Path::new(files[0]);
-        let parent = path.parent()
+        let parent = path
+            .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
 
@@ -82,7 +99,11 @@ impl Shell {
     }
 
     pub fn cmd_realpath(&self, args: &[&str]) -> CommandOutput {
-        let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let files: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
         if files.is_empty() {
             return CommandOutput::error("realpath: missing operand\n".to_string(), 1);
         }
@@ -90,12 +111,10 @@ impl Shell {
         let mut output = String::new();
         for file in &files {
             match self.vfs.resolve(file, &self.cwd) {
-                Ok(resolved) => {
-                    match std::fs::canonicalize(&resolved) {
-                        Ok(canon) => output.push_str(&format!("{}\n", canon.display())),
-                        Err(e) => output.push_str(&format!("realpath: {}: {}\n", file, e)),
-                    }
-                }
+                Ok(resolved) => match std::fs::canonicalize(&resolved) {
+                    Ok(canon) => output.push_str(&format!("{}\n", canon.display())),
+                    Err(e) => output.push_str(&format!("realpath: {}: {}\n", file, e)),
+                },
                 Err(e) => output.push_str(&format!("realpath: {}: {}\n", file, e)),
             }
         }
@@ -117,7 +136,7 @@ fn simple_printf(format: &str, args: &[&str]) -> String {
                 't' => result.push('\t'),
                 '\\' => result.push('\\'),
                 'r' => result.push('\r'),
-                '0' => {},
+                '0' => {}
                 c => {
                     result.push('\\');
                     result.push(c);

@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput, human_size};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{human_size, CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_du(&self, args: &[&str]) -> CommandOutput {
@@ -159,7 +162,8 @@ impl Shell {
                     };
 
                     output.push_str(&format!("  File: {}\n", resolved.display()));
-                    output.push_str(&format!("  Size: {}\tBlocks: {}\tType: {}\n",
+                    output.push_str(&format!(
+                        "  Size: {}\tBlocks: {}\tType: {}\n",
                         meta.len(),
                         meta.len() / 512 + if meta.len() % 512 != 0 { 1 } else { 0 },
                         ftype,
@@ -168,7 +172,8 @@ impl Shell {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-                        output.push_str(&format!("Access: ({:04o})\tUid: {}\tGid: {}\n",
+                        output.push_str(&format!(
+                            "Access: ({:04o})\tUid: {}\tGid: {}\n",
                             meta.permissions().mode() & 0o7777,
                             meta.uid(),
                             meta.gid(),
@@ -176,8 +181,13 @@ impl Shell {
                     }
                     #[cfg(not(unix))]
                     {
-                        output.push_str(&format!("Access: ({})\n",
-                            if meta.permissions().readonly() { "read-only" } else { "read-write" },
+                        output.push_str(&format!(
+                            "Access: ({})\n",
+                            if meta.permissions().readonly() {
+                                "read-only"
+                            } else {
+                                "read-write"
+                            },
                         ));
                     }
                 }
@@ -221,7 +231,11 @@ fn format_stat(path: &std::path::Path, meta: &std::fs::Metadata, fmt: &str) -> S
         }
         #[cfg(not(unix))]
         {
-            if meta.permissions().readonly() { "r--r--r--".to_string() } else { "rw-r--r--".to_string() }
+            if meta.permissions().readonly() {
+                "r--r--r--".to_string()
+            } else {
+                "rw-r--r--".to_string()
+            }
         }
     };
 
@@ -244,10 +258,15 @@ fn format_stat(path: &std::path::Path, meta: &std::fs::Metadata, fmt: &str) -> S
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         };
-        (to_secs(meta.accessed()), to_secs(meta.modified()), to_secs(meta.created()))
+        (
+            to_secs(meta.accessed()),
+            to_secs(meta.modified()),
+            to_secs(meta.created()),
+        )
     };
 
-    let filename = path.file_name()
+    let filename = path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
 
@@ -273,7 +292,11 @@ fn format_stat(path: &std::path::Path, meta: &std::fs::Metadata, fmt: &str) -> S
 fn du_walk(path: &std::path::Path, max_depth: Option<usize>, current_depth: usize) -> u64 {
     if let Some(d) = max_depth {
         if current_depth > d {
-            return if path.is_file() { path.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };
+            return if path.is_file() {
+                path.metadata().map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
         }
     }
 
@@ -312,6 +335,8 @@ fn fs_stats(path: &std::path::Path) -> Option<(u64, u64)> {
     }
     #[cfg(not(unix))]
     {
-        path.metadata().ok().map(|_| (1024 * 1024 * 1024, 512 * 1024 * 1024))
+        path.metadata()
+            .ok()
+            .map(|_| (1024 * 1024 * 1024, 512 * 1024 * 1024))
     }
 }

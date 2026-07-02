@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_sed(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
@@ -104,7 +107,11 @@ fn parse_sed_command(expr: &str) -> Vec<SedCommand> {
             let parts: Vec<&str> = rest.splitn(3, delim).collect();
             if parts.len() >= 2 {
                 let pattern = parts[0].to_string();
-                let replacement = if parts.len() > 1 { parts[1].to_string() } else { String::new() };
+                let replacement = if parts.len() > 1 {
+                    parts[1].to_string()
+                } else {
+                    String::new()
+                };
                 let flags = parts.get(2).unwrap_or(&"");
                 let global = flags.contains('g');
 
@@ -159,22 +166,30 @@ fn apply_sed_commands(content: &str, commands: &[SedCommand]) -> String {
                         break;
                     }
                 }
-                SedCommand::Substitute { ref pattern, ref replacement, global, ref regex } => {
+                SedCommand::Substitute {
+                    ref pattern,
+                    ref replacement,
+                    global,
+                    ref regex,
+                } => {
                     let prev = modified.clone();
                     if let Some(re) = regex {
                         match regex::Regex::new(re) {
                             Ok(re) => {
                                 if *global {
-                                    modified = re.replace_all(&modified, replacement.as_str()).to_string();
+                                    modified =
+                                        re.replace_all(&modified, replacement.as_str()).to_string();
                                 } else {
-                                    modified = re.replace(&modified, replacement.as_str()).to_string();
+                                    modified =
+                                        re.replace(&modified, replacement.as_str()).to_string();
                                 }
                             }
                             Err(_) => {
                                 if *global {
                                     modified = prev.replace(pattern.as_str(), replacement.as_str());
                                 } else {
-                                    modified = prev.replacen(pattern.as_str(), replacement.as_str(), 1);
+                                    modified =
+                                        prev.replacen(pattern.as_str(), replacement.as_str(), 1);
                                 }
                             }
                         }

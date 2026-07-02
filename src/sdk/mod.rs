@@ -1,19 +1,22 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 pub mod ffi;
-pub mod types;
 pub mod plugin;
+pub mod types;
 
 use crate::bridge::Runtime;
-use crate::python::{self, PythonEngine};
 use crate::python::cpython;
+use crate::python::{self, PythonEngine};
+use crate::sdk::plugin::DevicePlugin;
 use crate::shell::Shell;
 use crate::vfs::Vfs;
-use crate::sdk::plugin::DevicePlugin;
-use types::*;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
-use std::time::Duration;
 use std::ffi::{c_char, CStr, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use types::*;
 
 pub struct Fastshell {
     runtime: Arc<Mutex<Runtime>>,
@@ -29,18 +32,15 @@ impl Fastshell {
     pub fn new() -> Self {
         let permissions = Arc::new(Mutex::new(HashMap::new()));
         let plugin = Arc::new(Mutex::new(None));
-        let vfs = Vfs::new(std::env::temp_dir().join("fastshell"))
-            .unwrap_or_else(|_| {
-                // Fallback: use /tmp/fastshell if temp dir creation fails
-                Vfs::new(std::path::PathBuf::from("/tmp/fastshell"))
-                    .expect("VFS should always be creatable with /tmp fallback")
-            });
+        let vfs = Vfs::new(std::env::temp_dir().join("fastshell")).unwrap_or_else(|_| {
+            // Fallback: use /tmp/fastshell if temp dir creation fails
+            Vfs::new(std::path::PathBuf::from("/tmp/fastshell"))
+                .expect("VFS should always be creatable with /tmp fallback")
+        });
+        // (c) 2025 xiefujin <490021684@qq.com>
         Fastshell {
             runtime: Arc::new(Mutex::new(Runtime::new(
-                Shell::with_plugin(
-                    vfs,
-                    true, false, permissions.clone(), plugin.clone(),
-                ),
+                Shell::with_plugin(vfs, true, false, permissions.clone(), plugin.clone()),
                 None,
             ))),
             config: Config::default(),
@@ -76,13 +76,18 @@ impl Fastshell {
             return Err("sandbox_path is required".to_string());
         }
         let sandbox_path = std::path::PathBuf::from(&config.sandbox_path);
-        let vfs = Vfs::new(sandbox_path.clone()).map_err(|e| format!("Failed to initialize VFS: {}", e))?;
+        let vfs = Vfs::new(sandbox_path.clone())
+            .map_err(|e| format!("Failed to initialize VFS: {}", e))?;
 
         let permissions = Arc::new(Mutex::new(HashMap::new()));
-        let plugin = Arc::new(Mutex::new(
-            self.plugin_ref.lock().unwrap().take()
-        ));
-        let shell = Shell::with_plugin(vfs, config.allow_subprocess, config.network_ask_permission, permissions.clone(), plugin.clone());
+        let plugin = Arc::new(Mutex::new(self.plugin_ref.lock().unwrap().take()));
+        let shell = Shell::with_plugin(
+            vfs,
+            config.allow_subprocess,
+            config.network_ask_permission,
+            permissions.clone(),
+            plugin.clone(),
+        );
 
         let python: Option<Box<dyn PythonEngine>> = if config.python_enabled {
             Some(python::detect_python_engine(&sandbox_path))
@@ -100,6 +105,7 @@ impl Fastshell {
         // Register the shell bridge BEFORE any Python code runs.
         // These function pointers are called from inside the CPython VM
         // when Python code calls subprocess.run() / os.system() / etc.
+        // (c) 2025 xiefujin <490021684@qq.com>
         cpython::register_shell_execute(fastshell_shell_exec_c);
         cpython::register_shell_free(fastshell_shell_free_c);
 
@@ -115,6 +121,7 @@ impl Fastshell {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
 
+        // (c) 2025 xiefujin <490021684@qq.com>
         let timeout_ms = self.config.command_timeout_ms;
 
         if timeout_ms == 0 {
@@ -130,13 +137,19 @@ impl Fastshell {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             if cancel.load(Ordering::SeqCst) {
-                let _ = tx.send(crate::shell::CommandOutput::error("cancelled".to_string(), 143));
+                let _ = tx.send(crate::shell::CommandOutput::error(
+                    "cancelled".to_string(),
+                    143,
+                ));
                 return;
             }
             let mut runtime = rt.lock().unwrap();
             if cancel.load(Ordering::SeqCst) {
                 drop(runtime);
-                let _ = tx.send(crate::shell::CommandOutput::error("cancelled".to_string(), 143));
+                let _ = tx.send(crate::shell::CommandOutput::error(
+                    "cancelled".to_string(),
+                    143,
+                ));
                 return;
             }
             let output = runtime.execute(&cmd);
@@ -165,6 +178,7 @@ impl Fastshell {
         if !self.initialized {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
+        // (c) 2025 xiefujin <490021684@qq.com>
         let mut rt = self.runtime.lock().unwrap();
         let output = rt.execute_python_code(code);
         CommandResult::from_code(output.stdout, output.stderr, output.exit_code)
@@ -212,13 +226,17 @@ impl Fastshell {
     }
 
     pub fn exists(&self, path: &str) -> bool {
-        if !self.initialized { return false; }
+        if !self.initialized {
+            return false;
+        }
         let rt = self.runtime.lock().unwrap();
         rt.exists(path)
     }
 
     pub fn is_dir(&self, path: &str) -> bool {
-        if !self.initialized { return false; }
+        if !self.initialized {
+            return false;
+        }
         let rt = self.runtime.lock().unwrap();
         rt.is_dir(path)
     }
@@ -256,7 +274,10 @@ impl Fastshell {
     }
 
     pub fn check_permission(&self, resource: &str) -> Option<bool> {
-        self.permissions.lock().ok().and_then(|perms| perms.get(resource).copied())
+        self.permissions
+            .lock()
+            .ok()
+            .and_then(|perms| perms.get(resource).copied())
     }
 
     pub fn clear_permissions(&self) {
@@ -281,6 +302,7 @@ impl Fastshell {
     }
 
     pub fn shutdown(&mut self) {
+        // (c) 2025 xiefujin <490021684@qq.com>
         self.initialized = false;
         self.env_vars.clear();
         let rt = self.runtime.lock().unwrap();
@@ -294,7 +316,11 @@ impl Fastshell {
 }
 
 unsafe extern "C" fn fastshell_shell_exec_c(cmd: *const c_char) -> *const c_char {
-    let cmd_str = if cmd.is_null() { String::new() } else { unsafe { CStr::from_ptr(cmd) }.to_string_lossy().to_string() };
+    let cmd_str = if cmd.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(cmd) }.to_string_lossy().to_string()
+    };
     let sdk = crate::sdk::ffi::get_sdk_internal();
     let sdk = sdk.lock().unwrap();
     let result = sdk.execute(&cmd_str);
@@ -307,7 +333,11 @@ unsafe extern "C" fn fastshell_shell_exec_c(cmd: *const c_char) -> *const c_char
 }
 
 unsafe extern "C" fn fastshell_shell_free_c(ptr: *mut c_char) {
-    if !ptr.is_null() { unsafe { let _ = CString::from_raw(ptr); } }
+    if !ptr.is_null() {
+        unsafe {
+            let _ = CString::from_raw(ptr);
+        }
+    }
 }
 
 impl Default for Fastshell {
@@ -326,8 +356,8 @@ mod tests {
 
     fn setup_sdk() -> Fastshell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_sdk_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_sdk_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
 
         let mut sdk = Fastshell::new();
@@ -447,7 +477,10 @@ mod tests {
     #[test]
     fn test_init_empty_path() {
         let mut sdk = Fastshell::new();
-        let config = Config { sandbox_path: String::new(), ..Default::default() };
+        let config = Config {
+            sandbox_path: String::new(),
+            ..Default::default()
+        };
         assert!(sdk.init(config).is_err());
     }
 
@@ -485,8 +518,8 @@ mod tests {
     fn test_network_permission_denied() {
         let mut sdk = Fastshell::new();
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_sdk_perm_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_sdk_perm_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let config = Config {
             sandbox_path: dir.to_string_lossy().to_string(),
@@ -499,7 +532,9 @@ mod tests {
 
         let result = sdk.execute("curl http://example.com");
         assert_eq!(result.exit_code, EXIT_NEED_PERMISSION);
-        assert!(result.stderr.contains("PERMISSION_NEEDED:network:example.com"));
+        assert!(result
+            .stderr
+            .contains("PERMISSION_NEEDED:network:example.com"));
 
         sdk.set_permission("network:example.com", true);
         let result = sdk.execute("curl http://example.com");
@@ -510,8 +545,8 @@ mod tests {
     fn test_command_not_found_subprocess_disabled() {
         let mut sdk = Fastshell::new();
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_sdk_nosub_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_sdk_nosub_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let config = Config {
             sandbox_path: dir.to_string_lossy().to_string(),

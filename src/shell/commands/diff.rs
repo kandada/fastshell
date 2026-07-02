@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 #[derive(Clone, Copy, PartialEq)]
 enum IgnoreWs {
@@ -65,17 +68,31 @@ impl Shell {
 
         if is_dir1 && is_dir2 {
             if recursive {
-                return diff_directories(self, path1, path2, unified, ignore_ws, brief, context_lines);
+                return diff_directories(
+                    self,
+                    path1,
+                    path2,
+                    unified,
+                    ignore_ws,
+                    brief,
+                    context_lines,
+                );
             } else {
                 return CommandOutput::error(
-                    format!("diff: {} and {} are directories; use -r\n", path1, path2), 1);
+                    format!("diff: {} and {} are directories; use -r\n", path1, path2),
+                    1,
+                );
             }
         } else if is_dir1 {
             return CommandOutput::error(
-                format!("diff: {} is a directory; {} is a file\n", path1, path2), 1);
+                format!("diff: {} is a directory; {} is a file\n", path1, path2),
+                1,
+            );
         } else if is_dir2 {
             return CommandOutput::error(
-                format!("diff: {} is a file; {} is a directory\n", path1, path2), 1);
+                format!("diff: {} is a file; {} is a directory\n", path1, path2),
+                1,
+            );
         }
 
         let f1 = match self.vfs.read_to_string(path1, &self.cwd) {
@@ -163,7 +180,13 @@ fn diff_directories(
             (Some(e1), Some(e2)) => {
                 if e1.is_dir && e2.is_dir {
                     let sub_result = diff_directories(
-                        shell, &sub_path1, &sub_path2, unified, ignore_ws, brief, context_lines,
+                        shell,
+                        &sub_path1,
+                        &sub_path2,
+                        unified,
+                        ignore_ws,
+                        brief,
+                        context_lines,
                     );
                     if !sub_result.stdout.is_empty() {
                         output.push_str(&sub_result.stdout);
@@ -175,9 +198,17 @@ fn diff_directories(
                     output.push_str(&format!(
                         "File {} is a {} while file {} is a {}\n",
                         sub_path1,
-                        if e1.is_dir { "directory" } else { "regular file" },
+                        if e1.is_dir {
+                            "directory"
+                        } else {
+                            "regular file"
+                        },
                         sub_path2,
-                        if e2.is_dir { "directory" } else { "regular file" },
+                        if e2.is_dir {
+                            "directory"
+                        } else {
+                            "regular file"
+                        },
                     ));
                     has_diff = true;
                 } else {
@@ -203,13 +234,20 @@ fn diff_directories(
                     if brief {
                         if !files_identical(&lines1, &lines2, ignore_ws) {
                             output.push_str(&format!(
-                                "Files {} and {} differ\n", sub_path1, sub_path2));
+                                "Files {} and {} differ\n",
+                                sub_path1, sub_path2
+                            ));
                             has_diff = true;
                         }
                     } else {
                         let d = if unified {
                             compute_unified_diff(
-                                &lines1, &lines2, &sub_path1, &sub_path2, context_lines, ignore_ws,
+                                &lines1,
+                                &lines2,
+                                &sub_path1,
+                                &sub_path2,
+                                context_lines,
+                                ignore_ws,
                             )
                         } else {
                             compute_diff(&lines1, &lines2, ignore_ws)
@@ -301,9 +339,10 @@ fn compute_diff(a: &[&str], b: &[&str], ignore_ws: Option<IgnoreWs>) -> String {
             }
             _ => {
                 let mut chunk = vec![edit];
-                while chunks.last().map_or(false, |c| {
-                    !matches!(c[0], Edit::Keep(_))
-                }) {
+                while chunks
+                    .last()
+                    .map_or(false, |c| !matches!(c[0], Edit::Keep(_)))
+                {
                     let prev = chunks.pop().unwrap();
                     chunk.splice(0..0, prev.into_iter());
                 }
@@ -396,7 +435,8 @@ fn compute_unified_diff(
         if change_start > actual_start && change_start - actual_start > context + 1 {
             actual_start = change_start - context - 1;
             // Make sure we're at a keep line or start of change
-            while actual_start < change_start && !matches!(markers[actual_start], DiffMark::Keep(_)) {
+            while actual_start < change_start && !matches!(markers[actual_start], DiffMark::Keep(_))
+            {
                 actual_start += 1;
             }
         }
@@ -658,8 +698,14 @@ fn chunk_range(chunk: &[&Edit]) -> (usize, usize) {
     let mut max = 0;
     for edit in chunk {
         match edit {
-            Edit::Keep(i) | Edit::Delete(i) => { min = min.min(*i); max = max.max(*i); }
-            Edit::Insert(j) => { min = min.min(*j); max = max.max(*j); }
+            Edit::Keep(i) | Edit::Delete(i) => {
+                min = min.min(*i);
+                max = max.max(*i);
+            }
+            Edit::Insert(j) => {
+                min = min.min(*j);
+                max = max.max(*j);
+            }
         }
     }
     (min, max)
@@ -676,8 +722,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_diff_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_diff_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }
@@ -689,8 +735,14 @@ mod tests {
     #[test]
     fn test_diff() {
         let shell = mk_shell();
-        shell.vfs.write("/a.txt", "", "line1\nline2\nline3\n").unwrap();
-        shell.vfs.write("/b.txt", "", "line1\nmodified\nline3\n").unwrap();
+        shell
+            .vfs
+            .write("/a.txt", "", "line1\nline2\nline3\n")
+            .unwrap();
+        shell
+            .vfs
+            .write("/b.txt", "", "line1\nmodified\nline3\n")
+            .unwrap();
         let out = shell.cmd_diff(&["/a.txt", "/b.txt"]);
         assert!(out.stdout.contains("modified"));
         assert_ne!(out.exit_code, 0);
@@ -708,8 +760,14 @@ mod tests {
     #[test]
     fn test_diff_unified() {
         let shell = mk_shell();
-        shell.vfs.write("/a.txt", "", "line1\nline2\nline3\n").unwrap();
-        shell.vfs.write("/b.txt", "", "line1\nmodified\nline3\n").unwrap();
+        shell
+            .vfs
+            .write("/a.txt", "", "line1\nline2\nline3\n")
+            .unwrap();
+        shell
+            .vfs
+            .write("/b.txt", "", "line1\nmodified\nline3\n")
+            .unwrap();
         let out = shell.cmd_diff(&["-u", "/a.txt", "/b.txt"]);
         assert!(out.stdout.contains("--- /a.txt"));
         assert!(out.stdout.contains("+++ /b.txt"));
@@ -750,8 +808,14 @@ mod tests {
     #[test]
     fn test_diff_ignore_whitespace_changes() {
         let shell = mk_shell();
-        shell.vfs.write("/a.txt", "", "hello world\nfoo  bar\n").unwrap();
-        shell.vfs.write("/b.txt", "", "hello world\nfoo    bar\n").unwrap();
+        shell
+            .vfs
+            .write("/a.txt", "", "hello world\nfoo  bar\n")
+            .unwrap();
+        shell
+            .vfs
+            .write("/b.txt", "", "hello world\nfoo    bar\n")
+            .unwrap();
         let out = shell.cmd_diff(&["-b", "/a.txt", "/b.txt"]);
         assert_eq!(out.exit_code, 0);
     }
@@ -773,7 +837,13 @@ mod tests {
         shell.vfs.write("/d1/a.txt", "", "hello\n").unwrap();
         shell.vfs.write("/d2/a.txt", "", "world\n").unwrap();
         let out = shell.cmd_diff(&["-r", "d1", "d2"]);
-        assert!(out.stdout.contains("differ") || out.stdout.contains("-hello") || out.stdout.contains("+world") || out.stdout.contains("hello") || out.stdout.contains("world"));
+        assert!(
+            out.stdout.contains("differ")
+                || out.stdout.contains("-hello")
+                || out.stdout.contains("+world")
+                || out.stdout.contains("hello")
+                || out.stdout.contains("world")
+        );
         assert_ne!(out.exit_code, 0);
     }
 

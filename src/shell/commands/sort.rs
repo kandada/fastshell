@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::cmp::Ordering;
 
 fn parse_human_size(s: &str) -> Option<u64> {
@@ -6,13 +9,20 @@ fn parse_human_size(s: &str) -> Option<u64> {
     if s.is_empty() {
         return None;
     }
-    let (num_part, suffix) = if let Some(_stripped) = s.strip_suffix(|c: char| c == 'K' || c == 'M' || c == 'G' || c == 'T') {
+    let (num_part, suffix) = if let Some(_stripped) =
+        s.strip_suffix(|c: char| c == 'K' || c == 'M' || c == 'G' || c == 'T')
+    {
         let idx = s.len() - 1;
         (&s[..idx], &s[idx..])
     } else if let Some(stripped) = s.strip_suffix("B") {
         let stripped = stripped.trim();
-        if let Some(_inner) = stripped.strip_suffix(|c: char| c == 'K' || c == 'M' || c == 'G' || c == 'T') {
-            (&stripped[..stripped.len() - 1], &stripped[stripped.len() - 1..])
+        if let Some(_inner) =
+            stripped.strip_suffix(|c: char| c == 'K' || c == 'M' || c == 'G' || c == 'T')
+        {
+            (
+                &stripped[..stripped.len() - 1],
+                &stripped[stripped.len() - 1..],
+            )
         } else {
             (s, "")
         }
@@ -37,7 +47,16 @@ enum SortKeyValue {
     Str(String),
 }
 
-fn extract_sort_key(line: &str, key_start: usize, key_end: Option<usize>, delimiter: Option<char>, fold_case: bool, numeric: bool, human: bool, orig_line: &str) -> SortKeyValue {
+fn extract_sort_key(
+    line: &str,
+    key_start: usize,
+    key_end: Option<usize>,
+    delimiter: Option<char>,
+    fold_case: bool,
+    numeric: bool,
+    human: bool,
+    orig_line: &str,
+) -> SortKeyValue {
     let fields: Vec<&str> = match delimiter {
         Some(d) => line.split(d).collect(),
         None => line.split_whitespace().collect(),
@@ -47,10 +66,18 @@ fn extract_sort_key(line: &str, key_start: usize, key_end: Option<usize>, delimi
     if start_idx >= fields.len() {
         if numeric || human {
             // Non-numeric fields sort as 0/f64::NAN-like
-            let s = if fold_case { orig_line.to_lowercase() } else { orig_line.to_string() };
+            let s = if fold_case {
+                orig_line.to_lowercase()
+            } else {
+                orig_line.to_string()
+            };
             return SortKeyValue::Str(s);
         } else {
-            let s = if fold_case { orig_line.to_lowercase() } else { orig_line.to_string() };
+            let s = if fold_case {
+                orig_line.to_lowercase()
+            } else {
+                orig_line.to_string()
+            };
             return SortKeyValue::Str(s);
         }
     }
@@ -60,12 +87,19 @@ fn extract_sort_key(line: &str, key_start: usize, key_end: Option<usize>, delimi
 
     let sep_str: String;
     let sep: &str = match delimiter {
-        Some(d) => { sep_str = d.to_string(); &sep_str }
+        Some(d) => {
+            sep_str = d.to_string();
+            &sep_str
+        }
         None => " ",
     };
     let key_str: String = fields[start_idx..=end_idx].join(sep);
     let key_str = key_str.trim().to_string();
-    let key_ref = if fold_case { key_str.to_lowercase() } else { key_str.clone() };
+    let key_ref = if fold_case {
+        key_str.to_lowercase()
+    } else {
+        key_str.clone()
+    };
 
     if human {
         match parse_human_size(&key_ref) {
@@ -149,10 +183,7 @@ impl Shell {
                             all_lines.push(line.to_string());
                         }
                     }
-                    Err(e) => return CommandOutput::error(
-                        format!("sort: {}: {}\n", file, e),
-                        1,
-                    ),
+                    Err(e) => return CommandOutput::error(format!("sort: {}: {}\n", file, e), 1),
                 }
             }
         }
@@ -162,8 +193,7 @@ impl Shell {
                 .into_iter()
                 .map(|line| {
                     let key = extract_sort_key(
-                        &line, key_start, key_end, delimiter,
-                        fold_case, numeric, human, &line,
+                        &line, key_start, key_end, delimiter, fold_case, numeric, human, &line,
                     );
                     (key, line)
                 })
@@ -193,8 +223,16 @@ impl Shell {
                             (Some(_), None) => Ordering::Less,
                             (None, Some(_)) => Ordering::Greater,
                             (None, None) => {
-                                let aa = if fold_case { a.to_lowercase() } else { a.clone() };
-                                let bb = if fold_case { b.to_lowercase() } else { b.clone() };
+                                let aa = if fold_case {
+                                    a.to_lowercase()
+                                } else {
+                                    a.clone()
+                                };
+                                let bb = if fold_case {
+                                    b.to_lowercase()
+                                } else {
+                                    b.clone()
+                                };
                                 aa.cmp(&bb)
                             }
                         }
@@ -206,8 +244,16 @@ impl Shell {
                             return cmp;
                         }
                         if !stable_flag {
-                            let aa = if fold_case { a.to_lowercase() } else { a.clone() };
-                            let bb = if fold_case { b.to_lowercase() } else { b.clone() };
+                            let aa = if fold_case {
+                                a.to_lowercase()
+                            } else {
+                                a.clone()
+                            };
+                            let bb = if fold_case {
+                                b.to_lowercase()
+                            } else {
+                                b.clone()
+                            };
                             aa.cmp(&bb)
                         } else {
                             Ordering::Equal
@@ -260,13 +306,15 @@ impl Shell {
 
 fn compare_keys(a: &SortKeyValue, b: &SortKeyValue) -> Ordering {
     match (a, b) {
-        (SortKeyValue::Num(na), SortKeyValue::Num(nb)) => {
-            na.partial_cmp(nb).unwrap_or_else(|| {
-                if na.is_nan() && !nb.is_nan() { Ordering::Greater }
-                else if !na.is_nan() && nb.is_nan() { Ordering::Less }
-                else { Ordering::Equal }
-            })
-        }
+        (SortKeyValue::Num(na), SortKeyValue::Num(nb)) => na.partial_cmp(nb).unwrap_or_else(|| {
+            if na.is_nan() && !nb.is_nan() {
+                Ordering::Greater
+            } else if !na.is_nan() && nb.is_nan() {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        }),
         (SortKeyValue::HumanNum(ha), SortKeyValue::HumanNum(hb)) => ha.cmp(hb),
         (SortKeyValue::Str(sa), SortKeyValue::Str(sb)) => sa.cmp(sb),
         // Cross-type comparisons: numbers before strings

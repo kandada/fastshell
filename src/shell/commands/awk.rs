@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::collections::HashMap;
 
 impl Shell {
@@ -152,7 +155,11 @@ fn parse_awk_full(prog: &str) -> AwkFull {
     let main_part = main_part.trim();
     if !main_part.is_empty() {
         if main_part.starts_with('{') {
-            let inner = main_part.trim_matches('{').trim_matches('}').trim().to_string();
+            let inner = main_part
+                .trim_matches('{')
+                .trim_matches('}')
+                .trim()
+                .to_string();
             action = Some(inner);
         } else if main_part.contains('{') {
             if let Some(brace_pos) = main_part.find('{') {
@@ -167,7 +174,12 @@ fn parse_awk_full(prog: &str) -> AwkFull {
         }
     }
 
-    AwkFull { begin, condition, action, end_block }
+    AwkFull {
+        begin,
+        condition,
+        action,
+        end_block,
+    }
 }
 
 fn extract_braced_block(s: &str) -> Option<String> {
@@ -377,9 +389,7 @@ fn awk_value_ext(
                 expr.to_string()
             }
         }
-        _ if expr.starts_with('"') && expr.ends_with('"') => {
-            expr[1..expr.len() - 1].to_string()
-        }
+        _ if expr.starts_with('"') && expr.ends_with('"') => expr[1..expr.len() - 1].to_string(),
         _ => {
             // Try to evaluate as a function call
             if let Some(result) = try_awk_function_call(expr, nr, nf, line, fields, vars) {
@@ -458,11 +468,7 @@ fn exec_awk_action(
                 result.push_str(&awk_value_ext(arg, nr, nf, line, fields, vars));
             }
         } else if stmt.starts_with("print ") || stmt == "print" {
-            let expr = if stmt == "print" {
-                "$0"
-            } else {
-                &stmt[6..]
-            };
+            let expr = if stmt == "print" { "$0" } else { &stmt[6..] };
             if !result.is_empty() {
                 result.push('\n');
             }
@@ -605,9 +611,7 @@ fn try_awk_function_call(
             let s = eval_args.first().map(|s| s.as_str()).unwrap_or("");
             Some(s.to_uppercase())
         }
-        "split" => {
-            None
-        }
+        "split" => None,
         _ => None,
     }
 }
@@ -828,8 +832,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_awk_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_awk_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }
@@ -850,7 +854,10 @@ mod tests {
     #[test]
     fn test_awk_condition_eq() {
         let shell = mk_shell();
-        let out = shell.cmd_awk(&["$1 == \"hello\" {print $2}"], Some("hello world\nfoo bar\n"));
+        let out = shell.cmd_awk(
+            &["$1 == \"hello\" {print $2}"],
+            Some("hello world\nfoo bar\n"),
+        );
         assert!(out.stdout.contains("world"));
         assert!(!out.stdout.contains("bar"));
     }
@@ -858,10 +865,7 @@ mod tests {
     #[test]
     fn test_awk_printf() {
         let shell = mk_shell();
-        let out = shell.cmd_awk(
-            &["{printf(\"%s:%d\\n\", $1, NR)}"],
-            Some("hello\nworld\n"),
-        );
+        let out = shell.cmd_awk(&["{printf(\"%s:%d\\n\", $1, NR)}"], Some("hello\nworld\n"));
         assert!(out.stdout.contains("hello:1"));
         assert!(out.stdout.contains("world:2"));
     }
@@ -933,10 +937,7 @@ mod tests {
     #[test]
     fn test_awk_split() {
         let shell = mk_shell();
-        let out = shell.cmd_awk(
-            &["{ n = split($0, a, \",\"); print n }"],
-            Some("a,b,c\n"),
-        );
+        let out = shell.cmd_awk(&["{ n = split($0, a, \",\"); print n }"], Some("a,b,c\n"));
         assert!(out.stdout.contains("3"));
     }
 }

@@ -1,10 +1,13 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use fastshell::sdk::types::Config;
+use fastshell::sdk::Fastshell;
 use std::fs;
-use std::sync::{Arc, Barrier};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
-use fastshell::sdk::Fastshell;
-use fastshell::sdk::types::Config;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -19,7 +22,8 @@ fn setup_no_timeout() -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0,
-    }).unwrap();
+    })
+    .unwrap();
     sdk
 }
 
@@ -34,7 +38,8 @@ fn setup_with_timeout(ms: u64) -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: ms,
-    }).unwrap();
+    })
+    .unwrap();
     sdk
 }
 
@@ -47,17 +52,21 @@ fn stress_concurrent_reads() {
     let sdk = Arc::new(setup_no_timeout());
     sdk.write_file("shared.txt", "shared data").unwrap();
 
-    let handles: Vec<_> = (0..16).map(|_| {
-        let sdk = sdk.clone();
-        thread::spawn(move || {
-            for _ in 0..50 {
-                let r = sdk.execute("cat shared.txt");
-                assert_eq!(r.exit_code, 0);
-            }
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let sdk = sdk.clone();
+            thread::spawn(move || {
+                for _ in 0..50 {
+                    let r = sdk.execute("cat shared.txt");
+                    assert_eq!(r.exit_code, 0);
+                }
+            })
         })
-    }).collect();
+        .collect();
 
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 }
 
 #[test]
@@ -65,21 +74,25 @@ fn stress_concurrent_mkdir_ls() {
     let sdk = Arc::new(setup_no_timeout());
 
     let barrier = Arc::new(Barrier::new(8));
-    let handles: Vec<_> = (0..8).map(|i| {
-        let sdk = sdk.clone();
-        let b = barrier.clone();
-        thread::spawn(move || {
-            b.wait();
-            for j in 0..50 {
-                let dir_name = format!("td_{}_{}", i, j);
-                sdk.execute(&format!("mkdir {}", dir_name));
-                let r = sdk.execute("ls");
-                assert_eq!(r.exit_code, 0);
-            }
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let sdk = sdk.clone();
+            let b = barrier.clone();
+            thread::spawn(move || {
+                b.wait();
+                for j in 0..50 {
+                    let dir_name = format!("td_{}_{}", i, j);
+                    sdk.execute(&format!("mkdir {}", dir_name));
+                    let r = sdk.execute("ls");
+                    assert_eq!(r.exit_code, 0);
+                }
+            })
         })
-    }).collect();
+        .collect();
 
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 }
 
 #[test]
@@ -91,20 +104,22 @@ fn stress_concurrent_write_then_read() {
     let writer_written = written.clone();
     let writer = thread::spawn(move || {
         for i in 0..100 {
-            writer_sdk.write_file("concurrent.txt", &format!("write {}", i)).unwrap();
+            writer_sdk
+                .write_file("concurrent.txt", &format!("write {}", i))
+                .unwrap();
         }
         writer_written.store(true, Ordering::SeqCst);
     });
 
     let reader_sdk = sdk.clone();
-    let reader = thread::spawn(move || {
-        loop {
-            let result = reader_sdk.read_file("concurrent.txt");
-            match result {
-                Ok(_) => {},
-                Err(_) => {},
-            }
-            if written.load(Ordering::SeqCst) { break; }
+    let reader = thread::spawn(move || loop {
+        let result = reader_sdk.read_file("concurrent.txt");
+        match result {
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        if written.load(Ordering::SeqCst) {
+            break;
         }
     });
 
@@ -121,8 +136,16 @@ fn stress_sequential_many_commands() {
         assert_eq!(r.exit_code, 0);
     }
     let elapsed = start.elapsed();
-    eprintln!("500 sequential echo commands: {:?} ({:.0} cmd/s)", elapsed, 500.0 / elapsed.as_secs_f64());
-    assert!(elapsed < Duration::from_secs(10), "500 commands took too long: {:?}", elapsed);
+    eprintln!(
+        "500 sequential echo commands: {:?} ({:.0} cmd/s)",
+        elapsed,
+        500.0 / elapsed.as_secs_f64()
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "500 commands took too long: {:?}",
+        elapsed
+    );
 }
 
 #[test]
@@ -152,9 +175,17 @@ fn recovery_command_timeout() {
     let start = Instant::now();
     let r = sdk.execute("sleep 10");
     let elapsed = start.elapsed();
-    assert_eq!(r.exit_code, 124, "expected timeout exit code 124, got {}: {}", r.exit_code, r.stderr);
+    assert_eq!(
+        r.exit_code, 124,
+        "expected timeout exit code 124, got {}: {}",
+        r.exit_code, r.stderr
+    );
     assert!(r.stderr.contains("timed out"));
-    assert!(elapsed < Duration::from_secs(5), "timeout took too long: {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "timeout took too long: {:?}",
+        elapsed
+    );
 }
 
 #[test]
@@ -162,15 +193,16 @@ fn recovery_cancel_execution() {
     let sdk = Arc::new(setup_no_timeout());
     let sdk_clone = sdk.clone();
 
-    let handle = thread::spawn(move || {
-        sdk_clone.execute("sleep 2")
-    });
+    let handle = thread::spawn(move || sdk_clone.execute("sleep 2"));
 
     thread::sleep(Duration::from_millis(50));
     sdk.cancel_execution();
 
     let result = handle.join();
-    assert!(result.is_ok(), "cancel_execution thread should join without panic");
+    assert!(
+        result.is_ok(),
+        "cancel_execution thread should join without panic"
+    );
 }
 
 #[test]
@@ -181,9 +213,15 @@ fn recovery_after_timeout_still_works() {
     let timeout_result = sdk.execute("sleep 10");
     let elapsed = start.elapsed();
 
-    assert!(elapsed < Duration::from_secs(5), "timeout should happen quickly");
-    assert_eq!(timeout_result.exit_code, 124, "expected timeout code 124: code={} stderr={}",
-        timeout_result.exit_code, timeout_result.stderr);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "timeout should happen quickly"
+    );
+    assert_eq!(
+        timeout_result.exit_code, 124,
+        "expected timeout code 124: code={} stderr={}",
+        timeout_result.exit_code, timeout_result.stderr
+    );
 }
 
 #[test]
@@ -262,7 +300,8 @@ fn leak_many_init_shutdown_cycles() {
             allow_subprocess: false,
             network_ask_permission: false,
             command_timeout_ms: 0,
-        }).unwrap();
+        })
+        .unwrap();
         for _ in 0..50 {
             let _ = sdk.execute("echo test");
         }
@@ -283,7 +322,8 @@ fn stress_rapid_create_destroy() {
             allow_subprocess: false,
             network_ask_permission: false,
             command_timeout_ms: 0,
-        }).unwrap();
+        })
+        .unwrap();
         for j in 0..100 {
             let r = sdk.execute(&format!("echo cycle_{}_{}", i, j));
             assert_eq!(r.exit_code, 0);
@@ -330,10 +370,15 @@ fn stress_bulk_file_api() {
     let sdk = setup_no_timeout();
     let start = Instant::now();
     for i in 0..500 {
-        sdk.write_file(&format!("f_{}", i), &format!("data_{}", i)).unwrap();
+        sdk.write_file(&format!("f_{}", i), &format!("data_{}", i))
+            .unwrap();
     }
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_secs(5), "500 file writes took {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "500 file writes took {:?}",
+        elapsed
+    );
 
     let start = Instant::now();
     for i in 0..500 {
@@ -341,5 +386,9 @@ fn stress_bulk_file_api() {
         assert_eq!(content, format!("data_{}", i));
     }
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_secs(5), "500 file reads took {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "500 file reads took {:?}",
+        elapsed
+    );
 }

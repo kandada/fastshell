@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -5,8 +8,7 @@ static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn setup_sdk() -> fastshell::sdk::Fastshell {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir()
-        .join(format!("fastshell_int_sdk_{}_{}", std::process::id(), n));
+    let dir = std::env::temp_dir().join(format!("fastshell_int_sdk_{}_{}", std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
 
     let mut sdk = fastshell::sdk::Fastshell::new();

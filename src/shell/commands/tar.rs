@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::io::Read;
 
 impl Shell {
@@ -88,13 +91,7 @@ impl Shell {
         }
     }
 
-    fn tar_create(
-        &self,
-        archive: &str,
-        files: &[String],
-        cwd: &str,
-        gzip: bool,
-    ) -> CommandOutput {
+    fn tar_create(&self, archive: &str, files: &[String], cwd: &str, gzip: bool) -> CommandOutput {
         let entries = if files.is_empty() {
             match self.vfs.list_dir(".", cwd) {
                 Ok(e) => e.iter().map(|e| e.name.clone()).collect(),
@@ -142,18 +139,11 @@ impl Shell {
         cwd: &str,
     ) -> Result<(), String> {
         for entry in entries {
-            let resolved = self
-                .vfs
-                .resolve(entry, cwd)
-                .map_err(|e| e.to_string())?;
+            let resolved = self.vfs.resolve(entry, cwd).map_err(|e| e.to_string())?;
 
             if resolved.is_dir() {
-                let sub_entries = self
-                    .vfs
-                    .list_dir(entry, cwd)
-                    .map_err(|e| e.to_string())?;
-                let sub_names: Vec<String> =
-                    sub_entries.iter().map(|e| e.name.clone()).collect();
+                let sub_entries = self.vfs.list_dir(entry, cwd).map_err(|e| e.to_string())?;
+                let sub_names: Vec<String> = sub_entries.iter().map(|e| e.name.clone()).collect();
                 let _sub_cwd = format!("{}/{}", cwd.trim_end_matches('/'), entry);
 
                 for sub in &sub_names {
@@ -165,10 +155,7 @@ impl Shell {
                     if sub_resolved.is_dir() {
                         self.tar_append_entries(builder, &[sub_path.clone()], cwd)?;
                     } else {
-                        let data = self
-                            .vfs
-                            .read(&sub_path, cwd)
-                            .map_err(|e| e.to_string())?;
+                        let data = self.vfs.read(&sub_path, cwd).map_err(|e| e.to_string())?;
                         let mut header = tar::Header::new_gnu();
                         header.set_size(data.len() as u64);
                         header.set_mode(0o644);

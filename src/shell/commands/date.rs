@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_date(&self, args: &[&str]) -> CommandOutput {
@@ -27,9 +30,7 @@ impl Shell {
         let secs = if let Some(ref ds) = date_str {
             match parse_iso8601(ds) {
                 Some(s) => s,
-                None => return CommandOutput::error(
-                    format!("date: invalid date '{}'\n", ds), 1,
-                ),
+                None => return CommandOutput::error(format!("date: invalid date '{}'\n", ds), 1),
             }
         } else {
             let dur = std::time::SystemTime::now()
@@ -127,9 +128,30 @@ fn format_date(secs: u64, use_utc: bool, fmt: &str) -> String {
 
     let weekday_index = (days_since_epoch as i64 + 4) % 7;
     // 0=Sunday in the epoch calculation; adjust to 0=Sunday
-    let weekday_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    let month_names = ["", "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"];
+    let weekday_names = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    let month_names = [
+        "",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
 
     let tz_offset = if use_utc { "+0000" } else { timezone_offset() };
 
@@ -169,7 +191,11 @@ fn compute_week_number(year: i32, month: i32, day: i32) -> u64 {
     let doy = compute_doy(year, month, day) as i64;
     let jan1_dow = (epoch_days(year, 1, 1) as i64 + 4) % 7;
     let week = (doy + jan1_dow - 1) / 7;
-    if week < 0 { 0 } else { week as u64 }
+    if week < 0 {
+        0
+    } else {
+        week as u64
+    }
 }
 
 fn epoch_days(y: i32, m: i32, d: i32) -> u64 {

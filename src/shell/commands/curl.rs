@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 use std::sync::Arc;
 
 pub(crate) struct HttpConfig {
@@ -23,8 +26,8 @@ pub(crate) struct HttpResponse {
 }
 
 pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, String> {
-    let mut agent_builder = ureq::AgentBuilder::new()
-        .redirects(if config.follow_redirects { 10 } else { 0 });
+    let mut agent_builder =
+        ureq::AgentBuilder::new().redirects(if config.follow_redirects { 10 } else { 0 });
 
     if config.insecure {
         agent_builder = agent_builder.tls_config(build_insecure_tls_config());
@@ -103,10 +106,7 @@ pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, Strin
             let size_download = body.len();
 
             if config.verbose {
-                verbose_log.push_str(&format!(
-                    "< HTTP/1.1 {} {}\n",
-                    status_code, status_text
-                ));
+                verbose_log.push_str(&format!("< HTTP/1.1 {} {}\n", status_code, status_text));
                 for (k, v) in &response_headers {
                     verbose_log.push_str(&format!("< {}: {}\n", k, v));
                 }
@@ -315,7 +315,16 @@ impl Shell {
             method = "HEAD".to_string();
         }
 
-        let curl_host = url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or(&url).split(':').next().unwrap_or(&url);
+        let curl_host = url
+            .split("://")
+            .nth(1)
+            .unwrap_or(&url)
+            .split('/')
+            .next()
+            .unwrap_or(&url)
+            .split(':')
+            .next()
+            .unwrap_or(&url);
         if let Some(perm) = self.check_network_permission(curl_host) {
             return perm;
         }
@@ -364,11 +373,7 @@ impl Shell {
                     match self.vfs.write(&filename, &self.cwd, &stdout) {
                         Ok(_) => {
                             let out_msg = if !silent {
-                                format!(
-                                    "Downloaded: {} ({} bytes)\n",
-                                    filename,
-                                    size_download
-                                )
+                                format!("Downloaded: {} ({} bytes)\n", filename, size_download)
                             } else {
                                 String::new()
                             };
@@ -419,7 +424,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_curl_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_curl_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }
@@ -457,7 +463,11 @@ mod tests {
     #[test]
     fn test_curl_custom_header() {
         let mut shell = mk_shell();
-        let out = shell.execute("curl", &["-H", "X-Custom: test", "http://httpbin.org/headers"], None);
+        let out = shell.execute(
+            "curl",
+            &["-H", "X-Custom: test", "http://httpbin.org/headers"],
+            None,
+        );
         if out.exit_code == 0 {
             assert!(out.stdout.contains("X-Custom") || !out.stdout.is_empty());
         }
@@ -466,7 +476,11 @@ mod tests {
     #[test]
     fn test_curl_basic_auth() {
         let mut shell = mk_shell();
-        let out = shell.execute("curl", &["-u", "user:pass", "http://httpbin.org/basic-auth/user/pass"], None);
+        let out = shell.execute(
+            "curl",
+            &["-u", "user:pass", "http://httpbin.org/basic-auth/user/pass"],
+            None,
+        );
         if out.exit_code == 0 {
             assert!(out.stdout.contains("authenticated") || !out.stdout.is_empty());
         }
@@ -483,7 +497,12 @@ mod tests {
 
     #[test]
     fn test_format_write_info() {
-        let result = format_write_info("%{http_code} %{url_effective} %{size_download}", 200, "http://example.com", 1024);
+        let result = format_write_info(
+            "%{http_code} %{url_effective} %{size_download}",
+            200,
+            "http://example.com",
+            1024,
+        );
         assert_eq!(result, "200 http://example.com 1024");
     }
 }

@@ -1,3 +1,6 @@
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
 use crate::python::PythonEngine;
 use crate::shell::{CommandOutput, Shell};
 use std::sync::mpsc;
@@ -9,12 +12,14 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(shell: Shell, python: Option<Box<dyn PythonEngine>>) -> Self {
+        // (c) 2025 xiefujin <490021684@qq.com>
         Runtime { shell, python }
     }
 
     pub fn execute(&mut self, input: &str) -> CommandOutput {
         let input = input.trim();
 
+        // (c) 2025 xiefujin <490021684@qq.com>
         if input.is_empty() {
             return CommandOutput::success(String::new());
         }
@@ -55,6 +60,7 @@ impl Runtime {
     }
 
     fn execute_pipeline(&mut self, input: &str) -> CommandOutput {
+        // (c) 2025 xiefujin <490021684@qq.com>
         let stages = parse_pipeline(input);
         if stages.is_empty() {
             return CommandOutput::success(String::new());
@@ -63,12 +69,20 @@ impl Runtime {
         let mut expanded_stages: Vec<Vec<ParsedToken>> = Vec::new();
         for mut stage in stages {
             let expanded = self.expand_globs(std::mem::take(&mut stage));
-            expanded_stages.push(expanded.into_iter().map(|s| ParsedToken::new(s, false)).collect());
+            expanded_stages.push(
+                expanded
+                    .into_iter()
+                    .map(|s| ParsedToken::new(s, false))
+                    .collect(),
+            );
         }
 
         if expanded_stages.len() == 1 {
-            let mut flat: Vec<String> = expanded_stages[0].iter().map(|t| t.value.clone()).collect();
-            if flat.is_empty() { return CommandOutput::success(String::new()); }
+            let mut flat: Vec<String> =
+                expanded_stages[0].iter().map(|t| t.value.clone()).collect();
+            if flat.is_empty() {
+                return CommandOutput::success(String::new());
+            }
             let cmd = flat.remove(0);
             let args: Vec<&str> = flat.iter().map(|s| s.as_str()).collect();
             return self.shell.execute(&cmd, &args, None);
@@ -78,11 +92,14 @@ impl Runtime {
         let n = expanded_stages.len();
         let last_idx = n - 1;
 
-        let mut threads: Vec<std::thread::JoinHandle<std::thread::Result<(i32, String, String)>>> = Vec::new();
+        let mut threads: Vec<std::thread::JoinHandle<std::thread::Result<(i32, String, String)>>> =
+            Vec::new();
         let mut prev_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
 
         for (i, stage) in expanded_stages.into_iter().enumerate() {
-            if stage.is_empty() { continue; }
+            if stage.is_empty() {
+                continue;
+            }
             let cmd = stage[0].value.clone();
             let args: Vec<String> = stage[1..].iter().map(|t| t.value.clone()).collect();
             let mut shell = self.shell.clone();
@@ -96,31 +113,32 @@ impl Runtime {
                 (None, None)
             };
 
-            let handle = std::thread::spawn(move || -> std::thread::Result<(i32, String, String)> {
-                // Pipeline stdin is received as Vec<u8> chunks.
-                // Shell commands currently accept stdin as &str (text-oriented design).
-                // Non-UTF-8 bytes are replaced with U+FFFD at the pipe boundary.
-                // Binary pipelines (e.g. `gzip -c | base64`) are not yet fully supported;
-                // use file redirection for binary workflows instead.
-                let mut stdin_buf = String::new();
-                let mut got_stdin = false;
-                if let Some(rx) = rx {
-                    while let Ok(chunk) = rx.recv() {
-                        got_stdin = true;
-                        stdin_buf.push_str(&String::from_utf8_lossy(&chunk));
+            let handle =
+                std::thread::spawn(move || -> std::thread::Result<(i32, String, String)> {
+                    // Pipeline stdin is received as Vec<u8> chunks.
+                    // Shell commands currently accept stdin as &str (text-oriented design).
+                    // Non-UTF-8 bytes are replaced with U+FFFD at the pipe boundary.
+                    // Binary pipelines (e.g. `gzip -c | base64`) are not yet fully supported;
+                    // use file redirection for binary workflows instead.
+                    let mut stdin_buf = String::new();
+                    let mut got_stdin = false;
+                    if let Some(rx) = rx {
+                        while let Ok(chunk) = rx.recv() {
+                            got_stdin = true;
+                            stdin_buf.push_str(&String::from_utf8_lossy(&chunk));
+                        }
                     }
-                }
-                let stdin = if got_stdin { Some(stdin_buf) } else { None };
-                let stdin_ref = stdin.as_deref();
-                let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                let result = shell.execute(&cmd, &args_refs, stdin_ref);
+                    let stdin = if got_stdin { Some(stdin_buf) } else { None };
+                    let stdin_ref = stdin.as_deref();
+                    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                    let result = shell.execute(&cmd, &args_refs, stdin_ref);
 
-                if let Some(tx) = tx {
-                    let _ = tx.send(result.stdout.as_bytes().to_vec());
-                }
+                    if let Some(tx) = tx {
+                        let _ = tx.send(result.stdout.as_bytes().to_vec());
+                    }
 
-                Ok((result.exit_code, result.stdout, result.stderr))
-            });
+                    Ok((result.exit_code, result.stdout, result.stderr))
+                });
 
             threads.push(handle);
             prev_rx = next_rx;
@@ -135,7 +153,9 @@ impl Runtime {
             match handle.join() {
                 Ok(Ok((code, out, err))) => {
                     if !err.is_empty() {
-                        if !all_stderr.is_empty() { all_stderr.push('\n'); }
+                        if !all_stderr.is_empty() {
+                            all_stderr.push('\n');
+                        }
                         all_stderr.push_str(&err);
                     }
                     if i == last_idx {
@@ -166,18 +186,19 @@ impl Runtime {
         let cwd_path = if self.shell.cwd == "/" {
             self.shell_root_dir()
         } else {
-            self.shell_root_dir().join(self.shell.cwd.trim_start_matches('/'))
+            self.shell_root_dir()
+                .join(self.shell.cwd.trim_start_matches('/'))
         };
         let glob_pattern = cwd_path.join(pattern).to_string_lossy().to_string();
         match glob::glob(&glob_pattern) {
-            Ok(paths) => {
-                paths
-                    .filter_map(|entry| entry.ok())
-                    .filter_map(|p| {
-                        p.strip_prefix(&cwd_path).ok().map(|r| r.to_string_lossy().to_string())
-                    })
-                    .collect()
-            }
+            Ok(paths) => paths
+                .filter_map(|entry| entry.ok())
+                .filter_map(|p| {
+                    p.strip_prefix(&cwd_path)
+                        .ok()
+                        .map(|r| r.to_string_lossy().to_string())
+                })
+                .collect(),
             Err(_) => vec![],
         }
     }
@@ -211,6 +232,7 @@ impl Runtime {
 
     pub fn execute_python_code(&mut self, code: &str) -> CommandOutput {
         let cwd = self.shell_root_dir();
+        // (c) 2025 xiefujin <490021684@qq.com>
         let python = match &mut self.python {
             Some(p) => p,
             None => {
@@ -232,13 +254,19 @@ impl Runtime {
     }
 
     pub fn execute_python_script(&mut self, script_path: &str) -> CommandOutput {
-        let full_path = self.shell_root_dir().join(script_path.trim_start_matches('/'));
+        let full_path = self
+            .shell_root_dir()
+            .join(script_path.trim_start_matches('/'));
         let cwd = self.shell_root_dir();
         let python = match &mut self.python {
             Some(p) => p,
-            None => { return CommandOutput::error("Python engine not configured".to_string(), 127); }
+            None => {
+                return CommandOutput::error("Python engine not configured".to_string(), 127);
+            }
         };
-        if !python.is_available() { return CommandOutput::error("Python is not available".to_string(), 127); }
+        if !python.is_available() {
+            return CommandOutput::error("Python is not available".to_string(), 127);
+        }
         let result = python.execute_script(&full_path, &cwd);
 
         CommandOutput {
@@ -258,30 +286,43 @@ impl Runtime {
 
     pub fn read_file(&self, path: &str) -> Result<String, String> {
         let cwd = self.cwd().to_string();
-        self.shell.vfs.read_to_string(path, &cwd)
+        self.shell
+            .vfs
+            .read_to_string(path, &cwd)
             .map_err(|e| format!("read_file: {}", e))
     }
 
     pub fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
         let cwd = self.cwd().to_string();
-        self.shell.vfs.write(path, &cwd, content)
+        self.shell
+            .vfs
+            .write(path, &cwd, content)
             .map_err(|e| format!("write_file: {}", e))
     }
 
     pub fn list_dir(&self, path: &str) -> Result<Vec<crate::sdk::types::FileEntry>, String> {
         let cwd = self.cwd().to_string();
-        let entries = self.shell.vfs.list_dir(path, &cwd)
+        let entries = self
+            .shell
+            .vfs
+            .list_dir(path, &cwd)
             .map_err(|e| format!("list_dir: {}", e))?;
-        Ok(entries.into_iter().map(|de| {
-            let de_name = de.name.clone();
-            crate::sdk::types::FileEntry {
-                name: de.name,
-                path: if path.ends_with('/') { format!("{}{}", path, de_name) }
-                      else { format!("{}/{}", path, de_name) },
-                is_dir: de.is_dir,
-                size: de.size,
-            }
-        }).collect())
+        Ok(entries
+            .into_iter()
+            .map(|de| {
+                let de_name = de.name.clone();
+                crate::sdk::types::FileEntry {
+                    name: de.name,
+                    path: if path.ends_with('/') {
+                        format!("{}{}", path, de_name)
+                    } else {
+                        format!("{}/{}", path, de_name)
+                    },
+                    is_dir: de.is_dir,
+                    size: de.size,
+                }
+            })
+            .collect())
     }
 
     pub fn exists(&self, path: &str) -> bool {
@@ -469,8 +510,11 @@ mod tests {
 
     fn setup_runtime() -> Runtime {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_bridge_test_{}_{}", std::process::id(), n));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_bridge_test_{}_{}",
+            std::process::id(),
+            n
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         let shell = Shell::new(vfs);

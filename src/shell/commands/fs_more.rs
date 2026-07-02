@@ -1,4 +1,7 @@
-use crate::shell::{Shell, CommandOutput};
+// Copyright (c) 2025 xiefujin <490021684@qq.com>
+// Licensed under Apache-2.0, see LICENSE file for full license terms.
+
+use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_ln(&self, args: &[&str]) -> CommandOutput {
@@ -135,7 +138,9 @@ impl Shell {
                         }
                     }
                     if let Some(parent) = path.parent() {
-                        if parent.as_os_str().is_empty() { break; }
+                        if parent.as_os_str().is_empty() {
+                            break;
+                        }
                         path = parent.to_path_buf();
                     } else {
                         break;
@@ -299,7 +304,10 @@ struct SimpleRng {
 
 impl SimpleRng {
     fn next(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.state
     }
 }
