@@ -20,6 +20,8 @@ impl Shell {
             "cat",
             "find",
             "grep",
+            "rg",
+            "tree",
             "echo",
             "touch",
             "chmod",

@@ -62,7 +62,7 @@ fn test_python_error_handling() {
 
 #[test]
 fn test_placeholder_unavailable() {
-    let engine = fastshell::python::PocketPyPlaceholder::new();
+    let engine = fastshell::python::UnavailableEngine::new("no backend");
     assert!(!engine.is_available());
     assert!(engine.version().is_none());
 }

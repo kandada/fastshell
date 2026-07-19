@@ -19,6 +19,25 @@ fn plugin<T>(
 }
 
 impl Shell {
+    /// Resolve a device-command path (VFS semantics: `/x` = sandbox root,
+    /// relative = cwd) into a **host absolute path** before handing it to the
+    /// device plugin.
+    ///
+    /// Rationale: agent tasks run in their own sandbox (the project dir), not
+    /// the app-global one. The Kotlin side used to join every path onto the
+    /// global sandbox root, so `camera /photo.jpg` from an agent task saved
+    /// the photo where the agent could never see it. Resolving here — against
+    /// THIS instance's VFS — puts device files exactly where the caller's
+    /// `ls` will find them, and keeps the path-escape protection.
+    fn device_host_path(&self, vpath: &str) -> Result<String, CommandOutput> {
+        match self.vfs.resolve(vpath, &self.cwd) {
+            Ok(p) => Ok(p.to_string_lossy().to_string()),
+            Err(e) => Err(CommandOutput::error(format!("{vpath}: {e}\n"), 1)),
+        }
+    }
+}
+
+impl Shell {
     // ── camera ──
     pub fn cmd_camera(&self, args: &[&str]) -> CommandOutput {
         let path = args
@@ -28,7 +47,8 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("camera", "photo") {
             return perm;
         }
-        match plugin(self, |p| p.take_photo(&path)) {
+        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        match plugin(self, |p| p.take_photo(&host)) {
             Ok(()) => CommandOutput::success(format!("Photo saved to {}\n", path)),
             Err(e) => e,
         }
@@ -43,7 +63,8 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("screen", "capture") {
             return perm;
         }
-        match plugin(self, |p| p.take_screenshot(&path)) {
+        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        match plugin(self, |p| p.take_screenshot(&host)) {
             Ok(()) => CommandOutput::success(format!("Screenshot saved to {}\n", path)),
             Err(e) => e,
         }
@@ -60,7 +81,7 @@ impl Shell {
                 "--video" => media_type = "video",
                 "-n" | "--count" => {
                     if i + 1 < args.len() {
-                        count = args[i + 1].parse().unwrap_or(1);
+                        count = args[i + 1].parse::<u32>().unwrap_or(1).max(1);
                         i += 1;
                     }
                 }
@@ -80,6 +101,7 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("photolib", "read") {
             return perm;
         }
+        let output_dir = match self.device_host_path(&output_dir) { Ok(h) => h, Err(e) => return e };
         match plugin(self, |p| {
             if media_type == "video" {
                 p.pick_video(&output_dir).map(|p| {
@@ -125,7 +147,9 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("microphone", "record") {
             return perm;
         }
-        match plugin(self, |p| p.record_audio(&path, duration)) {
+        let duration = duration.max(1);
+        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        match plugin(self, |p| p.record_audio(&host, duration)) {
             Ok(()) => CommandOutput::success(format!("Recorded {}s to {}\n", duration, path)),
             Err(e) => e,
         }
@@ -137,7 +161,8 @@ impl Shell {
             Some(p) => p.to_string(),
             None => return CommandOutput::error("play: missing file path\n".to_string(), 1),
         };
-        match plugin(self, |p| p.play_audio(&path)) {
+        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        match plugin(self, |p| p.play_audio(&host)) {
             Ok(()) => CommandOutput::success(String::new()),
             Err(e) => e,
         }
@@ -166,7 +191,8 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("microphone", "speech") {
             return perm;
         }
-        match plugin(self, |p| p.speech_to_text(&path)) {
+        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        match plugin(self, |p| p.speech_to_text(&host)) {
             Ok(text) => CommandOutput::success(format!("{}\n", text)),
             Err(e) => e,
         }
@@ -347,10 +373,13 @@ impl Shell {
             i += 1;
         }
         match (path, text) {
-            (Some(p), _) => match plugin(self, |p2| p2.share_file(&p, &mime)) {
-                Ok(()) => CommandOutput::success(String::new()),
-                Err(e) => e,
-            },
+            (Some(p), _) => {
+                let host = match self.device_host_path(&p) { Ok(h) => h, Err(e) => return e };
+                match plugin(self, |p2| p2.share_file(&host, &mime)) {
+                    Ok(()) => CommandOutput::success(String::new()),
+                    Err(e) => e,
+                }
+            }
             (_, Some(t)) => match plugin(self, |p2| p2.share_text(&t)) {
                 Ok(()) => CommandOutput::success(String::new()),
                 Err(e) => e,

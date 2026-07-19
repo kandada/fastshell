@@ -20,6 +20,7 @@ fn setup() -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0,
+    ..Default::default()
     })
     .unwrap();
     for i in 0..100 {
@@ -164,6 +165,7 @@ fn bench_sdk_overhead(c: &mut Criterion) {
                 allow_subprocess: false,
                 network_ask_permission: false,
                 command_timeout_ms: 0,
+            ..Default::default()
             })
             .unwrap();
             sdk.shutdown();

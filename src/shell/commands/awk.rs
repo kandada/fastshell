@@ -63,7 +63,10 @@ impl Shell {
             }
         } else {
             let mut content = String::new();
-            for file in &files {
+            for (i, file) in files.iter().enumerate() {
+                if i > 0 {
+                    content.push('\n'); // separator between files (like real awk)
+                }
                 match self.vfs.read_to_string(file, &self.cwd) {
                     Ok(c) => content.push_str(&c),
                     Err(e) => return CommandOutput::error(format!("awk: {}: {}\n", file, e), 1),
@@ -370,6 +373,15 @@ fn awk_value_ext(
         return String::new();
     }
 
+    // String concatenation by juxtaposition: `NR": "$0`, `"a" $1 "b"`, ...
+    if let Some(atoms) = split_concat_atoms(expr) {
+        let mut out = String::new();
+        for atom in &atoms {
+            out.push_str(&awk_value_ext(atom, nr, nf, line, fields, vars));
+        }
+        return out;
+    }
+
     if let Some(val) = vars.get(expr) {
         return val.to_string();
     }
@@ -400,8 +412,105 @@ fn awk_value_ext(
     }
 }
 
-fn compare_awk(a: &str, b: &str) -> std::cmp::Ordering {
-    if let (Ok(na), Ok(nb)) = (a.parse::<f64>(), b.parse::<f64>()) {
+/// Splits an awk expression into juxtaposed concatenation atoms
+/// (string literals, `$N` field refs, variables/function calls, numbers).
+/// Returns None when the expression contains operators or is a single atom,
+/// so the caller can fall back to normal evaluation.
+fn split_concat_atoms(expr: &str) -> Option<Vec<String>> {
+    let b: Vec<char> = expr.trim().chars().collect();
+    let n = b.len();
+    let mut atoms: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            let mut atom = String::from("\"");
+            let mut j = i + 1;
+            let mut closed = false;
+            while j < n {
+                if b[j] == '\\' && j + 1 < n {
+                    atom.push(b[j]);
+                    atom.push(b[j + 1]);
+                    j += 2;
+                    continue;
+                }
+                atom.push(b[j]);
+                if b[j] == '"' {
+                    closed = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !closed {
+                return None;
+            }
+            atoms.push(atom);
+            i = j + 1;
+        } else if c == '$' {
+            let mut atom = String::from("$");
+            let mut j = i + 1;
+            while j < n && (b[j].is_ascii_alphanumeric() || b[j] == '_') {
+                atom.push(b[j]);
+                j += 1;
+            }
+            if atom.len() == 1 {
+                return None;
+            }
+            atoms.push(atom);
+            i = j;
+        } else if c.is_ascii_alphabetic() || c == '_' {
+            let mut j = i;
+            while j < n && (b[j].is_ascii_alphanumeric() || b[j] == '_') {
+                j += 1;
+            }
+            if j < n && b[j] == '(' {
+                // Function call: take the balanced parenthesized part.
+                let mut depth = 0i32;
+                let mut k = j;
+                while k < n {
+                    if b[k] == '(' {
+                        depth += 1;
+                    } else if b[k] == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                if k >= n {
+                    return None;
+                }
+                atoms.push(b[i..=k].iter().collect());
+                i = k + 1;
+            } else {
+                atoms.push(b[i..j].iter().collect());
+                i = j;
+            }
+        } else if c.is_ascii_digit() {
+            let mut j = i;
+            while j < n && (b[j].is_ascii_digit() || b[j] == '.') {
+                j += 1;
+            }
+            atoms.push(b[i..j].iter().collect());
+            i = j;
+        } else {
+            // Operator or unsupported syntax — not pure concatenation.
+            return None;
+        }
+    }
+    if atoms.len() >= 2 {
+        Some(atoms)
+    } else {
+        None
+    }
+}
+
+fn compare_awk(a: &str, b: &str) -> std::cmp::Ordering {    if let (Ok(na), Ok(nb)) = (a.parse::<f64>(), b.parse::<f64>()) {
         na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
     } else {
         a.cmp(b)
@@ -939,5 +1048,23 @@ mod tests {
         let shell = mk_shell();
         let out = shell.cmd_awk(&["{ n = split($0, a, \",\"); print n }"], Some("a,b,c\n"));
         assert!(out.stdout.contains("3"));
+    }
+
+    #[test]
+    fn test_awk_concat_in_print() {
+        let shell = mk_shell();
+        // `NR": "$0` — concatenation with no spaces (agent line-numbering idiom)
+        let out = shell.cmd_awk(&["{print NR\": \"$0}"], Some("alpha\nbeta\n"));
+        assert_eq!(out.stdout, "1: alpha\n2: beta\n");
+        // Concatenation with spaces
+        let out = shell.cmd_awk(&["{print \"<\" $1 \">\"}"], Some("x y\n"));
+        assert_eq!(out.stdout, "<x>\n");
+    }
+
+    #[test]
+    fn test_awk_concat_function_atom() {
+        let shell = mk_shell();
+        let out = shell.cmd_awk(&["{print \"len=\" length($0)}"], Some("hello\n"));
+        assert_eq!(out.stdout, "len=5\n");
     }
 }

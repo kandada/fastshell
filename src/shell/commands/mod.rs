@@ -54,6 +54,7 @@ pub mod test_;
 pub mod text_more;
 pub mod touch;
 pub mod tr;
+pub mod tree;
 pub mod true_;
 pub mod uniq;
 pub mod wc;

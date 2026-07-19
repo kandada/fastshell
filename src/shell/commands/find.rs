@@ -2,13 +2,13 @@
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
 use crate::shell::{CommandOutput, Shell};
-use std::process::Command as ProcessCommand;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 enum ConditionKind {
     Name(String),
     Type(char),
+    Empty,
     Mtime { days: i64, greater_than: bool },
     Size { bytes: i64, greater_than: bool },
 }
@@ -23,7 +23,11 @@ struct Condition {
 enum Action {
     Print,
     Print0,
+    Delete,
+    /// -exec cmd args {} ;   (run per matched file)
     Exec(Vec<String>),
+    /// -exec cmd args {} +   (run once with all matched files)
+    ExecBatch(Vec<String>),
 }
 
 impl Shell {
@@ -33,6 +37,7 @@ impl Shell {
         let mut conditions: Vec<Vec<Condition>> = vec![vec![]];
         let mut actions: Vec<Action> = Vec::new();
         let mut maxdepth: Option<usize> = None;
+        let mut mindepth: Option<usize> = None;
         let mut i = 0;
         let mut negate_next = false;
 
@@ -45,6 +50,24 @@ impl Shell {
                         }
                         i += 1;
                     }
+                }
+                "-mindepth" => {
+                    if i + 1 < args.len() {
+                        if let Ok(d) = args[i + 1].parse::<usize>() {
+                            mindepth = Some(d);
+                        }
+                        i += 1;
+                    }
+                }
+                "-empty" => {
+                    add_condition(
+                        &mut conditions,
+                        Condition {
+                            negate: negate_next,
+                            kind: ConditionKind::Empty,
+                        },
+                    );
+                    negate_next = false;
                 }
                 "-name" => {
                     if i + 1 < args.len() {
@@ -108,15 +131,27 @@ impl Shell {
                 "-print0" => {
                     actions.push(Action::Print0);
                 }
+                "-delete" => {
+                    actions.push(Action::Delete);
+                }
                 "-exec" => {
                     i += 1;
                     let mut exec_args: Vec<String> = Vec::new();
+                    let mut batch = false;
                     while i < args.len() && args[i] != ";" && args[i] != "\\;" {
+                        if args[i] == "+" {
+                            batch = true;
+                            break;
+                        }
                         exec_args.push(args[i].to_string());
                         i += 1;
                     }
                     if !exec_args.is_empty() {
-                        actions.push(Action::Exec(exec_args));
+                        if batch {
+                            actions.push(Action::ExecBatch(exec_args));
+                        } else {
+                            actions.push(Action::Exec(exec_args));
+                        }
                     }
                 }
                 "-o" => {
@@ -156,6 +191,7 @@ impl Shell {
 
         let mut output = String::new();
         let mut exit_code = 0;
+        let mut batch_paths: Vec<String> = Vec::new();
 
         // Check the starting path itself
         if let Ok(resolved) = self.vfs.resolve(&path, &self.cwd) {
@@ -170,8 +206,8 @@ impl Shell {
                     size: metadata.len(),
                     modified: metadata.modified().ok(),
                 };
-                if evaluate_conditions(&compiled_conditions, entry_name, &start_entry) {
-                    apply_actions(&actions, &path, &mut output, &mut exit_code);
+                if evaluate_conditions(&compiled_conditions, entry_name, &start_entry, &self.vfs, &self.cwd) {
+                    apply_actions(&actions, &path, self, &mut output, &mut exit_code, &mut batch_paths);
                 }
             }
         }
@@ -180,13 +216,38 @@ impl Shell {
             &path,
             0,
             maxdepth,
+            mindepth,
             &compiled_conditions,
             &actions,
             &mut output,
             &mut exit_code,
+            &mut batch_paths,
         ) {
             return CommandOutput::error(format!("find: {}\n", e), 1);
         }
+
+        // `-exec ... {} +`: run once with all matched paths substituted.
+        if !batch_paths.is_empty() {
+            for action in &actions {
+                if let Action::ExecBatch(cmd_args) = action {
+                    let mut args: Vec<String> = Vec::new();
+                    let mut replaced = false;
+                    for a in cmd_args {
+                        if a == "{}" {
+                            args.extend(batch_paths.iter().cloned());
+                            replaced = true;
+                        } else {
+                            args.push(a.clone());
+                        }
+                    }
+                    if !replaced {
+                        args.extend(batch_paths.iter().cloned());
+                    }
+                    run_exec_builtin(self, &args, &mut output, &mut exit_code);
+                }
+            }
+        }
+
         CommandOutput {
             stdout: output,
             stderr: String::new(),
@@ -199,10 +260,12 @@ impl Shell {
         path: &str,
         depth: usize,
         maxdepth: Option<usize>,
+        mindepth: Option<usize>,
         conditions: &[Vec<(bool, Option<regex::Regex>, ConditionKind)>],
         actions: &[Action],
         output: &mut String,
         exit_code: &mut i32,
+        batch_paths: &mut Vec<String>,
     ) -> Result<(), crate::vfs::VfsError> {
         if let Some(md) = maxdepth {
             if depth >= md {
@@ -214,21 +277,26 @@ impl Shell {
         for entry in &entries {
             let entry_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
 
-            if evaluate_conditions(conditions, entry.name.clone(), entry) {
-                apply_actions(actions, &entry_path, output, exit_code);
-            }
-
             if entry.is_dir {
                 if maxdepth.map_or(true, |md| depth < md) {
                     let _ = self.find_recursive(
                         &entry_path,
                         depth + 1,
                         maxdepth,
+                        mindepth,
                         conditions,
                         actions,
                         output,
                         exit_code,
+                        batch_paths,
                     );
+                }
+            }
+
+            // mindepth: only evaluate conditions if depth >= mindepth
+            if mindepth.map_or(true, |md| depth >= md) {
+                if evaluate_conditions(conditions, entry.name.clone(), entry, &self.vfs, &self.cwd) {
+                    apply_actions(actions, &entry_path, self, output, exit_code, batch_paths);
                 }
             }
         }
@@ -237,7 +305,16 @@ impl Shell {
     }
 }
 
-fn apply_actions(actions: &[Action], entry_path: &str, output: &mut String, exit_code: &mut i32) {
+fn apply_actions(
+    actions: &[Action],
+    entry_path: &str,
+    shell: &Shell,
+    output: &mut String,
+    exit_code: &mut i32,
+    batch_paths: &mut Vec<String>,
+) {
+    let vfs = &shell.vfs;
+    let cwd = &shell.cwd;
     for action in actions {
         match action {
             Action::Print => {
@@ -246,6 +323,22 @@ fn apply_actions(actions: &[Action], entry_path: &str, output: &mut String, exit
             Action::Print0 => {
                 output.push_str(entry_path);
                 output.push('\0');
+            }
+            Action::Delete => {
+                // Try as directory first, fall back to file
+                if let Err(e) = vfs.remove_dir_all(entry_path, cwd) {
+                    if let Err(e2) = vfs.remove_file(entry_path, cwd) {
+                        *exit_code = 1;
+                        output.push_str(&format!(
+                            "find: cannot delete '{}': {} / {}\n",
+                            entry_path, e, e2
+                        ));
+                    }
+                }
+            }
+            Action::ExecBatch(_) => {
+                // Collected here, executed once after the traversal.
+                batch_paths.push(entry_path.to_string());
             }
             Action::Exec(cmd_args) => {
                 let args: Vec<String> = cmd_args
@@ -258,25 +351,26 @@ fn apply_actions(actions: &[Action], entry_path: &str, output: &mut String, exit
                         }
                     })
                     .collect();
-
-                let mut cmd = ProcessCommand::new(&args[0]);
-                if args.len() > 1 {
-                    cmd.args(&args[1..]);
-                }
-                match cmd.output() {
-                    Ok(out) => {
-                        if out.status.success() {
-                            output.push_str(&String::from_utf8_lossy(&out.stdout));
-                        } else {
-                            *exit_code = out.status.code().unwrap_or(1);
-                        }
-                    }
-                    Err(e) => {
-                        *exit_code = 1;
-                        output.push_str(&format!("find: '{}' failed: {}\n", args[0], e));
-                    }
-                }
+                run_exec_builtin(shell, &args, output, exit_code);
             }
+        }
+    }
+}
+
+/// Runs an `-exec` command through the built-in shell (sandbox-safe: no OS
+/// process is spawned, so this works on mobile where no binaries exist).
+fn run_exec_builtin(shell: &Shell, args: &[String], output: &mut String, exit_code: &mut i32) {
+    if args.is_empty() {
+        return;
+    }
+    let mut sub = shell.clone();
+    let arg_refs: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+    let result = sub.execute(&args[0], &arg_refs, None);
+    output.push_str(&result.stdout);
+    if result.exit_code != 0 {
+        *exit_code = result.exit_code;
+        if !result.stderr.is_empty() {
+            output.push_str(&result.stderr);
         }
     }
 }
@@ -285,6 +379,8 @@ fn evaluate_conditions(
     conditions: &[Vec<(bool, Option<regex::Regex>, ConditionKind)>],
     name: String,
     entry: &crate::vfs::DirEntry,
+    vfs: &crate::vfs::Vfs,
+    cwd: &str,
 ) -> bool {
     if conditions.is_empty() || conditions.iter().all(|g| g.is_empty()) {
         return true;
@@ -304,6 +400,15 @@ fn evaluate_conditions(
                     'f' => !entry.is_dir,
                     _ => true,
                 },
+                ConditionKind::Empty => {
+                    if entry.is_dir {
+                        vfs.list_dir(&name, cwd)
+                            .map(|e| e.is_empty())
+                            .unwrap_or(false)
+                    } else {
+                        entry.size == 0
+                    }
+                }
                 ConditionKind::Mtime { days, greater_than } => match entry.modified {
                     Some(mod_time) => {
                         let now = SystemTime::now();
@@ -425,7 +530,7 @@ fn compile_glob(pattern: &str) -> regex::Regex {
     regex_str.push('$');
     regex::Regex::new(&regex_str).unwrap_or_else(|_| {
         let escaped = regex::escape(pattern);
-        regex::Regex::new(&format!("^{}$", escaped)).unwrap()
+        regex::Regex::new(&format!("^{}$", escaped)).unwrap_or_else(|_| regex::Regex::new(".*").unwrap())
     })
 }
 

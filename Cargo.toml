@@ -15,6 +15,22 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = []
 git = ["git2", "openssl"]
+# Optional standalone python_bridge module (see src/python_bridge.rs):
+# exposes fastshell to CPython via PyO3 (desktop embedding).
+python = ["pyo3"]
+# Embedded RustPython interpreter (pure Rust, no dlopen/JNI/C deps): the
+# mobile python engine replacing the former Chaquopy CPython integration.
+# The LGPL malachite dependencies are replaced by clean-room shims — see
+# fastshell/num_bigint/README.md and the workspace [patch.crates-io].
+python-rustpython = [
+    "rustpython-vm",
+    "rustpython-stdlib",
+    "rustpython-pylib",
+]
+# Direct-JNI cdylib path (方案 A): exports Java_com_fastshell_Sdk_* symbols
+# from Rust. Leave OFF for the staticlib + NDK CMake path (方案 B, fastshell_c),
+# where the JNI layer lives in C (jni_glue.c) and Rust exposes only pure C ABI.
+jni_direct = ["jni"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -56,7 +72,14 @@ regex = "1"
 glob = "0.3"
 sha1 = "0.10"
 num_cpus = "1"
-xz2 = "0.1"
+liblzma = "0.4"  # xz2 fork; shares liblzma-sys with rustpython-stdlib (no native-lib link conflict)
 sha3 = "0.10"
 bzip2 = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
+jni = { version = "0.21", optional = true }
+pyo3 = { version = "0.22", optional = true }
+# Embedded RustPython (feature "python-rustpython"). Version pinned exactly —
+# upgrades must follow the audit checklist in fastshell/vendor/README.md.
+rustpython-vm = { version = "=0.5.0", default-features = false, features = ["compiler", "freeze-stdlib", "threading", "importlib", "encodings", "host_env", "stdio", "gc"], optional = true }
+rustpython-stdlib = { version = "=0.5.0", default-features = false, features = ["threading", "compiler"], optional = true }
+rustpython-pylib = { version = "=0.5.0", features = ["freeze-stdlib"], optional = true }

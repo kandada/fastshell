@@ -3,6 +3,8 @@
 
 pub mod bridge;
 pub mod python;
+#[cfg(feature = "python")]
+pub mod python_bridge;
 pub mod sdk;
 pub mod shell;
 pub mod vfs;

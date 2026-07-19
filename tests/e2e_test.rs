@@ -33,6 +33,7 @@ fn setup_default() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 30_000,
+        python_home: String::new(),
     })
     .unwrap();
     sdk
@@ -209,6 +210,7 @@ fn e2e_permission_denied_network() {
         allow_subprocess: false,
         network_ask_permission: true,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     let r = sdk.execute("curl http://example.com");
@@ -225,6 +227,7 @@ fn e2e_permission_granted_then_allowed() {
         allow_subprocess: false,
         network_ask_permission: true,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     // First call: denied
@@ -249,6 +252,7 @@ fn e2e_permission_denied_explicitly() {
         allow_subprocess: false,
         network_ask_permission: true,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     sdk.set_permission("network:evil.com", false);
@@ -265,6 +269,7 @@ fn e2e_permission_clear() {
         allow_subprocess: false,
         network_ask_permission: true,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     sdk.set_permission("network:example.com", true);
@@ -281,6 +286,7 @@ fn e2e_permission_multiple_hosts() {
         allow_subprocess: false,
         network_ask_permission: true,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     let r = sdk.execute("curl http://a.com");
@@ -309,6 +315,7 @@ fn e2e_subprocess_disabled_rejects_unknown() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     let r = sdk.execute("some_random_tool_xyz --flag");
@@ -324,6 +331,7 @@ fn e2e_subprocess_enabled_allows_fallback() {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     let r = sdk.execute("some_random_tool_xyz --flag");
@@ -340,6 +348,7 @@ fn e2e_subprocess_disabled_builtin_still_works() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     });
 
     // All built-in commands must still work
@@ -492,6 +501,7 @@ fn e2e_timeout_triggers() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 1, // 1ms timeout → guaranteed to trigger
+        python_home: String::new(),
     });
 
     let r = sdk.execute("sleep 10");
@@ -507,6 +517,7 @@ fn e2e_no_timeout_zero() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0, // no timeout
+        python_home: String::new(),
     });
 
     let r = sdk.execute("echo ok");
@@ -526,6 +537,7 @@ fn e2e_concurrent_execute() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0,
+        python_home: String::new(),
     }));
 
     let mut handles = Vec::new();
@@ -608,6 +620,7 @@ fn e2e_env_vars() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     })
     .unwrap();
 
@@ -645,6 +658,7 @@ fn e2e_shutdown_cleans_up() {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
+        python_home: String::new(),
     })
     .unwrap();
 

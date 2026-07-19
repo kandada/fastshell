@@ -62,7 +62,7 @@ impl Shell {
                 let wrapped = encoded
                     .as_bytes()
                     .chunks(wrap)
-                    .map(|chunk| std::str::from_utf8(chunk).unwrap())
+                    .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
                     .collect::<Vec<&str>>()
                     .join("\n");
                 CommandOutput::success(wrapped + "\n")

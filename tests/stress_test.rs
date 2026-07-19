@@ -22,6 +22,7 @@ fn setup_no_timeout() -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0,
+    ..Default::default()
     })
     .unwrap();
     sdk
@@ -38,6 +39,7 @@ fn setup_with_timeout(ms: u64) -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: ms,
+    ..Default::default()
     })
     .unwrap();
     sdk
@@ -300,6 +302,7 @@ fn leak_many_init_shutdown_cycles() {
             allow_subprocess: false,
             network_ask_permission: false,
             command_timeout_ms: 0,
+        ..Default::default()
         })
         .unwrap();
         for _ in 0..50 {
@@ -322,6 +325,7 @@ fn stress_rapid_create_destroy() {
             allow_subprocess: false,
             network_ask_permission: false,
             command_timeout_ms: 0,
+        ..Default::default()
         })
         .unwrap();
         for j in 0..100 {

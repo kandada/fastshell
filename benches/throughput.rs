@@ -20,6 +20,7 @@ fn setup() -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0,
+    ..Default::default()
     })
     .unwrap();
     sdk

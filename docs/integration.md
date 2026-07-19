@@ -73,77 +73,41 @@ if result.needs_permission() {
 }
 ```
 
-## CPython Embedding (Production Build)
+## Python Engine (Embedded RustPython)
 
 ### How It Works
 
-CPython 3.12 is embedded into fastshell at **compile time**, not downloaded at runtime:
+Python support is provided by **embedded [RustPython](https://github.com/RustPython/RustPython) 0.5.0**
+(feature `python-rustpython`) — a Python 3 interpreter written in pure Rust that
+compiles directly into the fastshell library:
 
 ```
-vendor/python/<target-triple>/libpython3.12.{so,dylib}.gz
-    │
-    ▼ include_bytes!() — baked into the Rust binary at compile time
-    │
-    ▼ CpythonEngine::extract_bundled() — decompressed to sandbox on first run
-    │
-    ▼ libloading::Library::new() — dlopen'd into the process
-    │
-    ▼ Py_Initialize() — CPython VM ready, no network required
+rustpython-vm + rustpython-stdlib + rustpython-pylib (freeze-stdlib)
+    ▼ compiled into the Rust binary — no libpython, no dlopen, no assets
+RustPythonEngine (src/python/rustpython.rs)
+    ▼ fresh interpreter per execution on a 16 MB-stack worker thread
+    ▼ frozen CPython stdlib (ast / unittest / json / re / os ...)
+    ▼ stdout/stderr captured, cwd sandboxed, SystemExit → exit code
 ```
 
-The app ships with CPython inside. Works offline. No download on first launch.
+> The previous integration embedded Chaquopy CPython 3.12 via dlopen. It
+> crashed on real Android devices (pthread/bionic TLS in unittest/threading)
+> and was removed in 2026-07. See `vendor/README.md` for the full history,
+> licensing notes (clean-room malachite shims) and the upgrade checklist.
 
-### Build Steps (per platform)
-
-**1. Cross-compile CPython 3.12**
+### Build
 
 ```bash
-# Android ARM64
-export ANDROID_NDK_HOME=/path/to/android-ndk-r27c
-./scripts/build-cpython-android.sh  # creates libpython3.12.so
+# Desktop / CI
+cargo build --release --features git,python-rustpython
 
-# macOS ARM64
-./scripts/build-cpython-macos.sh    # creates libpython3.12.dylib
-
-# iOS (future)
-./scripts/build-cpython-ios.sh
+# Android (static libffi for ctypes is bundled at vendor/libffi/)
+cargo build --release --target aarch64-linux-android --lib -p aacode-rs
 ```
 
-**2. Gzip and place in vendor/**
+On desktop the system `python3` is preferred at runtime; set
+`FASTSHELL_PYTHON=rustpython` to force the embedded engine.
 
-```bash
-gzip -c libpython3.12.so > fastshell/vendor/python/aarch64-linux-android/libpython3.12.so.gz
-gzip -c libpython3.12.dylib > fastshell/vendor/python/aarch64-apple-darwin/libpython3.12.dylib.gz
-```
-
-**3. Rebuild fastshell**
-
-```bash
-cargo build --release --target aarch64-linux-android
-```
-
-The `.so.gz` is now inside the binary. No runtime download needed.
-
-### What NOT to do in production
-
-**Do NOT call `CpythonDownloader::ensure_available()`** in production code. This function exists for development only — it downloads CPython from CDN at runtime. Production apps must embed CPython at compile time. Reasons:
-
-| Problem | Impact |
-|---------|--------|
-| 20-40MB download on first launch | Bad UX, users uninstall |
-| No offline support | App doesn't work without network |
-| App Store rejection risk | Downloading executable code violates policies |
-| CDN dependency | If CDN is down, app is bricked |
-| Security risk | CDN compromise = malicious .so injected |
-
-### Development Convenience
-
-During development, you can use `CpythonDownloader::ensure_available()` to avoid rebuilding the binary every time you update CPython:
-
-```rust
-// DEVELOPMENT ONLY — never ship this
-CpythonDownloader::ensure_available(&sandbox_path)?;
-```
 
 ## Platform-Specific Configuration
 

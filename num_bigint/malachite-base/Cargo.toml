@@ -1,0 +1,12 @@
+# Copyright (c) 2026 xiefujin <490021684@qq.com>
+# Licensed under Apache-2.0. Clean-room replacement — NOT the original
+# LGPL-3.0 malachite-base. See ../README.md for the clean-room statement.
+
+[package]
+name = "malachite-base"
+version = "0.9.2"
+edition = "2021"
+license = "Apache-2.0"
+description = "Clean-room permissive (Apache-2.0) API-compatible replacement for the tiny malachite-base surface used by RustPython. Not the original LGPL crate."
+
+[dependencies]

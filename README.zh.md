@@ -14,10 +14,17 @@
 - **管道支持** — 真正并发执行，每个阶段独立线程，mpsc channel 流式传递
 - **通配符展开** — `ls *.rs`、`cat src/**/*.rs`
 - **正则表达式** — `grep` 和 `sed s///` 使用完整正则
-- **Python 引擎** — `python -c '...'` 和执行 `.py` 脚本
+- **Python 引擎** — 内嵌 [RustPython](https://github.com/RustPython/RustPython)（MIT，纯 Rust，feature `python-rustpython`）：支持 `ast`/`unittest`/冻结标准库，无 dlopen/JNI/C-TLS 崩溃面。桌面端优先使用系统 `python3`。
 - **虚拟文件系统** — 沙箱隔离，防止路径逃逸
 - **线程安全** — `Arc<Mutex<Runtime>>`，支持超时控制
 - **跨平台** — 统一代码库编译 Android / iOS / macOS / Linux
+
+## 真实应用
+
+[**aacode**](https://github.com/kandada/aacode) —— 移动端 AI 编程助手，运行在 fastshell 之上：
+- 整个 shell 沙箱、180+ 命令、内置 Python、设备桥接、原生 C-ABI agent 接口均由 fastshell 提供。
+- 可通过 [**APK 下载**](https://github.com/kandada/aacode/raw/main/mobile_app/aacode-v1.7.24-arm64.apk) 安装。Google Play 等应用市场还在上架流程中。
+- 可通过  [**APK 下载**](https://github.com/kandada/aacode/raw/main/mobile_app/aacode-v1.7.24-arm64.apk) 安装。Google Play等应用市场还在上架流程中。
 
 ## 快速开始
 
@@ -47,6 +54,26 @@ assert_eq!(sdk.read_file("hello.txt")?, "Hello, world!");
 let r = sdk.execute_python("print(sum(range(1, 101)))");
 // 5050
 ```
+
+### 内嵌 RustPython（feature `python-rustpython`）
+
+移动端内嵌 **[RustPython](https://github.com/RustPython/RustPython) 0.5.0** —— 纯 Rust 实现的
+Python 3 解释器，直接编译进静态库：没有 `libpython.so`、没有 dlopen、没有磁盘
+解压（CPython 纯 Python 标准库通过 `freeze-stdlib` 冻结进二进制）。
+
+> 旧的 Chaquopy CPython 集成已移除：进程内嵌入式 CPython 在真机上崩溃
+> （pthread/bionic TLS，`unittest`/`threading` 场景）。RustPython 从架构上
+> 消灭了这一整类崩溃。
+
+开箱即用：`ast` 语法检查、`unittest`、`json`、`re`、`os`、沙箱内文件读写、
+大整数与正确的浮点除法语义。不支持 C 扩展（numpy 等，任何嵌入方案皆然）。
+
+协议说明：RustPython 上游的 LGPL malachite 依赖已被净室 Apache-2.0 替身替换
+（见 `num_bigint/README.md` 与 `vendor/README.md`），最终依赖树全部为宽松协议，
+闭源 App 可放心静态链接。
+
+桌面端优先使用系统 `python3`；设置 `FASTSHELL_PYTHON=rustpython` 可强制使用
+内嵌引擎（用于在桌面上测试移动端代码路径）。
 
 ### Python 调用 Shell
 
@@ -261,25 +288,22 @@ ls -la | grep foo | wc -l
 需要 Rust 稳定版工具链。
 
 ```bash
-# 1. 一键配置（安装 Rust targets，可选下载 Android NDK）
-./scripts/setup.sh
-
-# 2. 编译目标平台
+# 1. 编译目标平台（加 --features python-rustpython 启用内嵌 Python）
 cargo build --release --target aarch64-apple-darwin        # macOS ARM64
 cargo build --release --target x86_64-apple-darwin          # macOS Intel
 cargo build --release --target aarch64-apple-ios            # iOS（需 macOS 宿主机）
-cargo build --release --target aarch64-linux-android        # Android（需要 NDK）
+cargo build --release --target aarch64-linux-android        # Android（需 NDK；libffi 已随仓库提供，见 vendor/README.md）
 
 # Linux x86_64 交叉编译（需要 cargo-zigbuild）
 pip3 install cargo-zigbuild
 cargo zigbuild --release --target x86_64-unknown-linux-gnu
 
-# 3. 运行测试（268 个测试）
-cargo test
+# 2. 运行测试（fastshell 约 500 个；含 aacode-rs 全 workspace 共 687 个）
+cargo test --features git,python-rustpython
 ```
 
-**注意：** Android 目标需要 Android NDK r27c，`./scripts/setup.sh` 会询问是否自动下载。
-macOS、iOS、Linux 目标无需 NDK 即可编译。
+**注意：** Android 目标需要 Android NDK r27c。Python 由内嵌 RustPython 提供，
+无需任何外部 CPython 资产。
 
 产物直接链接到你的项目：
 
@@ -294,23 +318,26 @@ target/aarch64-apple-ios/release/libfastshell.a
 target/aarch64-linux-android/release/libfastshell.so
 ```
 
-编译产物参考：
+编译产物参考（按 `git,python-rustpython` 全 feature 实测；不开则更小）：
 
 | 平台 | 输出文件 | 格式 | 约大小 |
 |------|---------|------|--------|
-| macOS Apple Silicon | `libfastshell.dylib` | 动态库 | ~11 MB |
-| macOS Intel | `libfastshell.dylib` | 动态库 | ~13 MB |
-| iOS arm64 | `libfastshell.a` | 静态库 | ~47 MB |
-| Android arm64 | `libfastshell.so` | 动态库 (.so) | ~12 MB |
-| Linux x86_64 | `libfastshell.so` | 动态库 (.so) | ~10 MB |
+| macOS Apple Silicon | `libfastshell.dylib` | 动态库 | ~14 MB |
+| iOS arm64 | `libfastshell.a` | 静态库（链接期可裁剪） | ~90 MB `.a` |
+| Android arm64 | `libaacode_rs.a` → `libfastshell_jni.so` | 静态库 + NDK CMake 链接（推荐，见 `fastshell_c/`） | ~218 MB `.a` → **~48 MB `.so`** |
+| Linux x86_64 | `libfastshell.so` | 动态库 (.so) | ~14 MB |
+
+移动端推荐 **staticlib + 宿主侧 C/CMake 链接** 路线（Android 见 `fastshell_c/`）：
+链接期死代码消除（`--gc-sections`）可大幅缩小最终 `.so`，且单个 `.a` 同时
+包含 fastshell + aacode-rs agent + RustPython + git2。
 
 ## 命令列表
 
 ### 文件操作
-`ls` `cd` `pwd` `mkdir` `rm` `cp` `mv` `cat` `find` `touch` `chmod` `file` `stat` `du` `basename` `dirname` `realpath`
+`ls` `cd` `pwd` `mkdir` `rm` `cp` `mv` `cat` `find` `tree` `touch` `chmod` `file` `stat` `du` `basename` `dirname` `realpath`
 
 ### 文本处理
-`grep` `sed` `awk` `sort` `uniq` `wc` `head` `tail` `cut` `tr` `diff` `tee` `xargs` `column` `paste` `rev` `comm` `xxd` `printf` `seq` `shuf`
+`grep`（`egrep`/`fgrep`）`rg` `sed` `awk` `sort` `uniq` `wc` `head` `tail` `cut` `tr` `diff` `tee` `xargs` `column` `paste` `rev` `comm` `xxd` `printf` `seq` `shuf`
 
 ### 网络
 `curl` `wget` `ping` `ssh`

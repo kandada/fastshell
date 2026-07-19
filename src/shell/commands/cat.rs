@@ -59,8 +59,10 @@ impl Shell {
             }
         }
 
-        if !found_file && stdin.is_some() {
-            output.push_str(stdin.unwrap());
+        if !found_file {
+            if let Some(ref input) = stdin {
+                output.push_str(input);
+            }
         }
 
         CommandOutput::success(output)

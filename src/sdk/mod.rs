@@ -1,18 +1,19 @@
 // Copyright (c) 2025 xiefujin <490021684@qq.com>
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
+pub mod device_callback;
 pub mod ffi;
 pub mod plugin;
 pub mod types;
 
+pub use ffi::try_get_sdk_instance;
+
 use crate::bridge::Runtime;
-use crate::python::cpython;
 use crate::python::{self, PythonEngine};
 use crate::sdk::plugin::DevicePlugin;
 use crate::shell::Shell;
 use crate::vfs::Vfs;
 use std::collections::HashMap;
-use std::ffi::{c_char, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -80,7 +81,11 @@ impl Fastshell {
             .map_err(|e| format!("Failed to initialize VFS: {}", e))?;
 
         let permissions = Arc::new(Mutex::new(HashMap::new()));
-        let plugin = Arc::new(Mutex::new(self.plugin_ref.lock().unwrap().take()));
+        // Inherit the host's device capabilities (camera/mic/location/…) if a
+        // global callback was registered, so agent-spawned instances work too.
+        let inherited = self.plugin_ref.lock().unwrap().take()
+            .or_else(crate::sdk::device_callback::global_device_plugin);
+        let plugin = Arc::new(Mutex::new(inherited));
         let shell = Shell::with_plugin(
             vfs,
             config.allow_subprocess,
@@ -102,13 +107,7 @@ impl Fastshell {
         self.permissions = permissions;
         self.plugin_ref = plugin;
 
-        // Register the shell bridge BEFORE any Python code runs.
-        // These function pointers are called from inside the CPython VM
-        // when Python code calls subprocess.run() / os.system() / etc.
         // (c) 2025 xiefujin <490021684@qq.com>
-        cpython::register_shell_execute(fastshell_shell_exec_c);
-        cpython::register_shell_free(fastshell_shell_free_c);
-
         Ok(())
     }
 
@@ -125,7 +124,7 @@ impl Fastshell {
         let timeout_ms = self.config.command_timeout_ms;
 
         if timeout_ms == 0 {
-            let mut rt = self.runtime.lock().unwrap();
+            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             let output = rt.execute(command);
             return CommandResult::from_code(output.stdout, output.stderr, output.exit_code);
         }
@@ -143,7 +142,7 @@ impl Fastshell {
                 ));
                 return;
             }
-            let mut runtime = rt.lock().unwrap();
+            let mut runtime = rt.lock().unwrap_or_else(|e| e.into_inner());
             if cancel.load(Ordering::SeqCst) {
                 drop(runtime);
                 let _ = tx.send(crate::shell::CommandOutput::error(
@@ -174,12 +173,70 @@ impl Fastshell {
         self.cancel_flag.store(true, Ordering::SeqCst);
     }
 
+    /// Like [`execute`], but runs the command with `dir` as the working
+    /// directory and restores the previous cwd afterwards. Safe for
+    /// concurrent hosts: callers no longer need `cd X && ...` prefixes and
+    /// never pollute the shared cwd.
+    pub fn execute_in(&self, dir: &str, command: &str) -> CommandResult {
+        if !self.initialized {
+            return CommandResult::error("SDK not initialized. Call init() first.".to_string());
+        }
+
+        let timeout_ms = self.config.command_timeout_ms;
+
+        if timeout_ms == 0 {
+            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            let output = rt.execute_with_cwd(dir, command);
+            return CommandResult::from_code(output.stdout, output.stderr, output.exit_code);
+        }
+
+        self.cancel_flag.store(false, Ordering::SeqCst);
+        let rt = self.runtime.clone();
+        let cancel = self.cancel_flag.clone();
+        let cmd = command.to_string();
+        let dir = dir.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if cancel.load(Ordering::SeqCst) {
+                let _ = tx.send(crate::shell::CommandOutput::error(
+                    "cancelled".to_string(),
+                    143,
+                ));
+                return;
+            }
+            let mut runtime = rt.lock().unwrap_or_else(|e| e.into_inner());
+            if cancel.load(Ordering::SeqCst) {
+                drop(runtime);
+                let _ = tx.send(crate::shell::CommandOutput::error(
+                    "cancelled".to_string(),
+                    143,
+                ));
+                return;
+            }
+            let output = runtime.execute_with_cwd(&dir, &cmd);
+            let _ = tx.send(output);
+        });
+
+        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+            Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.cancel_flag.store(true, Ordering::SeqCst);
+                CommandResult {
+                    stdout: String::new(),
+                    stderr: "command timed out\n".to_string(),
+                    exit_code: 124,
+                }
+            }
+            Err(_) => CommandResult::error("internal error".to_string()),
+        }
+    }
+
     pub fn execute_python(&self, code: &str) -> CommandResult {
         if !self.initialized {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
         // (c) 2025 xiefujin <490021684@qq.com>
-        let mut rt = self.runtime.lock().unwrap();
+        let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         let output = rt.execute_python_code(code);
         CommandResult::from_code(output.stdout, output.stderr, output.exit_code)
     }
@@ -188,7 +245,7 @@ impl Fastshell {
         if !self.initialized {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
-        let mut rt = self.runtime.lock().unwrap();
+        let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         let output = rt.execute_python_script(script_path);
         CommandResult::from_code(output.stdout, output.stderr, output.exit_code)
     }
@@ -197,7 +254,7 @@ impl Fastshell {
         if !self.initialized {
             return "/".to_string();
         }
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.cwd().to_string()
     }
 
@@ -205,7 +262,7 @@ impl Fastshell {
         if !self.initialized {
             return Err("SDK not initialized".to_string());
         }
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.read_file(path)
     }
 
@@ -213,7 +270,7 @@ impl Fastshell {
         if !self.initialized {
             return Err("SDK not initialized".to_string());
         }
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.write_file(path, content)
     }
 
@@ -221,7 +278,7 @@ impl Fastshell {
         if !self.initialized {
             return Err("SDK not initialized".to_string());
         }
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.list_dir(path)
     }
 
@@ -229,7 +286,7 @@ impl Fastshell {
         if !self.initialized {
             return false;
         }
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.exists(path)
     }
 
@@ -237,7 +294,7 @@ impl Fastshell {
         if !self.initialized {
             return false;
         }
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.is_dir(path)
     }
 
@@ -252,7 +309,7 @@ impl Fastshell {
 
     pub fn get_info(&self) -> SdkInfo {
         let python_available = if self.initialized {
-            let rt = self.runtime.lock().unwrap();
+            let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             rt.python_available()
         } else {
             false
@@ -271,6 +328,9 @@ impl Fastshell {
         if let Ok(mut perms) = self.permissions.lock() {
             perms.insert(resource.to_string(), allowed);
         }
+        // Mirror into the process-wide table so agent-spawned Fastshell
+        // instances (fresh permission maps) see the grant too.
+        crate::shell::set_global_permission(resource, allowed);
     }
 
     pub fn check_permission(&self, resource: &str) -> Option<bool> {
@@ -284,6 +344,9 @@ impl Fastshell {
         if let Ok(mut perms) = self.permissions.lock() {
             perms.clear();
         }
+        // Keep the process-wide fallback in sync (see set_permission) —
+        // stale grants there would survive a host-side permission reset.
+        crate::shell::clear_global_permissions();
     }
 
     pub fn register_plugin(&self, plugin: Box<dyn DevicePlugin>) {
@@ -297,7 +360,7 @@ impl Fastshell {
     }
 
     pub fn vfs_root(&self) -> String {
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.shell_root_dir().to_string_lossy().to_string()
     }
 
@@ -305,7 +368,7 @@ impl Fastshell {
         // (c) 2025 xiefujin <490021684@qq.com>
         self.initialized = false;
         self.env_vars.clear();
-        let rt = self.runtime.lock().unwrap();
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         let root = rt.shell_root_dir();
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -313,29 +376,25 @@ impl Fastshell {
     pub fn runtime_ref(&self) -> Arc<Mutex<Runtime>> {
         self.runtime.clone()
     }
-}
 
-unsafe extern "C" fn fastshell_shell_exec_c(cmd: *const c_char) -> *const c_char {
-    let cmd_str = if cmd.is_null() {
-        String::new()
-    } else {
-        unsafe { CStr::from_ptr(cmd) }.to_string_lossy().to_string()
-    };
-    let sdk = crate::sdk::ffi::get_sdk_internal();
-    let sdk = sdk.lock().unwrap();
-    let result = sdk.execute(&cmd_str);
-    let json = serde_json::json!({
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "returncode": result.exit_code,
-    });
-    CString::new(json.to_string()).unwrap().into_raw()
-}
+    /// Starts the Python agent server in a background thread.
+    /// The server runs an asyncio event loop and processes tasks
+    /// submitted via `submit_task()`.
+    pub fn start_agent_server(&self) -> Result<(), String> {
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        match &rt.python_engine_ref() {
+            Some(engine) => engine.start_agent_server(&rt.shell_root_dir()),
+            None => Err("Python engine not configured".into()),
+        }
+    }
 
-unsafe extern "C" fn fastshell_shell_free_c(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        unsafe {
-            let _ = CString::from_raw(ptr);
+    /// Submits a task to the running agent server.
+    /// Returns immediately; output is written to the JSONL file.
+    pub fn submit_task(&self, task_id: &str, task_json: &str) -> Result<(), String> {
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        match &rt.python_engine_ref() {
+            Some(engine) => engine.submit_task(&rt.shell_root_dir(), task_id, task_json),
+            None => Err("Python engine not configured".into()),
         }
     }
 }
@@ -376,6 +435,37 @@ mod tests {
     fn test_init() {
         let sdk = setup_sdk();
         assert!(sdk.is_initialized());
+    }
+
+    #[test]
+    fn test_execute_in_runs_in_dir_and_restores_cwd() {
+        let sdk = setup_sdk();
+        sdk.execute("mkdir -p subdir");
+        let r = sdk.execute_in("/subdir", "pwd");
+        assert_eq!(r.exit_code, 0, "{}", r.stderr);
+        assert_eq!(r.stdout.trim(), "/subdir");
+        // Shared cwd must be restored — a plain pwd still reports "/".
+        let r = sdk.execute("pwd");
+        assert_eq!(r.stdout.trim(), "/");
+    }
+
+    #[test]
+    fn test_execute_in_bad_dir_errors() {
+        let sdk = setup_sdk();
+        let r = sdk.execute_in("/does_not_exist", "pwd");
+        assert_ne!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn test_execute_in_supports_chaining() {
+        let sdk = setup_sdk();
+        sdk.execute("mkdir -p w");
+        let r = sdk.execute_in("/w", "echo data > f.txt && cat f.txt");
+        assert_eq!(r.exit_code, 0, "{}", r.stderr);
+        assert!(r.stdout.contains("data"));
+        // File landed inside /w, not at the root.
+        let r = sdk.execute("cat /w/f.txt");
+        assert_eq!(r.stdout.trim(), "data");
     }
 
     #[test]
@@ -449,7 +539,7 @@ mod tests {
         let result = sdk.execute_python("print(100 + 23)");
         {
             let rt = sdk.runtime_ref();
-            let rt = rt.lock().unwrap();
+            let rt = rt.lock().unwrap_or_else(|e| e.into_inner());
             if rt.python_available() {
                 assert_eq!(result.exit_code, 0);
                 assert!(result.stdout.contains("123"));
@@ -502,20 +592,30 @@ mod tests {
         assert!(!default_config.network_ask_permission);
     }
 
+    /// Serializes tests that touch the process-wide permission table
+    /// (set_permission mirrors globally; clear_permissions clears globally).
+    static PERM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_permission_management() {
+        let _g = PERM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sdk = setup_sdk();
-        assert_eq!(sdk.check_permission("network:example.com"), None);
-        sdk.set_permission("network:example.com", true);
-        assert_eq!(sdk.check_permission("network:example.com"), Some(true));
-        sdk.set_permission("network:example.com", false);
-        assert_eq!(sdk.check_permission("network:example.com"), Some(false));
+        // Unique resource name: the table is process-global, example.com is
+        // shared with other tests and would race under parallel execution.
+        assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), None);
+        sdk.set_permission("network:perm-mgmt.internal", true);
+        assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), Some(true));
+        sdk.set_permission("network:perm-mgmt.internal", false);
+        assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), Some(false));
         sdk.clear_permissions();
-        assert_eq!(sdk.check_permission("network:example.com"), None);
+        assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), None);
+        // The global fallback must be wiped too (agent instances read it).
+        assert_eq!(crate::shell::global_permission("network:perm-mgmt.internal"), None);
     }
 
     #[test]
     fn test_network_permission_denied() {
+        let _g = PERM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sdk = Fastshell::new();
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir =
@@ -524,21 +624,41 @@ mod tests {
         let config = Config {
             sandbox_path: dir.to_string_lossy().to_string(),
             python_enabled: false,
+            python_home: String::new(),
             allow_subprocess: false,
             network_ask_permission: true,
             command_timeout_ms: 5_000,
         };
         sdk.init(config).unwrap();
 
-        let result = sdk.execute("curl http://example.com");
+        let result = sdk.execute("curl http://denied-flow.internal");
         assert_eq!(result.exit_code, EXIT_NEED_PERMISSION);
         assert!(result
             .stderr
-            .contains("PERMISSION_NEEDED:network:example.com"));
+            .contains("PERMISSION_NEEDED:network:denied-flow.internal"));
 
-        sdk.set_permission("network:example.com", true);
-        let result = sdk.execute("curl http://example.com");
+        sdk.set_permission("network:denied-flow.internal", true);
+        let result = sdk.execute("curl http://denied-flow.internal");
         assert_ne!(result.exit_code, EXIT_NEED_PERMISSION);
+        sdk.clear_permissions();
+    }
+
+    #[test]
+    fn test_clear_permissions_resets_global_fallback() {
+        // Regression: a host-side permission reset must also revoke grants
+        // for agent-spawned instances, which consult the global fallback.
+        let _g = PERM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let host = setup_sdk();
+        host.set_permission("network:reset-check.internal", true);
+        assert_eq!(
+            crate::shell::global_permission("network:reset-check.internal"),
+            Some(true)
+        );
+        host.clear_permissions();
+        assert_eq!(
+            crate::shell::global_permission("network:reset-check.internal"),
+            None
+        );
     }
 
     #[test]
@@ -551,6 +671,7 @@ mod tests {
         let config = Config {
             sandbox_path: dir.to_string_lossy().to_string(),
             python_enabled: false,
+            python_home: String::new(),
             allow_subprocess: false,
             network_ask_permission: false,
             command_timeout_ms: 5_000,

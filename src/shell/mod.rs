@@ -120,17 +120,31 @@ impl Shell {
         resource: &str,
     ) -> Option<CommandOutput> {
         let full = format!("{}:{}", resource_type, resource);
+        // Instance-level grant/deny first…
         if let Ok(perms) = self.permissions.lock() {
             match perms.get(&full) {
-                Some(&true) => None,
-                Some(&false) => Some(CommandOutput::error(
-                    format!("Permission denied for {}\n", full),
-                    1,
-                )),
-                None => Some(CommandOutput::permission_needed(resource_type, resource)),
+                Some(&true) => return None,
+                Some(&false) => {
+                    return Some(CommandOutput::error(
+                        format!("Permission denied for {}\n", full),
+                        1,
+                    ))
+                }
+                None => {}
             }
-        } else {
-            None
+        }
+        // …then the process-wide table. The host app grants a permission once
+        // (fastshell_set_permission after the system dialog); agent tasks run
+        // in their own Fastshell instances with fresh (empty) permission maps
+        // and would otherwise be stuck on PERMISSION_NEEDED forever — there
+        // is no UI on the agent path to answer the prompt.
+        match global_permission(&full) {
+            Some(true) => None,
+            Some(false) => Some(CommandOutput::error(
+                format!("Permission denied for {}\n", full),
+                1,
+            )),
+            None => Some(CommandOutput::permission_needed(resource_type, resource)),
         }
     }
 
@@ -140,17 +154,27 @@ impl Shell {
             return None;
         }
         let resource = format!("network:{}", host);
+        // Instance-level grant/deny first…
         if let Ok(perms) = self.permissions.lock() {
             match perms.get(&resource) {
-                Some(&true) => None,
-                Some(&false) => Some(CommandOutput::error(
-                    format!("Permission denied for {}\n", resource),
-                    1,
-                )),
-                None => Some(CommandOutput::permission_needed("network", host)),
+                Some(&true) => return None,
+                Some(&false) => {
+                    return Some(CommandOutput::error(
+                        format!("Permission denied for {}\n", resource),
+                        1,
+                    ))
+                }
+                None => {}
             }
-        } else {
-            None
+        }
+        // …then the process-wide table (UI grants visible to agent instances).
+        match global_permission(&resource) {
+            Some(true) => None,
+            Some(false) => Some(CommandOutput::error(
+                format!("Permission denied for {}\n", resource),
+                1,
+            )),
+            None => Some(CommandOutput::permission_needed("network", host)),
         }
     }
 
@@ -166,7 +190,14 @@ impl Shell {
             "mv" => self.cmd_mv(args),
             "cat" => self.cmd_cat(args, stdin),
             "find" => self.cmd_find(args),
-            "grep" => self.cmd_grep(args, stdin),
+            "grep" | "egrep" => self.cmd_grep(args, stdin),
+            "fgrep" => {
+                let mut a = vec!["-F"];
+                a.extend_from_slice(args);
+                self.cmd_grep(&a, stdin)
+            }
+            "rg" => self.cmd_rg(args, stdin),
+            "tree" => self.cmd_tree(args),
             "echo" => self.cmd_echo(args),
             "touch" => self.cmd_touch(args),
             "chmod" => self.cmd_chmod(args),
@@ -524,6 +555,38 @@ pub(crate) fn extract_filename_from_url(url: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+/// Process-wide device-permission table, shared by every Shell instance.
+/// Written by [`set_global_permission`] (wired to the `fastshell_set_permission`
+/// FFI), read as the fallback in `Shell::check_device_permission` so that
+/// agent-spawned instances see grants made through the app UI.
+static GLOBAL_PERMISSIONS: std::sync::OnceLock<Mutex<HashMap<String, bool>>> =
+    std::sync::OnceLock::new();
+
+fn global_permissions() -> &'static Mutex<HashMap<String, bool>> {
+    GLOBAL_PERMISSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a grant/deny in the process-wide permission table.
+pub fn set_global_permission(resource: &str, allowed: bool) {
+    if let Ok(mut g) = global_permissions().lock() {
+        g.insert(resource.to_string(), allowed);
+    }
+}
+
+/// Clear the process-wide permission table (host-side "reset permissions").
+/// Must mirror `Fastshell::clear_permissions` — otherwise agent-spawned
+/// instances would keep honoring stale grants through the global fallback.
+pub fn clear_global_permissions() {
+    if let Ok(mut g) = global_permissions().lock() {
+        g.clear();
+    }
+}
+
+/// Look up a resource in the process-wide permission table.
+pub fn global_permission(resource: &str) -> Option<bool> {
+    global_permissions().lock().ok()?.get(resource).copied()
 }
 
 #[cfg(feature = "git")]
@@ -1853,7 +1916,7 @@ mod tests {
         shell.vfs.write("/f.txt", "", "modified\n").unwrap();
         let out = shell.execute("git", &["diff"], None);
         assert!(out.stdout.contains("modified") || out.stdout.contains("hello"));
-        assert_ne!(out.exit_code, 0); // unstaged changes exist
+        assert_eq!(out.exit_code, 0); // real git returns 0 even with diffs
     }
 
     #[test]

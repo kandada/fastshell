@@ -72,14 +72,15 @@ impl Shell {
                     // With -I, xargs runs the command even with empty input
                     let cmd =
                         build_command_with_replace(&target_cmd, "", replace_str.as_ref().unwrap());
-                    if verbose {
-                        eprintln!("{}", cmd.join(" "));
-                    }
-                    return self.execute(
+                    let mut out = self.execute(
                         &cmd[0],
                         &cmd[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                         None,
                     );
+                    if verbose {
+                        out.stderr = format!("{}\n{}", cmd.join(" "), out.stderr);
+                    }
+                    return out;
                 }
                 return CommandOutput::error("xargs: no input\n".to_string(), 1);
             }
@@ -145,7 +146,8 @@ fn exec_xargs_replace(
         for item in items {
             let cmd = build_command_with_replace(target_cmd, item, replace_str);
             if verbose {
-                eprintln!("{}", cmd.join(" "));
+                combined_stderr.push_str(&cmd.join(" "));
+                combined_stderr.push('\n');
             }
             let out = shell.execute(
                 &cmd[0],
@@ -194,7 +196,8 @@ fn exec_xargs_chunks(
             if verbose {
                 let mut full = vec![cmd_name.as_str()];
                 full.extend(&all_args);
-                eprintln!("{}", full.join(" "));
+                combined_stderr.push_str(&full.join(" "));
+                combined_stderr.push('\n');
             }
 
             let out = shell.execute(cmd_name, &all_args, None);
@@ -246,9 +249,11 @@ fn run_parallel_replace(
                 let mut results = Vec::new();
                 for item in &chunk {
                     let full_cmd = build_command_with_replace(&cmd, item, &rep);
-                    if verbose {
-                        eprintln!("{}", full_cmd.join(" "));
-                    }
+                    let trace = if verbose {
+                        format!("{}\n", full_cmd.join(" "))
+                    } else {
+                        String::new()
+                    };
                     // In threads, we can't call shell.execute because it borrows mutably
                     // So use std::process::Command directly
                     let result = std::process::Command::new(&full_cmd[0])
@@ -258,14 +263,14 @@ fn run_parallel_replace(
                         Ok(out) => {
                             results.push((
                                 String::from_utf8_lossy(&out.stdout).to_string(),
-                                String::from_utf8_lossy(&out.stderr).to_string(),
+                                format!("{}{}", trace, String::from_utf8_lossy(&out.stderr)),
                                 out.status.code().unwrap_or(1),
                             ));
                         }
                         Err(e) => {
                             results.push((
                                 String::new(),
-                                format!("xargs: {}: {}\n", full_cmd[0], e),
+                                format!("{}xargs: {}: {}\n", trace, full_cmd[0], e),
                                 127,
                             ));
                         }
@@ -330,9 +335,11 @@ fn run_parallel_chunks(
                     let full_cmd = &cmd[0];
                     let mut all_args: Vec<String> = cmd[1..].to_vec();
                     all_args.extend(chunk.iter().cloned());
-                    if verbose {
-                        eprintln!("{} {}", full_cmd, all_args.join(" "));
-                    }
+                    let trace = if verbose {
+                        format!("{} {}\n", full_cmd, all_args.join(" "))
+                    } else {
+                        String::new()
+                    };
                     let result = std::process::Command::new(full_cmd)
                         .args(&all_args)
                         .output();
@@ -340,14 +347,14 @@ fn run_parallel_chunks(
                         Ok(out) => {
                             results.push((
                                 String::from_utf8_lossy(&out.stdout).to_string(),
-                                String::from_utf8_lossy(&out.stderr).to_string(),
+                                format!("{}{}", trace, String::from_utf8_lossy(&out.stderr)),
                                 out.status.code().unwrap_or(1),
                             ));
                         }
                         Err(e) => {
                             results.push((
                                 String::new(),
-                                format!("xargs: {}: {}\n", full_cmd, e),
+                                format!("{}xargs: {}: {}\n", trace, full_cmd, e),
                                 127,
                             ));
                         }

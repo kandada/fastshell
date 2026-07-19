@@ -24,6 +24,7 @@ pub fn setup_sdk() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 30_000,
+    ..Default::default()
     }).unwrap();
     sdk
 }
@@ -38,6 +39,7 @@ pub fn setup_sdk_no_subprocess() -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 5_000,
+    ..Default::default()
     }).unwrap();
     sdk
 }
@@ -52,6 +54,7 @@ pub fn setup_sdk_with_timeout(timeout_ms: u64) -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: timeout_ms,
+    ..Default::default()
     }).unwrap();
     sdk
 }

@@ -123,7 +123,7 @@ impl Shell {
             };
             let mut compressed = Vec::new();
             {
-                let mut e = xz2::write::XzEncoder::new(&mut compressed, 6);
+                let mut e = liblzma::write::XzEncoder::new(&mut compressed, 6);
                 e.write_all(&input).ok();
                 e.finish().ok();
             }
@@ -167,7 +167,7 @@ impl Shell {
             };
             let mut decompressed = Vec::new();
             if let Err(e) =
-                xz2::read::XzDecoder::new(&compressed[..]).read_to_end(&mut decompressed)
+                liblzma::read::XzDecoder::new(&compressed[..]).read_to_end(&mut decompressed)
             {
                 return CommandOutput::error(format!("unxz: {}: {}\n", file, e), 1);
             }

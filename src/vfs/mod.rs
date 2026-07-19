@@ -71,10 +71,50 @@ impl Vfs {
         &self.root
     }
 
+    /// If `p` is a full physical path pointing inside the sandbox, return its
+    /// canonical form; otherwise `None`. Handles paths that reach the sandbox
+    /// through symlinks (Android: /data/user/0/... vs /data/data/...) by
+    /// canonicalizing the longest existing ancestor.
+    fn physical_in_sandbox(&self, p: &Path) -> Option<PathBuf> {
+        if p.starts_with(&self.root) {
+            return Some(p.to_path_buf());
+        }
+        // Canonicalize the path (or its deepest existing ancestor + remainder)
+        // and check again — the root itself is stored canonicalized.
+        if let Ok(c) = fs::canonicalize(p) {
+            if c.starts_with(&self.root) {
+                return Some(c);
+            }
+            return None;
+        }
+        let mut ancestor = p.parent()?;
+        loop {
+            if let Ok(c) = fs::canonicalize(ancestor) {
+                let rest = p.strip_prefix(ancestor).ok()?;
+                let joined = c.join(rest);
+                if joined.starts_with(&self.root) {
+                    return Some(joined);
+                }
+                return None;
+            }
+            ancestor = ancestor.parent()?;
+        }
+    }
+
     pub fn resolve(&self, path: &str, cwd: &str) -> Result<PathBuf> {
         // (c) 2025 xiefujin <490021684@qq.com>
         let candidate = if path.starts_with('/') {
-            self.root.join(path.trim_start_matches('/'))
+            // A leading '/' is a VFS-internal path relative to the sandbox
+            // root — UNLESS the caller passed a full physical path that is
+            // already inside the sandbox (e.g. Android passes
+            // /data/user/0/<pkg>/files/fastshell/projects/x while the
+            // canonical root is /data/data/<pkg>/... because /data/user/0 is
+            // a symlink). Joining that onto the root again would double the
+            // prefix and never match, so detect it via canonicalization.
+            match self.physical_in_sandbox(Path::new(path)) {
+                Some(p) => p,
+                None => self.root.join(path.trim_start_matches('/')),
+            }
         } else {
             let base = if cwd.starts_with('/') {
                 self.root.join(cwd.trim_start_matches('/'))
@@ -378,6 +418,49 @@ mod tests {
         let vfs = setup_vfs();
         let resolved = vfs.resolve("foo/bar", "/home").unwrap();
         assert!(resolved.ends_with("home/foo/bar"));
+    }
+
+    #[test]
+    fn test_resolve_full_physical_path_inside_sandbox() {
+        // Callers (e.g. Android FilesViewModel) may pass the full physical
+        // path of a file inside the sandbox. It must NOT be double-joined
+        // onto the root.
+        let vfs = setup_vfs();
+        vfs.create_dir("/projects", "").unwrap();
+        vfs.create_dir("/projects/demo", "").unwrap();
+        vfs.write("/projects/demo/a.txt", "", "hi").unwrap();
+        let physical = vfs.root().join("projects/demo/a.txt");
+        let resolved = vfs.resolve(physical.to_str().unwrap(), "/").unwrap();
+        assert_eq!(resolved, physical.canonicalize().unwrap());
+        assert_eq!(vfs.read_to_string(physical.to_str().unwrap(), "/").unwrap(), "hi");
+    }
+
+    #[test]
+    fn test_resolve_physical_path_via_symlinked_prefix() {
+        // Android: the app passes /data/user/0/... but the canonical sandbox
+        // root is /data/data/... (symlinked). Simulate with a symlinked dir.
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("fs_vfs_link_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("real/sandbox")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("real"), base.join("alias")).unwrap();
+            let vfs = Vfs::new(base.join("real/sandbox")).unwrap();
+            vfs.create_dir("/projects", "").unwrap();
+            vfs.write("/projects/a.txt", "", "hi").unwrap();
+            // Path through the symlinked alias — different textual prefix.
+            let via_alias = base.join("alias/sandbox/projects/a.txt");
+            assert_eq!(
+                vfs.read_to_string(via_alias.to_str().unwrap(), "/").unwrap(),
+                "hi"
+            );
+            // Non-existent file through the alias still resolves (for writes).
+            let via_alias_new = base.join("alias/sandbox/projects/new.txt");
+            let r = vfs.resolve(via_alias_new.to_str().unwrap(), "/").unwrap();
+            assert!(r.starts_with(vfs.root()));
+        }
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

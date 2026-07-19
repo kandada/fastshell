@@ -14,10 +14,16 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 - **Pipeline support** — True concurrent execution, each stage runs in its own thread with streaming channels
 - **Glob expansion** — `ls *.rs`, `cat src/**/*.rs`
 - **Regex** — Full regex in `grep` and `sed s///`
-- **Python engine** — `python -c '...'` and `.py` script execution
+- **Python engine** — Embedded [RustPython](https://github.com/RustPython/RustPython) (MIT, pure Rust, feature `python-rustpython`): `ast`/`unittest`/frozen stdlib, no dlopen/JNI/C-TLS crash surface. Desktop prefers system `python3`.
 - **Virtual filesystem** — Sandbox isolation, path escape prevention
 - **Thread-safe SDK** — `Arc<Mutex<Runtime>>`, timeout enforcement
 - **Cross-platform** — Single codebase compiles to Android, iOS, macOS, Linux
+
+## In The Wild
+
+[**aacode**](https://github.com/kandada/aacode) — a mobile AI coding assistant, running on fastshell:
+- The entire shell sandbox, 180+ commands, embedded Python, device bridge, and native C-ABI agent interface are powered by fastshell.
+- Available via [**APK direct download**](https://github.com/kandada/aacode/raw/main/mobile_app/aacode-v1.7.24-arm64.apk). Google Play and other app stores are still in the listing process.
 
 ## Quick Start
 
@@ -48,9 +54,29 @@ let r = sdk.execute_python("print(sum(range(1, 101)))");
 // 5050
 ```
 
-### Python calling Shell
+### Embedded RustPython (feature `python-rustpython`)
 
-Python code running in fastshell can use `subprocess` and `asyncio` to call shell commands — no special imports needed:
+On mobile, fastshell embeds **[RustPython](https://github.com/RustPython/RustPython) 0.5.0** — a Python 3
+interpreter written in pure Rust. It compiles straight into the static library:
+no `libpython.so`, no dlopen, no on-disk stdlib extraction (the CPython pure-Python
+standard library is *frozen* into the binary via `freeze-stdlib`).
+
+> The previous Chaquopy CPython integration was removed: in-process embedded
+> CPython crashed on real devices (pthread/bionic TLS, `unittest`/`threading`).
+> RustPython eliminates that entire crash class by construction.
+
+Supported out of the box: `ast` syntax checks, `unittest`, `json`, `re`, `os`,
+file I/O in the sandbox cwd, big integers, correct float division semantics.
+C extension modules (numpy etc.) are not supported (same as any embedded option).
+
+Licensing note: RustPython's LGPL `malachite` dependencies are replaced by
+clean-room Apache-2.0 shims — see `num_bigint/README.md` and `vendor/README.md`.
+The full dependency tree is permissive (closed-source apps can link statically).
+
+On desktop, the system `python3` is preferred; set `FASTSHELL_PYTHON=rustpython`
+to force the embedded engine (useful for testing the mobile code path).
+
+### Python calling Shell
 
 ```python
 import subprocess
@@ -262,25 +288,22 @@ Built-in commands (`ls`, `grep`, `curl`, `git`, etc.) work everywhere regardless
 Requires Rust stable toolchain.
 
 ```bash
-# 1. One-time setup (installs Rust targets, optional Android NDK)
-./scripts/setup.sh
-
-# 2. Build for your target
+# 1. Build for your target (add --features python-rustpython for embedded Python)
 cargo build --release --target aarch64-apple-darwin        # macOS ARM64
 cargo build --release --target x86_64-apple-darwin          # macOS Intel
 cargo build --release --target aarch64-apple-ios            # iOS (macOS host)
-cargo build --release --target aarch64-linux-android        # Android (needs NDK)
+cargo build --release --target aarch64-linux-android        # Android (needs NDK; static libffi is bundled — see vendor/README.md)
 
 # Linux x86_64 cross-compile (requires cargo-zigbuild)
 pip3 install cargo-zigbuild
 cargo zigbuild --release --target x86_64-unknown-linux-gnu
 
-# 3. Run tests (268 tests)
-cargo test
+# 2. Run tests (~500 fastshell tests; 687 across the workspace with aacode-rs)
+cargo test --features git,python-rustpython
 ```
 
-**Note:** Android target requires Android NDK r27c. `./scripts/setup.sh` will offer to download it.
-macOS, iOS, and Linux targets build without NDK.
+**Note:** Android target requires Android NDK r27c (a `.cargo/config.toml` with the
+NDK linker paths, see this repo's root). macOS, iOS, and Linux targets build without NDK.
 
 Linking the library into your project:
 
@@ -295,23 +318,28 @@ target/aarch64-apple-ios/release/libfastshell.a
 target/aarch64-linux-android/release/libfastshell.so
 ```
 
-Build artifacts per platform (reference):
+Build artifacts per platform (reference; sizes measured with the full
+`git,python-rustpython` feature set — leaner without them):
 
 | Platform | Output File | Format | Approx Size |
 |----------|------------|--------|-------------|
-| macOS Apple Silicon | `libfastshell.dylib` | dynamic library | ~11 MB |
-| macOS Intel | `libfastshell.dylib` | dynamic library | ~13 MB |
-| iOS arm64 | `libfastshell.a` | static library | ~47 MB |
-| Android arm64 | `libfastshell.so` | shared library (.so) | ~12 MB |
-| Linux x86_64 | `libfastshell.so` | shared library (.so) | ~10 MB |
+| macOS Apple Silicon | `libfastshell.dylib` | dynamic library | ~14 MB |
+| iOS arm64 | `libfastshell.a` | static library (link-time GC applies) | ~90 MB `.a` |
+| Android arm64 | `libaacode_rs.a` → `libfastshell_jni.so` | staticlib + NDK CMake link (recommended, see `fastshell_c/`) | ~218 MB `.a` → **~48 MB `.so`** |
+| Linux x86_64 | `libfastshell.so` | shared library (.so) | ~14 MB |
+
+For mobile apps the **staticlib + host-side C/CMake link** path is recommended
+(`fastshell_c/` for Android): dead-code elimination (`--gc-sections`) shrinks the
+final `.so` dramatically, and one archive carries fastshell + the aacode-rs agent
++ RustPython + git2.
 
 ## Commands
 
 ### File Operations
-`ls` `cd` `pwd` `mkdir` `rm` `cp` `mv` `cat` `find` `touch` `chmod` `file` `stat` `du` `basename` `dirname` `realpath`
+`ls` `cd` `pwd` `mkdir` `rm` `cp` `mv` `cat` `find` `tree` `touch` `chmod` `file` `stat` `du` `basename` `dirname` `realpath`
 
 ### Text Processing
-`grep` `sed` `awk` `sort` `uniq` `wc` `head` `tail` `cut` `tr` `diff` `tee` `xargs` `column` `paste` `rev` `comm` `xxd` `printf` `seq` `shuf`
+`grep` (`egrep`/`fgrep`) `rg` `sed` `awk` `sort` `uniq` `wc` `head` `tail` `cut` `tr` `diff` `tee` `xargs` `column` `paste` `rev` `comm` `xxd` `printf` `seq` `shuf`
 
 ### Network
 `curl` `wget` `ping` `ssh`

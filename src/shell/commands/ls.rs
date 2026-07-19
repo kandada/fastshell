@@ -9,8 +9,12 @@ impl Shell {
     pub fn cmd_ls(&self, args: &[&str]) -> CommandOutput {
         let mut show_all = false;
         let mut long_format = false;
-        let mut path = ".";
         let mut human_readable = false;
+        let mut recursive = false;
+        let mut sort_time = false;
+        let mut sort_size = false;
+        let mut reverse = false;
+        let mut paths: Vec<&str> = Vec::new();
 
         for arg in args {
             if arg.starts_with('-') {
@@ -19,43 +23,121 @@ impl Shell {
                         'a' => show_all = true,
                         'l' => long_format = true,
                         'h' => human_readable = true,
+                        'R' => recursive = true,
+                        't' => sort_time = true,
+                        'S' => sort_size = true,
+                        'r' => reverse = true,
                         _ => {}
                     }
                 }
             } else {
-                path = arg;
+                paths.push(arg);
             }
         }
 
-        let target = match self.vfs.resolve(path, &self.cwd) {
-            Ok(p) => p,
-            Err(e) => return CommandOutput::error(e.to_string(), 1),
-        };
-
-        if target.is_file() {
-            return match self.format_ls_entry(&target, long_format, human_readable) {
-                Some(s) => CommandOutput::success(s),
-                None => CommandOutput::error(format!("Cannot access {}", target.display()), 1),
-            };
+        if paths.is_empty() {
+            paths.push(".");
         }
-
-        let entries = match self.vfs.list_dir(path, &self.cwd) {
-            Ok(e) => e,
-            Err(e) => return CommandOutput::error(e.to_string(), 1),
-        };
 
         let mut output = String::new();
 
-        if show_all {
-            if long_format {
-                for implicit in &[".", ".."] {
-                    let full_path = target.join(implicit);
-                    if let Some(line) = self.format_ls_entry(&full_path, true, human_readable) {
-                        output.push_str(&line);
+        // Like real ls: file operands are listed plainly first; directory
+        // operands get "name:" headers only when there are multiple operands.
+        let mut file_paths: Vec<&str> = Vec::new();
+        let mut dir_paths: Vec<&str> = Vec::new();
+        for path in &paths {
+            match self.vfs.resolve(path, &self.cwd) {
+                Ok(p) if p.is_file() => file_paths.push(path),
+                Ok(_) => dir_paths.push(path),
+                Err(e) => return CommandOutput::error(e.to_string(), 1),
+            }
+        }
+        let multi = paths.len() > 1;
+
+        for path in &file_paths {
+            if let Ok(target) = self.vfs.resolve(path, &self.cwd) {
+                if long_format {
+                    if let Some(s) = self.format_ls_entry(&target, long_format, human_readable) {
+                        output.push_str(&s);
                     }
+                } else {
+                    output.push_str(path);
+                    output.push('\n');
                 }
-            } else {
-                output.push_str(".\n..\n");
+            }
+        }
+
+        for (pi, path) in dir_paths.iter().enumerate() {
+            if multi {
+                if pi > 0 || !file_paths.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&format!("{}:\n", path));
+            }
+
+            let target = match self.vfs.resolve(path, &self.cwd) {
+                Ok(p) => p,
+                Err(e) => return CommandOutput::error(e.to_string(), 1),
+            };
+
+            self.ls_list_dir(
+                path, &target, show_all, long_format, human_readable,
+                recursive, sort_time, sort_size, reverse, &mut output,
+            );
+        }
+
+        CommandOutput::success(output)
+    }
+
+    fn ls_list_dir(
+        &self,
+        vpath: &str,
+        real_path: &Path,
+        show_all: bool,
+        long_format: bool,
+        human_readable: bool,
+        recursive: bool,
+        sort_time: bool,
+        sort_size: bool,
+        reverse: bool,
+        output: &mut String,
+    ) {
+        let mut entries = match self.vfs.list_dir(vpath, &self.cwd) {
+            Ok(e) => e,
+            Err(e) => {
+                output.push_str(&format!("ls: {}: {}\n", vpath, e));
+                return;
+            }
+        };
+
+        // Sort entries
+        if sort_time {
+            entries.sort_by_key(|e| {
+                let full = real_path.join(&e.name);
+                full.metadata().ok().and_then(|m| m.modified().ok())
+                    .map(|t| t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs()).unwrap_or(0))
+                    .unwrap_or(0)
+            });
+        } else if sort_size {
+            entries.sort_by_key(|e| e.size);
+        } else {
+            entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        }
+
+        if reverse {
+            entries.reverse();
+        }
+
+        let mut dirs: Vec<String> = Vec::new();
+
+        if show_all && !long_format {
+            output.push_str(".\n..\n");
+        } else if show_all && long_format {
+            for implicit in &[".", ".."] {
+                let full = real_path.join(implicit);
+                if let Some(line) = self.format_ls_entry(&full, true, human_readable) {
+                    output.push_str(&line);
+                }
             }
         }
 
@@ -64,17 +146,35 @@ impl Shell {
                 continue;
             }
             if long_format {
-                let full_path = target.join(&entry.name);
-                if let Some(line) = self.format_ls_entry(&full_path, true, human_readable) {
+                let full = real_path.join(&entry.name);
+                if let Some(line) = self.format_ls_entry(&full, true, human_readable) {
                     output.push_str(&line);
                 }
             } else {
                 output.push_str(&entry.name);
                 output.push('\n');
             }
+
+            if entry.is_dir && recursive {
+                let sub_vpath = if vpath.ends_with('/') {
+                    format!("{}{}", vpath, entry.name)
+                } else {
+                    format!("{}/{}", vpath, entry.name)
+                };
+                dirs.push(sub_vpath);
+            }
         }
 
-        CommandOutput::success(output)
+        // Recurse into subdirectories
+        for sub in &dirs {
+            output.push_str(&format!("\n{}:\n", sub));
+            if let Ok(sub_real) = self.vfs.resolve(sub, &self.cwd) {
+                self.ls_list_dir(
+                    sub, &sub_real, show_all, long_format, human_readable,
+                    recursive, sort_time, sort_size, reverse, output,
+                );
+            }
+        }
     }
 
     fn format_ls_entry(

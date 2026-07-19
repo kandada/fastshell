@@ -56,6 +56,7 @@ impl CommandResult {
 pub struct Config {
     pub sandbox_path: String,
     pub python_enabled: bool,
+    pub python_home: String,
     pub command_timeout_ms: u64,
     pub allow_subprocess: bool,
     pub network_ask_permission: bool,
@@ -66,6 +67,7 @@ impl Default for Config {
         Config {
             sandbox_path: String::new(),
             python_enabled: true,
+            python_home: String::new(),
             command_timeout_ms: 30_000,
             allow_subprocess: !cfg!(any(target_os = "android", target_os = "ios")),
             network_ask_permission: cfg!(any(target_os = "android", target_os = "ios")),

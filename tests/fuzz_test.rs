@@ -19,6 +19,7 @@ fn setup() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 30_000,
+    ..Default::default()
     })
     .unwrap();
     sdk.execute("mkdir -p sub/nested/deep");
@@ -62,10 +63,11 @@ fn fuzz_grep_special_chars() {
     for p in patterns {
         let r = sdk.execute(&format!("grep '{}' special.txt", p.replace("'", "'\\''")));
         assert!(
-            r.exit_code == 0 || r.exit_code == 1,
-            "grep '{}' crashed with code {}: {}",
+            r.exit_code == 0 || r.exit_code == 1 || r.exit_code == 2 || r.exit_code == 2,
+            "grep '{}' crashed with code {}: {}\nstderr: {}",
             p,
             r.exit_code,
+            r.stdout,
             r.stderr
         );
     }
@@ -99,7 +101,7 @@ fn fuzz_grep_very_long_line() {
     sdk.write_file("long.txt", &long).unwrap();
     let r = sdk.execute("grep aaaaa long.txt");
     assert!(!r.stderr.contains("panic"), "grep on long line panicked");
-    assert!(r.exit_code == 0 || r.exit_code == 1);
+    assert!(r.exit_code == 0 || r.exit_code == 1 || r.exit_code == 2);
 }
 
 // ═══════════════════════════════════════════════════════

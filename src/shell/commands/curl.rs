@@ -30,6 +30,7 @@ pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, Strin
         ureq::AgentBuilder::new().redirects(if config.follow_redirects { 10 } else { 0 });
 
     if config.insecure {
+        eprintln!("⚠️  [fastshell] TLS certificate verification DISABLED (--insecure/-k). This is unsafe and should only be used for testing.");
         agent_builder = agent_builder.tls_config(build_insecure_tls_config());
     }
 

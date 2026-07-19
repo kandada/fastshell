@@ -17,11 +17,16 @@ impl Shell {
                 "-csv" => csv_mode = true,
                 "-header" | "-headers" => header_mode = true,
                 "-line" => {} // accepted, simple line mode
-                arg if !arg.starts_with('-') && db_path.is_none() => {
-                    db_path = Some(arg.to_string());
-                }
-                arg if !arg.starts_with('-') && sql.is_none() && !arg.starts_with('.') => {
-                    sql = Some(arg.to_string());
+                arg if !arg.starts_with('-') && !arg.starts_with('.') => {
+                    if db_path.is_none() {
+                        db_path = Some(arg.to_string());
+                    } else {
+                        // Accumulate SQL tokens (handles `sqlite3 db.sqlite SELECT * FROM users`)
+                        match sql {
+                            Some(ref mut s) => { s.push(' '); s.push_str(arg); }
+                            None => sql = Some(arg.to_string()),
+                        }
+                    }
                 }
                 arg if arg.starts_with('.') && dot_command.is_none() => {
                     dot_command = Some(arg.to_string());
