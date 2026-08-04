@@ -3,8 +3,23 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const UNIQ_HELP_TEXT: &str = "\
+uniq: report or omit repeated lines
+Usage: uniq [OPTIONS] [FILE]
+Options:
+  -c          Prefix lines by occurrence count
+  -d          Only print duplicate lines
+  -u          Only print unique lines
+  -i          Ignore case when comparing
+  -f N        Skip first N fields
+  -h, --help  Show this help message
+";
+
 impl Shell {
     pub fn cmd_uniq(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(UNIQ_HELP_TEXT.to_string());
+        }
         let mut files = Vec::new();
         let mut count = false;
         let mut dup_only = false;
@@ -29,7 +44,7 @@ impl Shell {
                     skip_fields = arg[2..].parse().unwrap_or(0);
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+                _ => eprintln!("uniq: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -227,5 +242,21 @@ mod tests {
         let shell = mk_shell();
         let out = shell.cmd_uniq(&[], None);
         assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn test_uniq_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("uniq", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_uniq_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("uniq", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

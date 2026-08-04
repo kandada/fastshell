@@ -3,8 +3,22 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const WC_HELP_TEXT: &str = "\
+Usage: wc [OPTION]... [FILE]...
+Print newline, word, and byte counts for each FILE.
+
+  -l  print the newline counts
+  -w  print the word counts
+  -c  print the byte counts
+  -m  print the character counts
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_wc(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(WC_HELP_TEXT.to_string());
+        }
         let mut show_lines = true;
         let mut show_words = true;
         let mut show_bytes = true;
@@ -32,7 +46,9 @@ impl Shell {
                     bytes_mode = false;
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+                _ => {
+                    eprintln!("wc: warning: unsupported option '{}'", arg);
+                }
             }
         }
 
@@ -118,5 +134,38 @@ impl Shell {
         }
 
         CommandOutput::success(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_wc_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_wc_help() {
+        let mut s = mk_shell();
+        let out = s.execute("wc", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_wc_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("wc", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

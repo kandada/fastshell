@@ -3,8 +3,20 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const SSH_HELP_TEXT: &str = "\
+ssh: OpenSSH remote login client
+Usage: ssh [OPTIONS] [user@]host [command]
+Options:
+  -p PORT     Port to connect to on remote host
+  -i FILE     Identity file (private key)
+  -h, --help  Show this help message
+";
+
 impl Shell {
     pub fn cmd_ssh(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(SSH_HELP_TEXT.to_string());
+        }
         let mut port: u16 = 22;
         let mut identity: Option<String> = None;
         let mut target: Option<String> = None;
@@ -33,7 +45,7 @@ impl Shell {
                     command = Some(rest.join(" "));
                     break;
                 }
-                _ => {}
+                _ => eprintln!("ssh: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -63,5 +75,35 @@ impl Shell {
         rt.block_on(async {
             crate::shell::ssh_exec_russh(&host, port, &user, &command, identity.as_deref()).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_ssh_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("ssh", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_ssh_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("ssh", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

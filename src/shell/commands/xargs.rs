@@ -3,8 +3,23 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const XARGS_HELP_TEXT: &str = "\
+Usage: xargs [OPTION]... COMMAND [ARG]...
+Build and execute command lines from standard input.
+
+  -n N      use at most N arguments per command line
+  -I R      replace occurrences of R with input lines
+  -0        items are separated by null, not whitespace
+  -P N      run up to N commands in parallel
+  -t        print each command line to stderr before executing
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_xargs(&mut self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(XARGS_HELP_TEXT.to_string());
+        }
         let mut max_args: Option<usize> = None;
         let mut replace_str: Option<String> = None;
         let mut null_delimited = false;
@@ -56,7 +71,9 @@ impl Shell {
                 a if parsing_cmd => {
                     target_cmd.push(a.to_string());
                 }
-                _ => {}
+                _ => {
+                    eprintln!("xargs: warning: unsupported option '{}'", args[i]);
+                }
             }
             i += 1;
         }
@@ -461,5 +478,21 @@ mod tests {
         let mut shell = mk_shell();
         let out = shell.cmd_xargs(&[], Some("input"));
         assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn test_xargs_help() {
+        let mut s = mk_shell();
+        let out = s.execute("xargs", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_xargs_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("xargs", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

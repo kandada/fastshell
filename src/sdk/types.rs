@@ -69,7 +69,7 @@ impl Default for Config {
             python_enabled: true,
             python_home: String::new(),
             command_timeout_ms: 30_000,
-            allow_subprocess: !cfg!(any(target_os = "android", target_os = "ios")),
+            allow_subprocess: true,
             network_ask_permission: cfg!(any(target_os = "android", target_os = "ios")),
         }
     }

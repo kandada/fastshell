@@ -4,6 +4,21 @@
 use crate::shell::{CommandOutput, Shell};
 use std::cmp::Ordering;
 
+const SORT_HELP_TEXT: &str = "\
+sort: sort lines of text files
+Usage: sort [OPTIONS] [FILE...]
+Options:
+  -n          Sort numerically
+  -r          Reverse result
+  -u          Output only unique lines
+  -h          Compare human-readable numbers
+  -f          Fold lower case to upper case
+  -s          Stabilize sort (disable last-resort)
+  -k SPEC     Sort via a key (e.g. 1,2)
+  -t CHAR     Use CHAR as field separator
+  --help      Show this help message
+";
+
 fn parse_human_size(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -118,6 +133,9 @@ fn extract_sort_key(
 
 impl Shell {
     pub fn cmd_sort(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"--help") {
+            return CommandOutput::success(SORT_HELP_TEXT.to_string());
+        }
         let mut files = Vec::new();
         let mut numeric = false;
         let mut reverse = false;
@@ -159,7 +177,7 @@ impl Shell {
                     }
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+                _ => eprintln!("sort: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -332,5 +350,27 @@ fn compare_strings(a: &str, b: &str, fold_case: bool) -> Ordering {
         a.to_lowercase().cmp(&b.to_lowercase())
     } else {
         a.cmp(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_sort_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("sort", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

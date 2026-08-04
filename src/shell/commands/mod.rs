@@ -1,6 +1,7 @@
 // Copyright (c) 2025 xiefujin <490021684@qq.com>
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
+pub mod alias;
 pub mod awk;
 pub mod base64;
 pub mod cat;
@@ -16,8 +17,11 @@ pub mod diff;
 pub mod du_df_stat;
 pub mod echo;
 pub mod env_utils;
+pub mod eval;
+pub mod export;
 pub mod extra;
 pub mod false_;
+pub mod functions;
 pub mod file_column_seq;
 pub mod final_batch;
 pub mod find;
@@ -36,12 +40,15 @@ pub mod mkdir;
 pub mod mv;
 pub mod paste_timeout;
 pub mod ping;
+pub mod read;
 pub mod ps;
 pub mod pwd;
 pub mod rm;
 pub mod sed;
+pub mod set;
 pub mod sleep;
 pub mod sort;
+pub mod source;
 pub mod sqlite3;
 pub mod ssh;
 pub mod sys_info;

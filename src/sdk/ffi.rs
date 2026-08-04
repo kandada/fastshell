@@ -85,8 +85,9 @@ pub mod android {
             python_enabled: true,
             python_home: format!("{}/python", sandbox_path),
             allow_subprocess: false,
-            network_ask_permission: true,
+            network_ask_permission: false,
             command_timeout_ms: 300_000,
+            ..crate::sdk::types::Config::default()
         };
 
         let json = match sdk.init(config) {
@@ -261,8 +262,9 @@ pub mod ios {
             python_enabled: true,
             python_home: format!("{}/python", sandbox_path),
             allow_subprocess: false,
-            network_ask_permission: true,
-            command_timeout_ms: 30_000,
+            network_ask_permission: false,
+            command_timeout_ms: 300_000,
+            ..crate::sdk::types::Config::default()
         };
 
         match sdk.init(config) {
@@ -334,9 +336,21 @@ pub mod capi {
     }
 
     fn into_c_string(s: String) -> *mut c_char {
-        std::ffi::CString::new(s)
-            .unwrap_or_else(|_| std::ffi::CString::new("").unwrap())
-            .into_raw()
+        match std::ffi::CString::new(s.clone()) {
+            Ok(cs) => cs.into_raw(),
+            Err(e) => {
+                let pos = e.nul_position();
+                let truncated = &s[..pos];
+                let json = serde_json::json!({
+                    "stdout": truncated,
+                    "stderr": format!("[fastshell: output truncated at byte {} due to NUL character]", pos),
+                    "exit_code": 0,
+                    "nul_truncated": true,
+                })
+                .to_string();
+                std::ffi::CString::new(json).unwrap().into_raw()
+            }
+        }
     }
 
     #[no_mangle]
@@ -352,8 +366,8 @@ pub mod capi {
             python_enabled: std::env::var("FASTSHELL_DISABLE_PYTHON").is_err(),
             python_home: format!("{}/python", sandbox_path),
             allow_subprocess: false,
-            network_ask_permission: true,
             command_timeout_ms: 300_000,
+            ..crate::sdk::types::Config::default()
         };
 
         let json = match sdk.init(config) {
@@ -602,5 +616,44 @@ pub mod capi {
             // set_permission with null resource must be a no-op, not a crash
             fastshell_set_permission(std::ptr::null(), 0);
         }
+    }
+
+    /// Returns a JSON object listing the shell features supported by this build.
+    #[no_mangle]
+    pub extern "C" fn fastshell_get_features() -> *mut c_char {
+        let json = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "shell_features": [
+                "functions",
+                "aliases",
+                "brace_expansion",
+                "arithmetic_expansion",
+                "parameter_substitution",
+                "pipefail",
+                "errexit",
+                "xtrace",
+                "nounset",
+                "heredoc_expansion",
+                "here_string",
+                "process_substitution",
+                "recursive_glob",
+                "if_else",
+                "source_dot",
+                "eval",
+                "read",
+                "export_enhanced",
+                "cat_enhanced",
+                "echo_enhanced",
+                "cd_history",
+                "backslash_fix",
+                "comment_skip",
+                "word_splitting",
+                "killall_fix",
+                "nul_output_protection",
+            ],
+            "builtin_commands": 200,
+            "jni_utf8_fixed": true,
+        }).to_string();
+        into_c_string(json)
     }
 }

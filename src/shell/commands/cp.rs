@@ -3,15 +3,34 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const CP_HELP_TEXT: &str = "\
+Usage: cp [OPTION]... SOURCE DEST
+Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
+
+  -r, -R  copy directories recursively
+  -f       if an existing destination file cannot be opened, remove it
+  -v       explain what is being done
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_cp(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(CP_HELP_TEXT.to_string());
+        }
         let mut recursive = false;
+        let mut force = false;
+        let mut verbose = false;
         let mut operands = Vec::new();
 
         for arg in args {
             match *arg {
                 "-r" | "-R" => recursive = true,
-                _ if arg.starts_with('-') => {}
+                "-f" => force = true,
+                "-v" => verbose = true,
+                _ if arg.starts_with('-') => {
+                    eprintln!("cp: warning: unsupported option '{}'", arg);
+                }
                 _ => operands.push(arg.to_string()),
             }
         }
@@ -46,11 +65,49 @@ impl Shell {
                 dest.clone()
             };
 
+            if verbose {
+                eprintln!("{} -> {}", src, &dest_path);
+            }
             if let Err(e) = self.vfs.copy(src, &dest_path, &self.cwd) {
-                return CommandOutput::error(format!("cp: {}\n", e), 1);
+                if !force {
+                    return CommandOutput::error(format!("cp: {}\n", e), 1);
+                }
             }
         }
 
         CommandOutput::success(String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_cp_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_cp_help() {
+        let mut s = mk_shell();
+        let out = s.execute("cp", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_cp_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("cp", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

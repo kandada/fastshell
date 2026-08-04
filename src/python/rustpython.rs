@@ -129,7 +129,7 @@ fn worker_sender() -> mpsc::Sender<Job> {
 /// small stacks: 2 MB Rust test threads, ~1 MB Android JNI threads).
 fn spawn_worker() -> mpsc::Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("rustpython-worker".to_string())
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
@@ -150,7 +150,8 @@ fn spawn_worker() -> mpsc::Sender<Job> {
                 });
                 let _ = job.reply.send(result);
             }
-        });
+        })
+        .expect("rustpython worker thread spawn failed");
     tx
 }
 

@@ -3,6 +3,19 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const DIFF_HELP_TEXT: &str = "\
+Usage: diff [OPTION]... FILE1 FILE2
+Compare files line by line.
+
+  -u         output unified context diff
+  -r         recursively compare directories
+  -b         ignore changes in the amount of white space
+  -w         ignore all white space
+  -q         report only when files differ
+  -U N       output N lines of unified context
+  -h, --help  display this help and exit
+";
+
 #[derive(Clone, Copy, PartialEq)]
 enum IgnoreWs {
     Changes,
@@ -11,6 +24,9 @@ enum IgnoreWs {
 
 impl Shell {
     pub fn cmd_diff(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(DIFF_HELP_TEXT.to_string());
+        }
         let mut unified = false;
         let mut recursive = false;
         let mut ignore_ws: Option<IgnoreWs> = None;
@@ -47,11 +63,11 @@ impl Shell {
                             'b' => ignore_ws = Some(IgnoreWs::Changes),
                             'w' => ignore_ws = Some(IgnoreWs::All),
                             'q' => brief = true,
-                            _ => {}
+                            _ => eprintln!("diff: warning: unsupported option '-{}'", ch),
                         }
                     }
                 }
-                _ => {}
+                _ => eprintln!("diff: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -866,5 +882,21 @@ mod tests {
         let out = shell.cmd_diff(&["d1", "d2"]);
         assert_ne!(out.exit_code, 0);
         assert!(out.stderr.contains("directories"));
+    }
+
+    #[test]
+    fn test_diff_help() {
+        let mut s = mk_shell();
+        let out = s.execute("diff", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_diff_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("diff", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

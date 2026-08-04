@@ -3,8 +3,23 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const SED_HELP_TEXT: &str = "\
+sed: stream editor
+Usage: sed [OPTIONS] 'script' [FILE...]
+Options:
+  -e SCRIPT   Add script to commands
+  -i          Edit files in-place
+  -n          Suppress automatic printing
+  -ni/-in     Combine -n and -i
+  -i.bak      In-place with backup suffix
+  -h, --help  Show this help message
+";
+
 impl Shell {
     pub fn cmd_sed(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(SED_HELP_TEXT.to_string());
+        }
         let mut expression: Option<String> = None;
         let mut files = Vec::new();
         let mut in_place = false;
@@ -36,7 +51,7 @@ impl Shell {
                     expression = Some(arg.to_string());
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+                _ => eprintln!("sed: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -386,5 +401,30 @@ mod tests {
     #[test]
     fn without_n_p_duplicates() {
         assert_eq!(run("a\nb\n", "1p", false), "a\na\nb\n");
+    }
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        use crate::vfs::Vfs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_sed_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("sed", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_sed_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("sed", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

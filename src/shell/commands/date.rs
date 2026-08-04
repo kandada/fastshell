@@ -3,8 +3,21 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const DATE_HELP_TEXT: &str = "\
+Usage: date [OPTION]... [+FORMAT]
+Display the current time in the given FORMAT, or set the system date.
+
+  -u        print or set Coordinated Universal Time (UTC)
+  -d STRING display time described by STRING (ISO 8601)
+  +FORMAT   output date/time according to FORMAT (e.g. +%Y-%m-%d)
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_date(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(DATE_HELP_TEXT.to_string());
+        }
         let mut use_utc = false;
         let mut date_str: Option<String> = None;
         let mut format = None;
@@ -22,7 +35,9 @@ impl Shell {
                 arg if arg.starts_with('+') => {
                     format = Some(arg[1..].to_string());
                 }
-                _ => {}
+                _ => {
+                    eprintln!("date: warning: unsupported option '{}'", args[i]);
+                }
             }
             i += 1;
         }
@@ -153,7 +168,7 @@ fn format_date(secs: u64, use_utc: bool, fmt: &str) -> String {
         "December",
     ];
 
-    let tz_offset = if use_utc { "+0000" } else { timezone_offset() };
+    let tz_offset = if use_utc { "+0000".to_string() } else { timezone_offset() };
 
     let mut result = fmt.to_string();
     result = result.replace("%Y", &format!("{:04}", year));
@@ -163,7 +178,7 @@ fn format_date(secs: u64, use_utc: bool, fmt: &str) -> String {
     result = result.replace("%M", &format!("{:02}", minutes));
     result = result.replace("%S", &format!("{:02}", seconds));
     result = result.replace("%s", &format!("{}", secs));
-    result = result.replace("%z", tz_offset);
+    result = result.replace("%z", &tz_offset);
     result = result.replace("%A", weekday_names[weekday_index as usize]);
     result = result.replace("%B", month_names[month as usize]);
     result = result.replace("%I", &format!("{:02}", hour_12));
@@ -202,6 +217,50 @@ fn epoch_days(y: i32, m: i32, d: i32) -> u64 {
     days_to_epoch(y, m, d)
 }
 
-fn timezone_offset() -> &'static str {
-    "+0000"
+fn timezone_offset() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    let offset_secs = tm.tm_gmtoff;
+    let sign = if offset_secs < 0 { '-' } else { '+' };
+    let abs_secs = offset_secs.abs();
+    let hours = abs_secs / 3600;
+    let minutes = (abs_secs % 3600) / 60;
+    format!("{}{:02}{:02}", sign, hours, minutes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_date_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_date_help() {
+        let mut s = mk_shell();
+        let out = s.execute("date", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_date_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("date", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
 }

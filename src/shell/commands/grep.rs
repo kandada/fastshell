@@ -4,11 +4,38 @@
 use crate::shell::{CommandOutput, Shell};
 use regex::Regex;
 
+const GREP_HELP_TEXT: &str = "\
+Usage: grep [OPTION]... PATTERN [FILE]...
+       rg [OPTION]... PATTERN [PATH]...
+
+Pattern matching:
+  -F, --fixed-strings     Interpret pattern as fixed string
+  -e, --regexp PATTERN    Use PATTERN as the pattern
+  -w, --word-regexp       Match whole words only
+
+Matching control:
+  -i                       Ignore case
+  -v                       Invert match (select non-matching lines)
+  -c                       Count matching lines
+  -o, --only-matching      Print only matched parts
+  -l, --files-with-matches Print only file names
+  -n                       Show line numbers
+  -r, -R                   Recursive search
+  -N, --no-line-number     Suppress line numbers (rg)
+
+rg extras: -g (glob), -t (type), -T (type-not), -A/-B/-C (context),
+            -m (max-count), --max-depth, -S (smart-case), --count
+
+  -h, --help               Show this help\n";
+
 impl Shell {
     /// ripgrep-style entry point mapped onto the built-in grep engine:
     /// line numbers on by default, searches `.` recursively when no path is
     /// given, and directory arguments are searched recursively automatically.
     pub fn cmd_rg(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(GREP_HELP_TEXT.to_string());
+        }
         let mut flags: Vec<String> = Vec::new();
         let mut positional: Vec<String> = Vec::new();
         let mut no_line_number = false;
@@ -42,7 +69,9 @@ impl Shell {
                     flags.push("-c".to_string());
                     count_or_list = true;
                 }
-                a if a.starts_with("--") => {} // --no-heading, --color=..., etc.
+                a if a.starts_with("--") => {
+                    eprintln!("grep: warning: unsupported option '{}'", a);
+                } // --no-heading, --color=..., etc.
                 a if a.starts_with('-') && a.len() > 1 => {
                     if a.contains('c') || a.contains('l') {
                         count_or_list = true;
@@ -84,6 +113,9 @@ impl Shell {
     }
 
     pub fn cmd_grep(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(GREP_HELP_TEXT.to_string());
+        }
         let mut pattern: Option<String> = None;
         let mut files = Vec::new();
         let mut ignore_case = false;
@@ -121,11 +153,13 @@ impl Shell {
                             'l' => files_with_matches = true,
                             'o' => only_matching = true,
                             'w' => word_regexp = true,
-                            _ => {} // unknown flag, silently ignore
+                            _ => eprintln!("grep: warning: unsupported option '-{}'", ch),
                         }
                     }
                 }
-                _ if arg.starts_with('-') => {} // unknown single-char flags
+                _ if arg.starts_with('-') => {
+                    eprintln!("grep: warning: unsupported option '{}'", arg);
+                } // unknown single-char flags
                 _ if pattern.is_none() => pattern = Some(arg.to_string()),
                 _ => files.push(arg.to_string()),
             }
@@ -416,4 +450,50 @@ fn grep_lines(
     }
 
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_grep_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("grep", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_grep_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("grep", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_rg_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("rg", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_rg_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("rg", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
 }

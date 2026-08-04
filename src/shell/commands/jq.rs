@@ -4,8 +4,19 @@
 use crate::shell::{CommandOutput, Shell};
 use serde_json::Value;
 
+const JQ_HELP_TEXT: &str = "\
+jq: command-line JSON processor
+Usage: jq [OPTIONS] 'filter' [FILE]
+Options:
+  -r, --raw-output  Output raw strings (not JSON)
+  -h, --help        Show this help message
+";
+
 impl Shell {
     pub fn cmd_jq(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(JQ_HELP_TEXT.to_string());
+        }
         let mut raw_output = false;
         let mut filter = String::new();
 
@@ -13,7 +24,7 @@ impl Shell {
             match *arg {
                 "-r" | "--raw-output" => raw_output = true,
                 arg if !arg.starts_with('-') && filter.is_empty() => filter = arg.to_string(),
-                _ => {}
+                _ => eprintln!("jq: warning: unsupported option '{}'", arg),
             }
         }
 
@@ -192,4 +203,34 @@ fn apply_jq_array_op(value: &Value, op: &str) -> Vec<JqResult> {
     }
 
     return vec![JqResult::Value(value.clone())];
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_jq_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("jq", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_jq_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("jq", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
 }

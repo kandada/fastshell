@@ -10,6 +10,37 @@
 #[cfg(feature = "git")]
 use crate::shell::{CommandOutput, Shell};
 
+#[cfg(feature = "git")]
+const GIT_HELP_TEXT: &str = "\
+Usage: git <command> [<options>...]
+
+Available commands:
+  clone    Clone a repository
+  init     Initialize a new repository
+  status   Show working tree status
+  add      Add file contents to the index
+  commit   Record changes to the repository
+  push     Update remote refs along with associated objects
+  pull     Fetch from and integrate with another repository
+  fetch    Download objects and refs from another repository
+  log      Show commit logs
+  diff     Show changes between commits
+  checkout Switch branches or restore working tree files
+  branch   List, create, or delete branches
+  reset    Reset current HEAD to the specified state
+  stash    Stash the changes in a dirty working directory
+  remote   Manage set of tracked repositories
+  merge    Join two or more development histories together
+  rev-parse Pick out and massage parameters
+  show     Show various types of objects
+  rm       Remove files from the working tree and index
+  mv       Move or rename a file, directory, or symlink
+  restore  Restore working tree files
+  config   Get and set repository or global options
+  clean    Remove untracked files from the working tree
+
+  -h, --help  Show this help\n";
+
 /// Process-wide per-repository locks. Serializes git mutations on the same
 /// repository across ALL fastshell instances in the process (e.g. an agent
 /// task's sandbox instance and the app UI's global instance), preventing
@@ -34,8 +65,8 @@ fn repo_lock(path: &std::path::Path) -> std::sync::Arc<std::sync::Mutex<()>> {
 #[cfg(feature = "git")]
 impl Shell {
     pub fn cmd_git(&mut self, args: &[&str]) -> CommandOutput {
-        if args.is_empty() {
-            return CommandOutput::error("git: missing command\n".to_string(), 1);
+        if args.is_empty() || args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(GIT_HELP_TEXT.to_string());
         }
 
         // Android: OpenSSL's compiled-in CA paths (/usr/local/ssl) don't

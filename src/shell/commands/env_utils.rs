@@ -3,6 +3,21 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const BASENAME_HELP_TEXT: &str = "\
+Usage: basename PATH [SUFFIX]
+Strip directory and optionally suffix from filenames.
+
+  SUFFIX    remove trailing SUFFIX from the result
+  -h, --help  display this help and exit
+";
+
+const DIRNAME_HELP_TEXT: &str = "\
+Usage: dirname PATH
+Strip last component from file name.
+
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_env(&self, args: &[&str]) -> CommandOutput {
         let mut output = String::new();
@@ -49,6 +64,14 @@ impl Shell {
     }
 
     pub fn cmd_basename(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(BASENAME_HELP_TEXT.to_string());
+        }
+        for arg in args {
+            if arg.starts_with('-') {
+                eprintln!("basename: warning: unsupported option '{}'", arg);
+            }
+        }
         let files: Vec<&str> = args
             .iter()
             .filter(|a| !a.starts_with('-'))
@@ -80,6 +103,14 @@ impl Shell {
     }
 
     pub fn cmd_dirname(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(DIRNAME_HELP_TEXT.to_string());
+        }
+        for arg in args {
+            if arg.starts_with('-') {
+                eprintln!("dirname: warning: unsupported option '{}'", arg);
+            }
+        }
         let files: Vec<&str> = args
             .iter()
             .filter(|a| !a.starts_with('-'))
@@ -208,4 +239,53 @@ fn simple_printf(format: &str, args: &[&str]) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_env_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_basename_help() {
+        let mut s = mk_shell();
+        let out = s.execute("basename", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_basename_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("basename", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_dirname_help() {
+        let mut s = mk_shell();
+        let out = s.execute("dirname", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_dirname_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("dirname", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
 }

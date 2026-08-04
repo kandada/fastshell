@@ -134,7 +134,9 @@ impl Fastshell {
         let cancel = self.cancel_flag.clone();
         let cmd = command.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        std::thread::Builder::new()
+            .name("fastshell-exec".to_string())
+            .spawn(move || {
             if cancel.load(Ordering::SeqCst) {
                 let _ = tx.send(crate::shell::CommandOutput::error(
                     "cancelled".to_string(),
@@ -153,7 +155,7 @@ impl Fastshell {
             }
             let output = runtime.execute(&cmd);
             let _ = tx.send(output);
-        });
+        }).expect("fastshell-exec thread spawn failed");
 
         match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
             Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
@@ -196,7 +198,9 @@ impl Fastshell {
         let cmd = command.to_string();
         let dir = dir.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        std::thread::Builder::new()
+            .name("fastshell-exec-cwd".to_string())
+            .spawn(move || {
             if cancel.load(Ordering::SeqCst) {
                 let _ = tx.send(crate::shell::CommandOutput::error(
                     "cancelled".to_string(),
@@ -215,7 +219,7 @@ impl Fastshell {
             }
             let output = runtime.execute_with_cwd(&dir, &cmd);
             let _ = tx.send(output);
-        });
+        }).expect("fastshell-exec-cwd thread spawn failed");
 
         match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
             Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
@@ -551,7 +555,7 @@ mod tests {
     fn test_get_info() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.2.2");
+        assert_eq!(info.version, "0.3.0");
         assert!(!info.platform.is_empty());
     }
 
@@ -687,7 +691,7 @@ mod tests {
     fn test_sdk_info_includes_allow_subprocess() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.2.2");
+        assert_eq!(info.version, "0.3.0");
         assert!(info.allow_subprocess);
     }
 }

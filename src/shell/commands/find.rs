@@ -4,6 +4,31 @@
 use crate::shell::{CommandOutput, Shell};
 use std::time::SystemTime;
 
+const FIND_HELP_TEXT: &str = "\
+Usage: find [PATH] [OPTIONS] [EXPRESSION]
+
+Predicates:
+  -name PATTERN    File name matches shell pattern
+  -type [fdl]      File type: f=file, d=directory, l=symlink
+  -empty           File is empty
+  -mtime [+-]N     Modified time in days
+  -size [+-]N[c]   File size in bytes
+
+Actions:
+  -print           Print file path (default)
+  -print0          Print null-terminated
+  -delete          Delete matching files
+  -exec CMD {} \\;  Execute command per file
+  -exec CMD {} +   Execute command with batch
+
+Options:
+  -maxdepth N      Maximum recursion depth
+  -mindepth N      Minimum recursion depth
+  -o               OR conditions
+  !  -not          Negate condition
+
+  -h, --help       Show this help\n";
+
 #[derive(Debug, Clone)]
 enum ConditionKind {
     Name(String),
@@ -32,6 +57,9 @@ enum Action {
 
 impl Shell {
     pub fn cmd_find(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(FIND_HELP_TEXT.to_string());
+        }
         let mut path = ".".to_string();
         let mut path_set = false;
         let mut conditions: Vec<Vec<Condition>> = vec![vec![]];
@@ -164,7 +192,7 @@ impl Shell {
                     path = arg.to_string();
                     path_set = true;
                 }
-                _ => {}
+                _ => eprintln!("find: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -675,5 +703,21 @@ mod tests {
         let shell = mk_shell();
         let out = shell.cmd_find(&["/nonexistent_path_xyz"]);
         assert_ne!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn test_find_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("find", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_find_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("find", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

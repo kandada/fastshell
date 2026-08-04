@@ -140,6 +140,12 @@ char *fastshell_start_agent_server(void);
  * Returns JSON {"ok":true} or {"ok":false,"error":"..."}. */
 char *fastshell_submit_task(const char *task_id, const char *task_json);
 
+/* ── Inspection ─────────────────────────────────────────── */
+
+/* Returns a JSON string describing the shell features and capabilities
+ * supported by this build. The caller must free with fastshell_free_string(). */
+char *fastshell_get_features(void);
+
 /* ── Memory ─────────────────────────────────────────────── */
 
 /* Frees a string previously returned by any fastshell_* function. */

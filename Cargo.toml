@@ -3,7 +3,7 @@
 
 [package]
 name = "fastshell"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Lightweight Bash + Python runtime SDK for mobile AI agents"
 license = "Apache-2.0"
@@ -52,6 +52,8 @@ libc = "0.2"
 ureq = "2"
 rustls = "0.23"
 rustls-pki-types = "1"
+rustls-native-certs = "0.8"
+webpki-roots = "0.26"
 flate2 = "1"
 tar = "0.4"
 git2 = { version = "0.18", optional = true }

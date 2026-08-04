@@ -90,6 +90,10 @@ impl Shell {
                 unsafe {
                     libc::kill(proc.pid as i32, 15);
                 }
+                #[cfg(not(unix))]
+                {
+                    return CommandOutput::not_supported("killall (signal not available)");
+                }
             }
         }
         CommandOutput::success(String::new())

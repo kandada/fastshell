@@ -5,8 +5,21 @@ use crate::shell::{CommandOutput, Shell};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
+const PING_HELP_TEXT: &str = "\
+ping: TCP connectivity test
+Usage: ping [OPTIONS] <host>[:port]
+Options:
+  -c COUNT    Number of probes to send (default 4)
+  -W SEC      Timeout in seconds (default 2)
+  -q          Quiet output
+  -h, --help  Show this help message
+";
+
 impl Shell {
     pub fn cmd_ping(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(PING_HELP_TEXT.to_string());
+        }
         let mut count: usize = 4;
         let mut timeout_secs: u64 = 2;
         let mut quiet = false;
@@ -29,7 +42,7 @@ impl Shell {
                 }
                 "-q" => quiet = true,
                 arg if !arg.starts_with('-') => host = Some(arg.to_string()),
-                _ => {}
+                _ => eprintln!("ping: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -131,5 +144,35 @@ impl Shell {
         } else {
             CommandOutput::success(output)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_ping_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("ping", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_ping_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("ping", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

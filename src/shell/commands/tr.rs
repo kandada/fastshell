@@ -3,8 +3,21 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const TR_HELP_TEXT: &str = "\
+tr: translate or delete characters
+Usage: tr [OPTIONS] SET1 [SET2]
+Options:
+  -d          Delete characters in SET1
+  -s          Squeeze repeated characters
+  -c          Use complement of SET1
+  -h, --help  Show this help message
+";
+
 impl Shell {
     pub fn cmd_tr(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(TR_HELP_TEXT.to_string());
+        }
         let mut delete = false;
         let mut squeeze = false;
         let mut complement = false;
@@ -18,7 +31,7 @@ impl Shell {
                 "-c" => complement = true,
                 _ if !arg.starts_with('-') && set1.is_empty() => set1 = arg.to_string(),
                 _ if !arg.starts_with('-') && set2.is_empty() => set2 = arg.to_string(),
-                _ => {}
+                _ => eprintln!("tr: warning: unsupported option '{}'", arg),
             }
         }
 
@@ -175,4 +188,34 @@ fn unescape_tr(s: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_tr_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("tr", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_tr_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("tr", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
 }

@@ -3,8 +3,26 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const SQLITE3_HELP_TEXT: &str = "\
+sqlite3: SQLite command-line tool
+Usage: sqlite3 [OPTIONS] DATABASE [SQL]
+Options:
+  -csv               Set output mode to CSV
+  -header, -headers  Turn headers on
+  -line              Line output mode
+  -h, --help         Show this help message
+Dot-commands:
+  .tables   List tables
+  .schema   Show CREATE statements
+  .help     Show dot-command help
+  .quit     Exit
+";
+
 impl Shell {
     pub fn cmd_sqlite3(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(SQLITE3_HELP_TEXT.to_string());
+        }
         let mut db_path: Option<String> = None;
         let mut sql: Option<String> = None;
         let mut dot_command: Option<String> = None;
@@ -31,7 +49,7 @@ impl Shell {
                 arg if arg.starts_with('.') && dot_command.is_none() => {
                     dot_command = Some(arg.to_string());
                 }
-                _ => {}
+                _ => eprintln!("sqlite3: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -403,5 +421,21 @@ mod tests {
         shell.cmd_sqlite3(&["test.db", "DELETE FROM d WHERE id=1"], None);
         let out = shell.cmd_sqlite3(&["test.db", "SELECT count(*) FROM d"], None);
         assert!(out.stdout.contains("0"));
+    }
+
+    #[test]
+    fn test_sqlite3_help() {
+        let mut shell = setup();
+        let out = shell.execute("sqlite3", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_sqlite3_help_long() {
+        let mut shell = setup();
+        let out = shell.execute("sqlite3", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

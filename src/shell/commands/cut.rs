@@ -3,8 +3,22 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const CUT_HELP_TEXT: &str = "\
+cut: remove sections from each line
+Usage: cut [OPTIONS] [FILE...]
+Options:
+  -d DELIM    Use DELIM instead of TAB
+  -f LIST     Select only these fields
+  -c LIST     Select only these characters
+  --complement  Select complement of field/char set
+  -h, --help  Show this help message
+";
+
 impl Shell {
     pub fn cmd_cut(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(CUT_HELP_TEXT.to_string());
+        }
         let mut delimiter = '\t';
         let mut fields: Vec<FieldRange> = Vec::new();
         let mut char_mode = false;
@@ -45,7 +59,7 @@ impl Shell {
                     char_mode = true;
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+                _ => eprintln!("cut: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -182,4 +196,34 @@ fn parse_field_spec(spec: &str) -> Vec<FieldRange> {
         }
     }
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_cut_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("cut", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_cut_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("cut", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
 }

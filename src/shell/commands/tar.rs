@@ -4,8 +4,25 @@
 use crate::shell::{CommandOutput, Shell};
 use std::io::Read;
 
+const TAR_HELP_TEXT: &str = "\
+tar: tape archiver
+Usage: tar [OPTIONS] [FILE...]
+Options:
+  -c, --create     Create a new archive
+  -x, --extract    Extract files from archive
+  -t, --list       List archive contents
+  -z, --gzip       Filter archive through gzip
+  -f, --file FILE  Use archive file
+  -C, --directory  Change to directory
+  -v               Verbose (accepted, ignored)
+  -h, --help       Show this help message
+";
+
 impl Shell {
     pub fn cmd_tar(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(TAR_HELP_TEXT.to_string());
+        }
         let mut create = false;
         let mut extract = false;
         let mut list = false;
@@ -37,7 +54,7 @@ impl Shell {
                             }
                         }
                         'v' => {}
-                        _ => {}
+                        _ => eprintln!("tar: warning: unsupported option '-{}'", ch),
                     }
                 }
             } else if arg.starts_with("--") {
@@ -265,5 +282,35 @@ impl Shell {
         }
 
         CommandOutput::success(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shell::Shell;
+    use crate::vfs::Vfs;
+
+    fn mk_shell() -> Shell {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_tar_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("tar", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_tar_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("tar", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

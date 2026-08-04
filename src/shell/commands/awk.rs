@@ -4,8 +4,20 @@
 use crate::shell::{CommandOutput, Shell};
 use std::collections::HashMap;
 
+const AWK_HELP_TEXT: &str = "\
+awk: pattern scanning and processing language
+Usage: awk [OPTIONS] 'program' [FILE...]
+Options:
+  -F SEP      Set field separator character
+  -v VAR=VAL  Assign value to variable
+  -h, --help  Show this help message
+";
+
 impl Shell {
     pub fn cmd_awk(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(AWK_HELP_TEXT.to_string());
+        }
         let mut program: Option<String> = None;
         let mut files = Vec::new();
         let mut field_sep = ' ';
@@ -46,7 +58,7 @@ impl Shell {
                     program = Some(arg.to_string());
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+                _ => eprintln!("awk: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -1066,5 +1078,21 @@ mod tests {
         let shell = mk_shell();
         let out = shell.cmd_awk(&["{print \"len=\" length($0)}"], Some("hello\n"));
         assert_eq!(out.stdout, "len=5\n");
+    }
+
+    #[test]
+    fn test_awk_help() {
+        let mut shell = mk_shell();
+        let out = shell.execute("awk", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_awk_help_long() {
+        let mut shell = mk_shell();
+        let out = shell.execute("awk", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

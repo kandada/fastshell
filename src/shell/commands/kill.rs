@@ -3,8 +3,26 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const KILL_HELP_TEXT: &str = "\
+Usage: kill [OPTION]... PID...
+Send a signal to a process.
+
+  -s SIG    specify signal name (e.g. TERM, KILL)
+  -NUM      specify signal number (e.g. -9)
+  -SIGNAME  specify signal by name (e.g. -SIGTERM)
+  -l        list signal names
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_kill(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(KILL_HELP_TEXT.to_string());
+        }
+        if args.contains(&"-l") {
+            let signals = " 1) SIGHUP 2) SIGINT 3) SIGQUIT 4) SIGILL 5) SIGTRAP 6) SIGABRT 7) SIGBUS 8) SIGFPE 9) SIGKILL 10) SIGUSR1 11) SIGSEGV 12) SIGUSR2 13) SIGPIPE 14) SIGALRM 15) SIGTERM\n";
+            return CommandOutput::success(signals.to_string());
+        }
         if args.is_empty() {
             return CommandOutput::error(
                 "kill: usage: kill [-signal|-s signal] pid...\n".to_string(),
@@ -82,5 +100,46 @@ impl Shell {
         }
 
         CommandOutput::success(String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_kill_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_kill_help() {
+        let mut s = mk_shell();
+        let out = s.execute("kill", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_kill_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("kill", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_kill_list_signals() {
+        let mut s = mk_shell();
+        let out = s.execute("kill", &["-l"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("SIG"));
     }
 }

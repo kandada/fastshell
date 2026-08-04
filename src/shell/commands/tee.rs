@@ -3,8 +3,19 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const TEE_HELP_TEXT: &str = "\
+Usage: tee [OPTION]... [FILE]...
+Copy standard input to each FILE, and also to standard output.
+
+  -a         append to the given FILEs, do not overwrite
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_tee(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(TEE_HELP_TEXT.to_string());
+        }
         let mut append = false;
         let mut files = Vec::new();
 
@@ -12,7 +23,9 @@ impl Shell {
             match *arg {
                 "-a" => append = true,
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+                _ => {
+                    eprintln!("tee: warning: unsupported option '{}'", arg);
+                }
             }
         }
 
@@ -49,5 +62,38 @@ impl Shell {
         }
 
         CommandOutput::success(input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_tee_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_tee_help() {
+        let mut s = mk_shell();
+        let out = s.execute("tee", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_tee_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("tee", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

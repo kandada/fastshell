@@ -3,13 +3,34 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const MV_HELP_TEXT: &str = "\
+Usage: mv SOURCE... DEST
+Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.
+
+  -f       do not prompt before overwriting
+  -v       explain what is being done
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_mv(&self, args: &[&str]) -> CommandOutput {
-        let operands: Vec<&str> = args
-            .iter()
-            .filter(|a| !a.starts_with('-'))
-            .copied()
-            .collect();
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(MV_HELP_TEXT.to_string());
+        }
+        let mut force = false;
+        let mut verbose = false;
+        let mut operands: Vec<&str> = Vec::new();
+
+        for arg in args {
+            match *arg {
+                "-f" => force = true,
+                "-v" => verbose = true,
+                a if a.starts_with('-') => {
+                    eprintln!("mv: warning: unsupported option '{}'", a);
+                }
+                _ => operands.push(arg),
+            }
+        }
 
         if operands.len() < 2 {
             return CommandOutput::error("mv: missing file operand\n".to_string(), 1);
@@ -34,11 +55,49 @@ impl Shell {
                 dest.to_string()
             };
 
+            if verbose {
+                eprintln!("renamed {} -> {}", src, &dest_path);
+            }
             if let Err(e) = self.vfs.rename(src, &dest_path, &self.cwd) {
-                return CommandOutput::error(format!("mv: {}\n", e), 1);
+                if !force {
+                    return CommandOutput::error(format!("mv: {}\n", e), 1);
+                }
             }
         }
 
         CommandOutput::success(String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_mv_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_mv_help() {
+        let mut s = mk_shell();
+        let out = s.execute("mv", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_mv_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("mv", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }

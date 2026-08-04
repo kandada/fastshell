@@ -3,7 +3,7 @@
 
 use crate::sdk::plugin::DevicePlugin;
 use crate::vfs::Vfs;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -62,6 +62,18 @@ impl CommandOutput {
 pub struct Shell {
     pub vfs: Vfs,
     pub cwd: String,
+    pub prev_dir: String,
+    pub pid: u32,
+    pub positional: Vec<String>,
+    pub aliases: HashMap<String, String>,
+    pub functions: HashMap<String, String>,
+    pub vars: HashMap<String, String>,
+    pub exported: HashSet<String>,
+    pub pipefail: bool,
+    pub errexit: bool,
+    pub nounset: bool,
+    pub xtrace: bool,
+    pub noclobber: bool,
     pub allow_subprocess: bool,
     pub network_ask_permission: bool,
     pub permissions: Arc<Mutex<HashMap<String, bool>>>,
@@ -73,6 +85,18 @@ impl Shell {
         Shell {
             vfs,
             cwd: "/".to_string(),
+            prev_dir: String::new(),
+            pid: std::process::id(),
+            positional: Vec::new(),
+            aliases: HashMap::new(),
+            functions: HashMap::new(),
+            vars: HashMap::new(),
+            exported: HashSet::new(),
+            pipefail: false,
+            errexit: false,
+            nounset: false,
+            xtrace: false,
+            noclobber: false,
             allow_subprocess: true,
             network_ask_permission: false,
             permissions: Arc::new(Mutex::new(HashMap::new())),
@@ -89,6 +113,18 @@ impl Shell {
         Shell {
             vfs,
             cwd: "/".to_string(),
+            prev_dir: String::new(),
+            pid: std::process::id(),
+            positional: Vec::new(),
+            aliases: HashMap::new(),
+            functions: HashMap::new(),
+            vars: HashMap::new(),
+            exported: HashSet::new(),
+            pipefail: false,
+            errexit: false,
+            nounset: false,
+            xtrace: false,
+            noclobber: false,
             allow_subprocess,
             network_ask_permission,
             permissions,
@@ -107,6 +143,18 @@ impl Shell {
         Shell {
             vfs,
             cwd: "/".to_string(),
+            prev_dir: String::new(),
+            pid: std::process::id(),
+            positional: Vec::new(),
+            aliases: HashMap::new(),
+            functions: HashMap::new(),
+            vars: HashMap::new(),
+            exported: HashSet::new(),
+            pipefail: false,
+            errexit: false,
+            nounset: false,
+            xtrace: false,
+            noclobber: false,
             allow_subprocess,
             network_ask_permission,
             permissions,
@@ -181,6 +229,9 @@ impl Shell {
     pub fn execute(&mut self, command: &str, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         // (c) 2025 xiefujin <490021684@qq.com>
         match command {
+            "alias" => self.cmd_alias(args),
+            "unalias" => self.cmd_unalias(args),
+            "set" => self.cmd_set(args),
             "ls" => self.cmd_ls(args),
             "cd" => self.cmd_cd(args),
             "pwd" => self.cmd_pwd(args),
@@ -199,6 +250,8 @@ impl Shell {
             "rg" => self.cmd_rg(args, stdin),
             "tree" => self.cmd_tree(args),
             "echo" => self.cmd_echo(args),
+            "read" => self.cmd_read(args, stdin),
+            "eval" => self.cmd_eval(args),
             "touch" => self.cmd_touch(args),
             "chmod" => self.cmd_chmod(args),
             "kill" => self.cmd_kill(args),
@@ -222,6 +275,7 @@ impl Shell {
             "wc" => self.cmd_wc(args, stdin),
             "diff" => self.cmd_diff(args),
             "sed" => self.cmd_sed(args, stdin),
+            "source" | "." => self.cmd_source(args),
             "sort" => self.cmd_sort(args, stdin),
             "uniq" => self.cmd_uniq(args, stdin),
             "tee" => self.cmd_tee(args, stdin),
@@ -233,6 +287,7 @@ impl Shell {
             "sleep" => self.cmd_sleep(args),
             "date" => self.cmd_date(args),
             "true" => self.cmd_true(args),
+            "export" => self.cmd_export(args),
             "false" => self.cmd_false_(args),
             "[" | "test" => self.cmd_test(args),
             "base64" => self.cmd_base64(args, stdin),
@@ -242,7 +297,7 @@ impl Shell {
             "du" => self.cmd_du(args),
             "df" => self.cmd_df(args),
             "stat" => self.cmd_stat(args),
-            "jq" => self.cmd_jq(args, stdin),
+            "jq" | "json_pp" => self.cmd_jq(args, stdin),
             "env" => self.cmd_env(args),
             "printenv" => self.cmd_printenv(args),
             "printf" => self.cmd_printf(args, stdin),
@@ -374,6 +429,8 @@ impl Shell {
             "device" => self.cmd_device(args),
             "sqlite3" => self.cmd_sqlite3(args, stdin),
             "arecord" => self.cmd_record(args),
+            "declare" => self.cmd_declare(args),
+            "unset" => self.cmd_unset(args),
             _ => {
                 if self.allow_subprocess {
                     self.run_subprocess(command, args)
@@ -397,10 +454,14 @@ impl Shell {
             vfs_root.join(self.cwd.trim_start_matches('/'))
         };
 
-        match ProcessCommand::new(command)
-            .args(args)
-            .current_dir(&cwd)
-            .output()
+        let mut cmd = ProcessCommand::new(command);
+        cmd.args(args).current_dir(&cwd);
+        for key in &self.exported {
+            if let Some(val) = self.vars.get(key) {
+                cmd.env(key, val);
+            }
+        }
+        match cmd.output()
         {
             Ok(out) => {
                 let exit_code = if let Some(code) = out.status.code() {
@@ -416,9 +477,19 @@ impl Shell {
                         -1
                     }
                 };
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let mut stderr_out = stderr.to_string();
+                // Warn if binary output was lossy-converted
+                if stdout.contains('\u{FFFD}') || stderr.contains('\u{FFFD}') {
+                    if !stderr_out.is_empty() && !stderr_out.ends_with('\n') {
+                        stderr_out.push('\n');
+                    }
+                    stderr_out.push_str("[fastshell: non-UTF-8 bytes replaced with U+FFFD]\n");
+                }
                 CommandOutput {
-                    stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                    stdout: stdout.to_string(),
+                    stderr: stderr_out,
                     exit_code,
                 }
             }
@@ -507,6 +578,8 @@ pub(crate) fn http_request(
 ) -> Result<String, String> {
     let agent = ureq::AgentBuilder::new()
         .redirects(if follow_redirects { 10 } else { 0 })
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build();
 
     let response = match method {
@@ -2027,6 +2100,53 @@ mod tests {
 
         let out = shell.execute("git", &["branch"], None);
         assert!(!out.stdout.contains("temp"));
+    }
+
+    // ── Function management tests ─────────────────────────────
+
+    #[test]
+    fn test_cmd_declare_f() {
+        let mut shell = mk_shell();
+        shell.functions.insert("myfunc".to_string(), "echo hello".to_string());
+        let out = shell.cmd_declare(&["-f"]);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("myfunc"));
+        assert!(out.stdout.contains("echo hello"));
+    }
+
+    #[test]
+    fn test_cmd_declare_p() {
+        let mut shell = mk_shell();
+        shell.vars.insert("X".to_string(), "42".to_string());
+        let out = shell.cmd_declare(&["-p"]);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("X='42'"));
+    }
+
+    #[test]
+    fn test_cmd_unset_var() {
+        let mut shell = mk_shell();
+        shell.vars.insert("MYVAR".to_string(), "value".to_string());
+        let out = shell.cmd_unset(&["MYVAR"]);
+        assert_eq!(out.exit_code, 0);
+        assert!(!shell.vars.contains_key("MYVAR"));
+    }
+
+    #[test]
+    fn test_cmd_unset_function() {
+        let mut shell = mk_shell();
+        shell.functions.insert("myfn".to_string(), "echo hi".to_string());
+        let out = shell.cmd_unset(&["-f", "myfn"]);
+        assert_eq!(out.exit_code, 0);
+        assert!(!shell.functions.contains_key("myfn"));
+    }
+
+    #[test]
+    fn test_cmd_unset_missing() {
+        let mut shell = mk_shell();
+        let out = shell.cmd_unset(&["NONEXISTENT"]);
+        assert_ne!(out.exit_code, 0);
+        assert!(out.stderr.contains("not found"));
     }
 }
 // (will remove)

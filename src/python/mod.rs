@@ -275,26 +275,14 @@ impl PythonEngine for SubprocessPython {
     }
 
     fn execute_script(&mut self, script_path: &Path, cwd: &Path) -> ExecutionResult {
-        if !self.available {
-            return ExecutionResult::error(
-                "Python is not available on this system".to_string(),
-                127,
-            );
-        }
-
-        match Command::new(&self.python_bin)
-            .arg(script_path)
-            .current_dir(cwd)
-            .env("FASTSHELL_ROOT", cwd)
-            .output()
-        {
-            Ok(out) => ExecutionResult {
-                stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-                exit_code: out.status.code().unwrap_or(-1),
-            },
-            Err(e) => ExecutionResult::error(format!("Failed to run python: {}", e), 127),
-        }
+        let code = match std::fs::read_to_string(script_path) {
+            Ok(c) => c,
+            Err(e) => return ExecutionResult::error(
+                format!("python3: can't open file '{}': {}\n", script_path.display(), e),
+                2,
+            ),
+        };
+        self.execute(&code, cwd)
     }
 
     fn is_available(&self) -> bool {

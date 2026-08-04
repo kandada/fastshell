@@ -21,6 +21,74 @@
 #include <pthread.h>
 #include "fastshell.h"
 
+/* ── UTF-8 <-> UTF-16 helpers (avoids JNI Modified UTF-8 corruption) ─ */
+
+static jstring utf8_to_jstring(JNIEnv *env, const char *utf8) {
+    if (utf8 == NULL) return NULL;
+    size_t n = strlen(utf8);
+    if (n == 0) return utf8_to_jstring(env, "");
+    jsize out_len = 0;
+    const unsigned char *p = (const unsigned char *)utf8;
+    size_t i = 0;
+    while (i < n) {
+        if (p[i] < 0x80) { i += 1; out_len += 1; }
+        else if ((p[i] & 0xE0) == 0xC0) { i += 2; out_len += 1; }
+        else if ((p[i] & 0xF0) == 0xE0) { i += 3; out_len += 1; }
+        else if ((p[i] & 0xF8) == 0xF0) { i += 4; out_len += 2; }
+        else { i += 1; out_len += 1; }
+    }
+    jchar *buf = (jchar *)malloc((size_t)out_len * sizeof(jchar));
+    if (buf == NULL) return utf8_to_jstring(env, utf8);
+    p = (const unsigned char *)utf8;
+    i = 0; jsize j = 0;
+    while (i < n && j < out_len) {
+        unsigned int cp;
+        if (p[i] < 0x80) { cp = p[i]; i += 1; }
+        else if ((p[i] & 0xE0) == 0xC0 && i + 1 < n) { cp = ((p[i] & 0x1F) << 6) | (p[i+1] & 0x3F); i += 2; }
+        else if ((p[i] & 0xF0) == 0xE0 && i + 2 < n) { cp = ((p[i] & 0x0F) << 12) | ((p[i+1] & 0x3F) << 6) | (p[i+2] & 0x3F); i += 3; }
+        else if ((p[i] & 0xF8) == 0xF0 && i + 3 < n) { cp = ((p[i] & 0x07) << 18) | ((p[i+1] & 0x3F) << 12) | ((p[i+2] & 0x3F) << 6) | (p[i+3] & 0x3F); i += 4; }
+        else { cp = p[i]; i += 1; }
+        if (cp <= 0xFFFF) { buf[j++] = (jchar)cp; }
+        else { cp -= 0x10000; buf[j++] = (jchar)(0xD800 | (cp >> 10)); if (j < out_len) buf[j++] = (jchar)(0xDC00 | (cp & 0x3FF)); }
+    }
+    out_len = j;
+    jstring result = (*env)->NewString(env, buf, out_len);
+    free(buf);
+    if (result != NULL) return result;
+    return utf8_to_jstring(env, utf8);
+}
+
+static char *jstring_to_utf8(JNIEnv *env, jstring str) {
+    if (str == NULL) return NULL;
+    const jchar *chars = (*env)->GetStringChars(env, str, NULL);
+    if (chars == NULL) {
+        char *u = jstring_to_utf8(env, str);
+        if (u == NULL) return NULL;
+        char *result = strdup(u);
+        free(u);
+        return result;
+    }
+    jsize len = (*env)->GetStringLength(env, str);
+    size_t cap = (size_t)len * 4 + 1;
+    char *buf = (char *)malloc(cap);
+    if (buf == NULL) { (*env)->ReleaseStringChars(env, str, chars); return NULL; }
+    size_t j = 0;
+    for (jsize i = 0; i < len; i++) {
+        unsigned int cp = (unsigned int)chars[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < len) {
+            unsigned int lo = (unsigned int)chars[i+1];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i++; }
+        }
+        if (cp < 0x80) { buf[j++] = (char)cp; }
+        else if (cp < 0x800) { buf[j++] = (char)(0xC0 | (cp >> 6)); buf[j++] = (char)(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) { buf[j++] = (char)(0xE0 | (cp >> 12)); buf[j++] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[j++] = (char)(0x80 | (cp & 0x3F)); }
+        else { buf[j++] = (char)(0xF0 | (cp >> 18)); buf[j++] = (char)(0x80 | ((cp >> 12) & 0x3F)); buf[j++] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[j++] = (char)(0x80 | (cp & 0x3F)); }
+    }
+    buf[j] = '\0';
+    (*env)->ReleaseStringChars(env, str, chars);
+    return buf;
+}
+
 /* ── aacode-rs native agent C ABI (exported from libaacode_rs.a) ────── */
 
 typedef void (*aacode_stream_callback)(const char *line);
@@ -141,7 +209,7 @@ static stream_trampoline_ctx *get_inline_ctx(void) {
 static void inline_trampoline(const char *chunk) {
     stream_trampoline_ctx *ctx = get_inline_ctx();
     if (ctx == NULL || chunk == NULL || ctx->cb == NULL || ctx->mid == NULL) return;
-    jstring jc = (*ctx->env)->NewStringUTF(ctx->env, chunk);
+    jstring jc = utf8_to_jstring(ctx->env, chunk);
     if (jc == NULL) { if ((*ctx->env)->ExceptionCheck(ctx->env)) (*ctx->env)->ExceptionClear(ctx->env); return; }
     (*ctx->env)->CallVoidMethod(ctx->env, ctx->cb, ctx->mid, jc);
     if ((*ctx->env)->ExceptionCheck(ctx->env)) (*ctx->env)->ExceptionClear(ctx->env);
@@ -166,7 +234,7 @@ static void stream_trampoline(const char *chunk) {
         return;
     }
 
-    jstring jchunk = (*env)->NewStringUTF(env, chunk);
+    jstring jchunk = utf8_to_jstring(env, chunk);
     if (jchunk == NULL) {
         // OutOfMemoryError — clear and continue
         if ((*env)->ExceptionCheck(env)) {
@@ -188,12 +256,12 @@ static void stream_trampoline(const char *chunk) {
  * the Rust-owned buffer. Handles NULL results defensively. */
 static jstring forward_str_in_str_out(JNIEnv *env, jstring arg,
                                       char *(*fn)(const char *)) {
-    const char *carg = (arg != NULL) ? (*env)->GetStringUTFChars(env, arg, NULL) : NULL;
+    char *carg = (arg != NULL) ? jstring_to_utf8(env, arg) : NULL;
     char *result = fn(carg);
     if (arg != NULL) {
-        (*env)->ReleaseStringUTFChars(env, arg, carg);
+        free(carg);
     }
-    jstring jresult = (*env)->NewStringUTF(env, result != NULL ? result : "");
+    jstring jresult = utf8_to_jstring(env, result != NULL ? result : "");
     if (result != NULL) {
         fastshell_free_string(result);
     }
@@ -218,12 +286,12 @@ Java_com_fastshell_Sdk_nativeExecute(JNIEnv *env, jclass cls, jstring command) {
 JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeExecuteIn(JNIEnv *env, jclass cls, jstring dir, jstring command) {
     (void)cls;
-    const char *cdir = (dir != NULL) ? (*env)->GetStringUTFChars(env, dir, NULL) : NULL;
-    const char *ccmd = (command != NULL) ? (*env)->GetStringUTFChars(env, command, NULL) : NULL;
+    char *cdir = (dir != NULL) ? jstring_to_utf8(env, dir) : NULL;
+    char *ccmd = (command != NULL) ? jstring_to_utf8(env, command) : NULL;
     char *result = fastshell_execute_in(cdir, ccmd);
-    if (dir != NULL) (*env)->ReleaseStringUTFChars(env, dir, cdir);
-    if (command != NULL) (*env)->ReleaseStringUTFChars(env, command, ccmd);
-    jstring jresult = (*env)->NewStringUTF(env, result != NULL ? result : "");
+    if (dir != NULL) free(cdir);
+    if (command != NULL) free(ccmd);
+    jstring jresult = utf8_to_jstring(env, result != NULL ? result : "");
     if (result != NULL) fastshell_free_string(result);
     return jresult;
 }
@@ -244,7 +312,7 @@ JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeGetCwd(JNIEnv *env, jclass cls) {
     (void)cls;
     char *result = fastshell_get_cwd();
-    jstring jresult = (*env)->NewStringUTF(env, result != NULL ? result : "/");
+    jstring jresult = utf8_to_jstring(env, result != NULL ? result : "/");
     if (result != NULL) {
         fastshell_free_string(result);
     }
@@ -255,10 +323,10 @@ JNIEXPORT void JNICALL
 Java_com_fastshell_Sdk_nativeSetPermission(JNIEnv *env, jclass cls,
                                            jstring resource, jboolean allowed) {
     (void)cls;
-    const char *cres = (resource != NULL) ? (*env)->GetStringUTFChars(env, resource, NULL) : NULL;
+    char *cres = (resource != NULL) ? jstring_to_utf8(env, resource) : NULL;
     fastshell_set_permission(cres, allowed ? 1 : 0);
     if (resource != NULL) {
-        (*env)->ReleaseStringUTFChars(env, resource, cres);
+        free(cres);
     }
 }
 
@@ -273,7 +341,7 @@ JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeStartAgentServer(JNIEnv *env, jclass cls) {
     (void)cls;
     char *result = fastshell_start_agent_server();
-    jstring jresult = (*env)->NewStringUTF(env, result ? result : "{\"ok\":false,\"error\":\"null result\"}");
+    jstring jresult = utf8_to_jstring(env, result ? result : "{\"ok\":false,\"error\":\"null result\"}");
     if (result) fastshell_free_string(result);
     return jresult;
 }
@@ -282,12 +350,12 @@ JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeSubmitTask(JNIEnv *env, jclass cls,
                                         jstring task_id, jstring task_json) {
     (void)cls;
-    const char *cid = (*env)->GetStringUTFChars(env, task_id, NULL);
-    const char *cjson = (*env)->GetStringUTFChars(env, task_json, NULL);
+    char *cid = jstring_to_utf8(env, task_id);
+    char *cjson = jstring_to_utf8(env, task_json);
     char *result = fastshell_submit_task(cid, cjson);
-    (*env)->ReleaseStringUTFChars(env, task_id, cid);
-    (*env)->ReleaseStringUTFChars(env, task_json, cjson);
-    jstring jresult = (*env)->NewStringUTF(env, result ? result : "{\"ok\":false,\"error\":\"null result\"}");
+    free(cid);
+    free(cjson);
+    jstring jresult = utf8_to_jstring(env, result ? result : "{\"ok\":false,\"error\":\"null result\"}");
     if (result) fastshell_free_string(result);
     return jresult;
 }
@@ -348,8 +416,8 @@ static char *device_trampoline(const char *method, const char *args_json) {
         return strdup("{\"ok\":false,\"error\":\"no JNI env\"}");
     }
 
-    jstring jmethod = (*env)->NewStringUTF(env, method ? method : "");
-    jstring jargs = (*env)->NewStringUTF(env, args_json ? args_json : "{}");
+    jstring jmethod = utf8_to_jstring(env, method ? method : "");
+    jstring jargs = utf8_to_jstring(env, args_json ? args_json : "{}");
     if (jmethod == NULL || jargs == NULL) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         if (jmethod) (*env)->DeleteLocalRef(env, jmethod);
@@ -371,9 +439,9 @@ static char *device_trampoline(const char *method, const char *args_json) {
         return strdup("{\"ok\":false,\"error\":\"device dispatch returned null\"}");
     }
 
-    const char *utf = (*env)->GetStringUTFChars(env, jresult, NULL);
+    char *utf = jstring_to_utf8(env, jresult);
     char *out = strdup(utf ? utf : "{\"ok\":false,\"error\":\"utf\"}");
-    if (utf) (*env)->ReleaseStringUTFChars(env, jresult, utf);
+    if (utf) free(utf);
     (*env)->DeleteLocalRef(env, jresult);
     return out;
 }
@@ -439,10 +507,10 @@ Java_com_fastshell_Sdk_nativeAgentRegisterStreamCallback(JNIEnv *env, jclass cls
 JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeAgentRunTask(JNIEnv *env, jclass cls, jstring task_json) {
     (void)cls;
-    const char *json = (*env)->GetStringUTFChars(env, task_json, NULL);
+    char *json = jstring_to_utf8(env, task_json);
     char *result = aacode_run_task(json);
-    (*env)->ReleaseStringUTFChars(env, task_json, json);
-    jstring js = (*env)->NewStringUTF(env, result ? result : "{\"status\":\"error\",\"error\":\"null result\"}");
+    free(json);
+    jstring js = utf8_to_jstring(env, result ? result : "{\"status\":\"error\",\"error\":\"null result\"}");
     if (result) aacode_free_string(result);
     return js;
 }
@@ -456,7 +524,7 @@ JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeAgentRunTaskWithCallback(JNIEnv *env, jclass cls,
     jstring task_json, jobject callback) {
     (void)cls;
-    const char *json = (*env)->GetStringUTFChars(env, task_json, NULL);
+    char *json = jstring_to_utf8(env, task_json);
 
     stream_trampoline_ctx ctx;
     ctx.env = env;
@@ -472,9 +540,18 @@ Java_com_fastshell_Sdk_nativeAgentRunTaskWithCallback(JNIEnv *env, jclass cls,
     char *result = aacode_run_task_with_cb(json, ctx.mid ? inline_trampoline : NULL);
     set_inline_ctx(NULL);
 
-    (*env)->ReleaseStringUTFChars(env, task_json, json);
-    jstring js = (*env)->NewStringUTF(env, result ? result : "{\"status\":\"error\",\"error\":\"null result\"}");
+    free(json);
+    jstring js = utf8_to_jstring(env, result ? result : "{\"status\":\"error\",\"error\":\"null result\"}");
     if (result) aacode_free_string(result);
+    return js;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_fastshell_Sdk_nativeGetFeatures(JNIEnv *env, jclass cls) {
+    (void)cls;
+    char *result = fastshell_get_features();
+    jstring js = utf8_to_jstring(env, result ? result : "{}");
+    if (result) fastshell_free_string(result);
     return js;
 }
 
@@ -489,18 +566,18 @@ JNIEXPORT void JNICALL
 Java_com_fastshell_Sdk_nativeAgentCancelTask(JNIEnv *env, jclass cls, jstring task_id) {
     (void)cls;
     if (task_id == NULL) return;
-    const char *tid = (*env)->GetStringUTFChars(env, task_id, NULL);
+    char *tid = jstring_to_utf8(env, task_id);
     aacode_cancel_task(tid);
-    (*env)->ReleaseStringUTFChars(env, task_id, tid);
+    free(tid);
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeAgentValidateApiKey(JNIEnv *env, jclass cls, jstring config_json) {
     (void)cls;
-    const char *json = (*env)->GetStringUTFChars(env, config_json, NULL);
+    char *json = jstring_to_utf8(env, config_json);
     char *result = aacode_validate_api_key(json);
-    (*env)->ReleaseStringUTFChars(env, config_json, json);
-    jstring js = (*env)->NewStringUTF(env, result ? result : "{\"valid\":false}");
+    free(json);
+    jstring js = utf8_to_jstring(env, result ? result : "{\"valid\":false}");
     if (result) aacode_free_string(result);
     return js;
 }
@@ -508,10 +585,10 @@ Java_com_fastshell_Sdk_nativeAgentValidateApiKey(JNIEnv *env, jclass cls, jstrin
 JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeAgentListSessions(JNIEnv *env, jclass cls, jstring project_path) {
     (void)cls;
-    const char *pp = (*env)->GetStringUTFChars(env, project_path, NULL);
+    char *pp = jstring_to_utf8(env, project_path);
     char *result = aacode_list_sessions(pp);
-    (*env)->ReleaseStringUTFChars(env, project_path, pp);
-    jstring js = (*env)->NewStringUTF(env, result ? result : "[]");
+    free(pp);
+    jstring js = utf8_to_jstring(env, result ? result : "[]");
     if (result) aacode_free_string(result);
     return js;
 }
@@ -519,12 +596,12 @@ Java_com_fastshell_Sdk_nativeAgentListSessions(JNIEnv *env, jclass cls, jstring 
 JNIEXPORT jstring JNICALL
 Java_com_fastshell_Sdk_nativeAgentGetSessionMessages(JNIEnv *env, jclass cls, jstring project_path, jstring session_id) {
     (void)cls;
-    const char *pp = (*env)->GetStringUTFChars(env, project_path, NULL);
-    const char *sid = (*env)->GetStringUTFChars(env, session_id, NULL);
+    char *pp = jstring_to_utf8(env, project_path);
+    char *sid = jstring_to_utf8(env, session_id);
     char *result = aacode_get_session_messages(pp, sid);
-    (*env)->ReleaseStringUTFChars(env, project_path, pp);
-    (*env)->ReleaseStringUTFChars(env, session_id, sid);
-    jstring js = (*env)->NewStringUTF(env, result ? result : "[]");
+    free(pp);
+    free(sid);
+    jstring js = utf8_to_jstring(env, result ? result : "[]");
     if (result) aacode_free_string(result);
     return js;
 }

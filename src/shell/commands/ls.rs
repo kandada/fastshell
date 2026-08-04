@@ -5,8 +5,26 @@ use crate::shell::{CommandOutput, Shell};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+const LS_HELP_TEXT: &str = "\
+Usage: ls [OPTION]... [FILE]...
+List information about the FILEs (the current directory by default).
+
+  -l  use a long listing format
+  -a  do not ignore entries starting with .
+  -h  with -l, print sizes in human readable format
+  -R  list subdirectories recursively
+  -t  sort by modification time, newest first
+  -S  sort by file size, largest first
+  -r  reverse order while sorting
+  -1  list one file per line
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_ls(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(LS_HELP_TEXT.to_string());
+        }
         let mut show_all = false;
         let mut long_format = false;
         let mut human_readable = false;
@@ -14,6 +32,7 @@ impl Shell {
         let mut sort_time = false;
         let mut sort_size = false;
         let mut reverse = false;
+        let mut single_column = false;
         let mut paths: Vec<&str> = Vec::new();
 
         for arg in args {
@@ -27,7 +46,8 @@ impl Shell {
                         't' => sort_time = true,
                         'S' => sort_size = true,
                         'r' => reverse = true,
-                        _ => {}
+                        '1' => single_column = true,
+                        _ => eprintln!("ls: warning: unsupported option '-{}'", ch),
                     }
                 }
             } else {
@@ -53,11 +73,12 @@ impl Shell {
             }
         }
         let multi = paths.len() > 1;
+        let use_long = long_format && !single_column;
 
         for path in &file_paths {
             if let Ok(target) = self.vfs.resolve(path, &self.cwd) {
-                if long_format {
-                    if let Some(s) = self.format_ls_entry(&target, long_format, human_readable) {
+                if use_long {
+                    if let Some(s) = self.format_ls_entry(&target, true, human_readable) {
                         output.push_str(&s);
                     }
                 } else {
@@ -81,7 +102,7 @@ impl Shell {
             };
 
             self.ls_list_dir(
-                path, &target, show_all, long_format, human_readable,
+                path, &target, show_all, use_long, human_readable,
                 recursive, sort_time, sort_size, reverse, &mut output,
             );
         }
@@ -220,5 +241,49 @@ impl Shell {
             "{}{} {:>8} {} {}\n",
             file_type, mode, size, modified, name
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_ls_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_ls_help() {
+        let mut s = mk_shell();
+        let out = s.execute("ls", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_ls_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("ls", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_ls_1_flag() {
+        let mut s = mk_shell();
+        s.vfs.write("a.txt", "", "hello").unwrap();
+        s.vfs.write("b.txt", "", "world").unwrap();
+        let out = s.execute("ls", &["-1"], None);
+        assert_eq!(out.exit_code, 0);
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 2);
     }
 }

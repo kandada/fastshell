@@ -3,8 +3,20 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const RM_HELP_TEXT: &str = "\
+Usage: rm [OPTION]... FILE...
+Remove (unlink) the FILE(s).
+
+  -r, -R  remove directories and their contents recursively
+  -f      ignore nonexistent files and arguments, never prompt
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_rm(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(RM_HELP_TEXT.to_string());
+        }
         let mut recursive = false;
         let mut force = false;
         let mut targets = Vec::new();
@@ -17,7 +29,9 @@ impl Shell {
                     recursive = true;
                     force = true;
                 }
-                _ if arg.starts_with('-') => {}
+                _ if arg.starts_with('-') => {
+                    eprintln!("rm: warning: unsupported option '{}'", arg);
+                }
                 _ => targets.push(arg.to_string()),
             }
         }
@@ -67,5 +81,38 @@ impl Shell {
         }
 
         CommandOutput::success(String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_rm_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_rm_help() {
+        let mut s = mk_shell();
+        let out = s.execute("rm", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_rm_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("rm", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.stdout.is_empty());
     }
 }
