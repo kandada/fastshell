@@ -2,6 +2,7 @@
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
 use crate::shell::{CommandOutput, Shell};
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 const FIND_HELP_TEXT: &str = "\
@@ -303,6 +304,9 @@ impl Shell {
         let entries = self.vfs.list_dir(path, &self.cwd)?;
 
         for entry in &entries {
+            if self.cancel.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             let entry_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
 
             if entry.is_dir {

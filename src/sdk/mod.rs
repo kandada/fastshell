@@ -33,22 +33,22 @@ impl Fastshell {
     pub fn new() -> Self {
         let permissions = Arc::new(Mutex::new(HashMap::new()));
         let plugin = Arc::new(Mutex::new(None));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
         let vfs = Vfs::new(std::env::temp_dir().join("fastshell")).unwrap_or_else(|_| {
             // Fallback: use /tmp/fastshell if temp dir creation fails
             Vfs::new(std::path::PathBuf::from("/tmp/fastshell"))
                 .expect("VFS should always be creatable with /tmp fallback")
         });
         // (c) 2025 xiefujin <490021684@qq.com>
+        let mut shell = Shell::with_plugin(vfs, true, false, permissions.clone(), plugin.clone());
+        shell.set_cancel_flag(cancel_flag.clone());
         Fastshell {
-            runtime: Arc::new(Mutex::new(Runtime::new(
-                Shell::with_plugin(vfs, true, false, permissions.clone(), plugin.clone()),
-                None,
-            ))),
+            runtime: Arc::new(Mutex::new(Runtime::new(shell, None))),
             config: Config::default(),
             initialized: false,
             env_vars: std::collections::HashMap::new(),
             permissions,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            cancel_flag,
             plugin_ref: plugin,
         }
     }
@@ -86,13 +86,16 @@ impl Fastshell {
         let inherited = self.plugin_ref.lock().unwrap().take()
             .or_else(crate::sdk::device_callback::global_device_plugin);
         let plugin = Arc::new(Mutex::new(inherited));
-        let shell = Shell::with_plugin(
+        let mut shell = Shell::with_plugin(
             vfs,
             config.allow_subprocess,
             config.network_ask_permission,
             permissions.clone(),
             plugin.clone(),
         );
+        // Share the SDK cancel flag with the shell engine so cooperative
+        // cancellation works end-to-end (SDK → Runtime → Shell → builtins).
+        shell.set_cancel_flag(self.cancel_flag.clone());
 
         let python: Option<Box<dyn PythonEngine>> = if config.python_enabled {
             Some(python::detect_python_engine(&sandbox_path))
@@ -137,14 +140,24 @@ impl Fastshell {
         std::thread::Builder::new()
             .name("fastshell-exec".to_string())
             .spawn(move || {
-            if cancel.load(Ordering::SeqCst) {
-                let _ = tx.send(crate::shell::CommandOutput::error(
-                    "cancelled".to_string(),
-                    143,
-                ));
-                return;
-            }
-            let mut runtime = rt.lock().unwrap_or_else(|e| e.into_inner());
+            // Poll try_lock so we can still respond to cancel requests even
+            // when a previous orphan thread is still holding the lock.
+            let mut runtime = loop {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = tx.send(crate::shell::CommandOutput::error(
+                        "cancelled".to_string(),
+                        143,
+                    ));
+                    return;
+                }
+                match rt.try_lock() {
+                    Ok(r) => break r,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                }
+            };
             if cancel.load(Ordering::SeqCst) {
                 drop(runtime);
                 let _ = tx.send(crate::shell::CommandOutput::error(
@@ -158,6 +171,68 @@ impl Fastshell {
         }).expect("fastshell-exec thread spawn failed");
 
         match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+            Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.cancel_flag.store(true, Ordering::SeqCst);
+                CommandResult {
+                    stdout: String::new(),
+                    stderr: "command timed out\n".to_string(),
+                    exit_code: 124,
+                }
+            }
+            Err(_) => CommandResult::error("internal error".to_string()),
+        }
+    }
+
+    /// Execute a command with a per-call timeout override (milliseconds).
+    /// When `per_call_timeout_ms` is `Some`, it overrides
+    /// `self.config.command_timeout_ms` for this single invocation.
+    pub fn execute_with_timeout(
+        &self,
+        command: &str,
+        per_call_timeout_ms: u64,
+    ) -> CommandResult {
+        if !self.initialized {
+            return CommandResult::error("SDK not initialized. Call init() first.".to_string());
+        }
+
+        self.cancel_flag.store(false, Ordering::SeqCst);
+        let rt = self.runtime.clone();
+        let cancel = self.cancel_flag.clone();
+        let cmd = command.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("fastshell-exec-tw".to_string())
+            .spawn(move || {
+            let mut runtime = loop {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = tx.send(crate::shell::CommandOutput::error(
+                        "cancelled".to_string(),
+                        143,
+                    ));
+                    return;
+                }
+                match rt.try_lock() {
+                    Ok(r) => break r,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                }
+            };
+            if cancel.load(Ordering::SeqCst) {
+                drop(runtime);
+                let _ = tx.send(crate::shell::CommandOutput::error(
+                    "cancelled".to_string(),
+                    143,
+                ));
+                return;
+            }
+            let output = runtime.execute(&cmd);
+            let _ = tx.send(output);
+        }).expect("fastshell-exec-tw thread spawn failed");
+
+        match rx.recv_timeout(Duration::from_millis(per_call_timeout_ms)) {
             Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 self.cancel_flag.store(true, Ordering::SeqCst);
@@ -201,14 +276,22 @@ impl Fastshell {
         std::thread::Builder::new()
             .name("fastshell-exec-cwd".to_string())
             .spawn(move || {
-            if cancel.load(Ordering::SeqCst) {
-                let _ = tx.send(crate::shell::CommandOutput::error(
-                    "cancelled".to_string(),
-                    143,
-                ));
-                return;
-            }
-            let mut runtime = rt.lock().unwrap_or_else(|e| e.into_inner());
+            let mut runtime = loop {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = tx.send(crate::shell::CommandOutput::error(
+                        "cancelled".to_string(),
+                        143,
+                    ));
+                    return;
+                }
+                match rt.try_lock() {
+                    Ok(r) => break r,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                }
+            };
             if cancel.load(Ordering::SeqCst) {
                 drop(runtime);
                 let _ = tx.send(crate::shell::CommandOutput::error(

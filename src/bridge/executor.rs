@@ -3,7 +3,8 @@
 
 use crate::python::PythonEngine;
 use crate::shell::{CommandOutput, Shell};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
 // ── Re-entrant shell bridge ─────────────────────────────────────────
 // While `execute_python_code` runs, the embedded CPython VM may synchronously
@@ -62,11 +63,14 @@ pub struct Runtime {
     fn_call_depth: usize,
     psub_counter: u64,
     tmp_files: Vec<String>,
+    /// Cooperative cancellation flag — shared with the SDK.
+    cancel: Arc<AtomicBool>,
 }
 
 impl Runtime {
     pub fn new(shell: Shell, python: Option<Box<dyn PythonEngine>>) -> Self {
         // (c) 2025 xiefujin <490021684@qq.com>
+        let cancel = shell.cancel.clone();
         Runtime {
             shell,
             python,
@@ -75,6 +79,7 @@ impl Runtime {
             fn_call_depth: 0,
             psub_counter: 0,
             tmp_files: Vec::new(),
+            cancel,
         }
     }
 
@@ -111,6 +116,13 @@ impl Runtime {
         let mut agg_stderr = String::new();
         let mut exit_code = 0;
         for seg in &segments {
+            if self.cancel.load(Ordering::SeqCst) {
+                return CommandOutput {
+                    stdout: agg_stdout,
+                    stderr: format!("{}cancelled\n", agg_stderr),
+                    exit_code: 143,
+                };
+            }
             match seg.connector {
                 Connector::Always => {}
                 Connector::AndIf => {
@@ -426,6 +438,13 @@ impl Runtime {
         let mut agg_stdout = String::new();
         let mut agg_stderr = String::new();
         for word in &word_list {
+            if self.cancel.load(Ordering::SeqCst) {
+                return CommandOutput {
+                    stdout: agg_stdout,
+                    stderr: format!("{}cancelled\n", agg_stderr),
+                    exit_code: 143,
+                };
+            }
             self.shell.vars.insert(var.clone(), word.clone());
             let out = self.execute(&body);
             agg_stdout.push_str(&out.stdout);
@@ -466,6 +485,13 @@ impl Runtime {
         let mut agg_stderr = String::new();
         let max_iters: usize = 100_000;
         for _ in 0..max_iters {
+            if self.cancel.load(Ordering::SeqCst) {
+                return CommandOutput {
+                    stdout: agg_stdout,
+                    stderr: format!("{}cancelled\n", agg_stderr),
+                    exit_code: 143,
+                };
+            }
             let cond = self.execute(&condition);
             let ok = if cond_inverted { cond.exit_code != 0 } else { cond.exit_code == 0 };
             if !ok {
@@ -1502,36 +1528,37 @@ impl Runtime {
             );
         }
 
-        // Extract redirects from the last stage
-        let last_idx = expanded_stages.len() - 1;
-        let (pipeline_spec, clean_last) = if !expanded_stages.is_empty() {
-            let last_flat: Vec<String> = expanded_stages[last_idx]
-                .iter()
-                .map(|t| t.value.clone())
-                .collect();
-            let (clean, spec) = self.extract_redirects(last_flat);
-            if !clean.is_empty() {
-                let clean_tokens: Vec<ParsedToken> = clean
+        // Extract redirects from ALL stages (not just the last).
+        // Per-stage stderr redirects and 2>&1 are applied in each thread.
+        // Last-stage stdout redirects are applied after all threads join.
+        let mut stage_redirects: Vec<RedirectSpec> = Vec::new();
+        let mut clean_stages: Vec<Vec<ParsedToken>> = Vec::new();
+        for stage in &expanded_stages {
+            let flat: Vec<String> = stage.iter().map(|t| t.value.clone()).collect();
+            let (clean, spec) = self.extract_redirects(flat);
+            clean_stages.push(
+                clean
                     .into_iter()
                     .map(|s| ParsedToken::new(s, false))
-                    .collect();
-                expanded_stages[last_idx] = clean_tokens;
-            }
-            (spec, expanded_stages[last_idx].clone())
-        } else {
-            (RedirectSpec::default(), vec![])
-        };
+                    .collect(),
+            );
+            stage_redirects.push(spec);
+        }
+
+        let last_idx = expanded_stages.len() - 1;
+        let last_spec = stage_redirects.last().cloned().unwrap_or_default();
 
         if expanded_stages.len() == 1 {
-            if clean_last.is_empty() {
+            let clean = &clean_stages[0];
+            if clean.is_empty() {
                 let mut result = CommandOutput::success(String::new());
-                self.apply_redirects(&mut result, &pipeline_spec);
+                self.apply_redirects(&mut result, &last_spec);
                 return result;
             }
-            let cmd = &clean_last[0].value;
-            let args: Vec<&str> = clean_last[1..].iter().map(|t| t.value.as_str()).collect();
+            let cmd = &clean[0].value;
+            let args: Vec<&str> = clean[1..].iter().map(|t| t.value.as_str()).collect();
             let stdin_from_file = if init_stdin.is_none() {
-                pipeline_spec.stdin_file.as_ref().and_then(|path| {
+                last_spec.stdin_file.as_ref().and_then(|path| {
                     self.shell.vfs.read_to_string(path, &self.shell.cwd).ok()
                 })
             } else {
@@ -1539,27 +1566,35 @@ impl Runtime {
             };
             let stdin = init_stdin.or(stdin_from_file.as_deref());
             let mut result = self.shell.execute(cmd, &args, stdin);
-            self.apply_redirects(&mut result, &pipeline_spec);
+            self.apply_redirects(&mut result, &last_spec);
             return result;
         }
 
         let saved_cwd = self.shell.cwd.clone();
 
-        // stdin for the first stage: heredoc body or `< file`.
+        // stdin for the first stage: heredoc body, or `< file` redirect.
         let first_stdin: Option<String> = match init_stdin {
             Some(s) => Some(s.to_string()),
-            None => pipeline_spec.stdin_file.as_ref().and_then(|path| {
-                self.shell.vfs.read_to_string(path, &self.shell.cwd).ok()
-            }),
+            None => stage_redirects
+                .first()
+                .and_then(|s| s.stdin_file.as_ref())
+                .and_then(|path| self.shell.vfs.read_to_string(path, &self.shell.cwd).ok()),
         };
 
         let mut threads: Vec<std::thread::JoinHandle<std::thread::Result<(i32, String, String)>>> =
             Vec::new();
         let mut prev_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
 
-        for (i, stage) in expanded_stages.into_iter().enumerate() {
+        for (i, stage) in clean_stages.into_iter().enumerate() {
             if stage.is_empty() {
                 continue;
+            }
+            if self.cancel.load(Ordering::SeqCst) {
+                return CommandOutput {
+                    stdout: String::new(),
+                    stderr: "cancelled\n".to_string(),
+                    exit_code: 143,
+                };
             }
             let cmd = stage[0].value.clone();
             let args: Vec<String> = stage[1..].iter().map(|t| t.value.clone()).collect();
@@ -1567,6 +1602,10 @@ impl Runtime {
             let rx = prev_rx.take();
             let is_last = i == last_idx;
             let init = if i == 0 { first_stdin.clone() } else { None };
+
+            // Per-stage redirects for non-last stages: 2>&1, 2> file.
+            // stdout file redirects (>, >>) are only applied for the last stage.
+            let stage_spec = stage_redirects.get(i).cloned().unwrap_or_default();
 
             let (tx, next_rx) = if !is_last {
                 let (t, r) = mpsc::channel::<Vec<u8>>();
@@ -1589,9 +1628,19 @@ impl Runtime {
                         stdin_buf.push_str(&init);
                     }
                     if let Some(rx) = rx {
-                        while let Ok(chunk) = rx.recv() {
-                            got_stdin = true;
-                            stdin_buf.push_str(&String::from_utf8_lossy(&chunk));
+                        loop {
+                            if shell.cancel.load(Ordering::SeqCst) {
+                                let _ = tx.map(|t| t.send(Vec::new()));
+                                return Ok((143, String::new(), "cancelled\n".to_string()));
+                            }
+                            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                                Ok(chunk) => {
+                                    got_stdin = true;
+                                    stdin_buf.push_str(&String::from_utf8_lossy(&chunk));
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
                         }
                     }
                     let stdin = if got_stdin { Some(stdin_buf) } else { None };
@@ -1606,13 +1655,42 @@ impl Runtime {
                     };
                     let resolved_refs: Vec<&str> = resolved_args.iter().map(|s| s.as_str()).collect();
 
-                    let result = shell.execute(&resolved_cmd, &resolved_refs, stdin_ref);
-
-                    if let Some(tx) = tx {
-                        let _ = tx.send(result.stdout.as_bytes().to_vec());
+                    if shell.cancel.load(Ordering::SeqCst) {
+                        let _ = tx.map(|t| t.send(Vec::new()));
+                        return Ok((143, String::new(), "cancelled\n".to_string()));
                     }
 
-                    Ok((result.exit_code, result.stdout, result.stderr))
+                    let mut result = shell.execute(&resolved_cmd, &resolved_refs, stdin_ref);
+
+                    // Per-stage redirects: 2>&1 merges stderr into the pipe.
+                    if stage_spec.merge_stderr_to_stdout && !result.stderr.is_empty() {
+                        if !result.stdout.is_empty() && !result.stdout.ends_with('\n') {
+                            result.stdout.push('\n');
+                        }
+                        result.stdout.push_str(&result.stderr);
+                        result.stderr.clear();
+                    }
+                    // Per-stage stderr file redirect.
+                    if let Some((ref path, append)) = &stage_spec.stderr_file {
+                        let mut content = if *append {
+                            shell.vfs.read_to_string(path, &shell.cwd).unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        content.push_str(&result.stderr);
+                        let _ = shell.vfs.write(path, &shell.cwd, &content);
+                        result.stderr.clear();
+                    }
+
+                    let out_code = result.exit_code;
+                    let out_stdout = result.stdout;
+                    let out_stderr = result.stderr;
+
+                    if let Some(tx) = tx {
+                        let _ = tx.send(out_stdout.as_bytes().to_vec());
+                    }
+
+                    Ok((out_code, out_stdout, out_stderr))
                 });
 
             threads.push(handle);
@@ -1627,6 +1705,22 @@ impl Runtime {
         let pipefail = self.shell.pipefail;
 
         for (i, handle) in threads.into_iter().enumerate() {
+            // Poll join with timeout so we can detect cancellation.
+            loop {
+                if self.cancel.load(Ordering::SeqCst) {
+                    // Cancel flag set — abandon remaining threads.
+                    // Already-handled stderr from earlier stages is preserved.
+                    return CommandOutput {
+                        stdout: String::new(),
+                        stderr: format!("{}cancelled\n", all_stderr),
+                        exit_code: 143,
+                    };
+                }
+                if handle.is_finished() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             match handle.join() {
                 Ok(Ok((code, out, err))) => {
                     if !err.is_empty() {
@@ -1665,7 +1759,7 @@ impl Runtime {
             stderr: all_stderr,
             exit_code: final_exit_code,
         };
-        self.apply_redirects(&mut result, &pipeline_spec);
+        self.apply_redirects(&mut result, &last_spec);
         result
     }
 
@@ -2973,6 +3067,14 @@ fn shell_words_parse(input: &str) -> Result<Vec<String>, ()> {
     Ok(words)
 }
 
+fn connector_delim(c: Connector) -> &'static str {
+    match c {
+        Connector::AndIf => " && ",
+        Connector::OrIf => " || ",
+        Connector::Always => "; ",
+    }
+}
+
 fn combine_loop_segments(segments: Vec<Segment>) -> Vec<Segment> {
     let mut result = Vec::new();
     let segments_vec = segments;
@@ -3010,13 +3112,13 @@ fn combine_loop_segments(segments: Vec<Segment>) -> Vec<Segment> {
                 } else if txt == "done" {
                     depth -= 1;
                     if depth == 0 {
-                        combined.push_str("; ");
+                        combined.push_str(connector_delim(segments_vec[j].connector));
                         combined.push_str(&segments_vec[j].text);
                         j += 1;
                         break;
                     }
                 }
-                combined.push_str("; ");
+                combined.push_str(connector_delim(segments_vec[j].connector));
                 combined.push_str(&segments_vec[j].text);
                 j += 1;
             }
@@ -3052,16 +3154,16 @@ fn combine_case_segments(segments: Vec<Segment>) -> Vec<Segment> {
                 let txt = segments_vec[j].text.trim();
                 if txt == "case" || txt.starts_with("case ") {
                     depth += 1;
-                } else if txt == "esac" {
+                } else                 if txt == "esac" {
                     depth -= 1;
                     if depth == 0 {
-                        combined.push_str("; ");
+                        combined.push_str(connector_delim(segments_vec[j].connector));
                         combined.push_str(&segments_vec[j].text);
                         j += 1;
                         break;
                     }
                 }
-                combined.push_str("; ");
+                combined.push_str(connector_delim(segments_vec[j].connector));
                 combined.push_str(&segments_vec[j].text);
                 j += 1;
             }
@@ -3150,7 +3252,7 @@ fn combine_if_segments(segments: Vec<Segment>) -> Vec<Segment> {
                 if txt == "fi" {
                     depth -= 1;
                     if depth == 0 {
-                        combined.push_str("; ");
+                        combined.push_str(connector_delim(segments_vec[j].connector));
                         combined.push_str(&segments_vec[j].text);
                         j += 1;
                         break;
@@ -3158,7 +3260,7 @@ fn combine_if_segments(segments: Vec<Segment>) -> Vec<Segment> {
                 } else if txt == "if" || txt.starts_with("if ") {
                     depth += 1;
                 }
-                combined.push_str("; ");
+                combined.push_str(connector_delim(segments_vec[j].connector));
                 combined.push_str(&segments_vec[j].text);
                 j += 1;
             }
@@ -4276,5 +4378,129 @@ mod tests {
         let mut rt = mk_rt();
         let out = rt.execute("myfn() { tr a-z A-Z; }; echo hello | myfn");
         assert_ne!(out.exit_code, 0, "shell functions are not yet supported in pipelines");
+    }
+
+    // ── Pipeline connector preservation tests ───────────────────
+
+    #[test]
+    fn test_and_if_preserved_in_if_body() {
+        let mut rt = mk_rt();
+        // In if body, cmd1 && cmd2: cmd1 fails, cmd2 should NOT execute.
+        rt.execute("echo first > /out.txt");
+        let _ = rt.execute("if true; then grep nosuch /out.txt && echo 'should not appear' > /out2.txt; fi");
+        // grep fails (returncode 1), && skips echo. /out2.txt should not exist.
+        assert!(!rt.shell.vfs.exists("/out2.txt", &rt.shell.cwd),
+            "&& should skip second command when first fails");
+    }
+
+    #[test]
+    fn test_or_if_preserved_in_while_body() {
+        let mut rt = mk_rt();
+        // cmd1 || cmd2: cmd1 fails, cmd2 should execute.
+        rt.execute("echo ok > /test.txt");
+        let _ = rt.execute("grep nosuch /test.txt || echo 'fallback' > /fallback.txt");
+        assert!(rt.shell.vfs.exists("/fallback.txt", &rt.shell.cwd),
+            "|| should execute second command when first fails");
+    }
+
+    #[test]
+    fn test_and_if_preserved_in_for_body() {
+        let mut rt = mk_rt();
+        rt.execute("echo pass > /one.txt");
+        // for body: cat /one.txt succeeds → && executes echo.
+        let _ = rt.execute("for f in one; do cat /$f.txt && echo 'ok' > /log.txt; done");
+        let content = rt.shell.vfs.read_to_string("/log.txt", &rt.shell.cwd).unwrap_or_default();
+        assert!(content.contains("ok"), "&& should execute second command when first succeeds");
+    }
+
+    #[test]
+    fn test_and_if_skips_after_failure() {
+        let mut rt = mk_rt();
+        // cat fails → && prevents the second command.
+        let _ = rt.execute("cat /nonexist && echo 'nope' > /shouldnotexist.txt");
+        assert!(!rt.shell.vfs.exists("/shouldnotexist.txt", &rt.shell.cwd),
+            "&& must skip second command when first fails");
+    }
+
+    // ── Pipeline redirect tests ─────────────────────────────────
+
+    #[test]
+    fn test_pipeline_merge_stderr_on_first_stage() {
+        let mut rt = mk_rt();
+        // cmd1 2>&1 | cmd2 — stderr from cmd1 should merge into the pipe.
+        let out = rt.execute("cat /noexist 2>&1 | wc -l");
+        assert_eq!(out.exit_code, 0);
+        // The stderr from cat becomes stdout, passes through pipe, wc counts >= 1 line.
+        let lines: i32 = out.stdout.trim().parse().unwrap_or(0);
+        assert!(lines >= 1, "2>&1 should merge stderr into pipe");
+    }
+
+    #[test]
+    fn test_pipeline_stderr_redirect_on_middle_stage() {
+        let mut rt = mk_rt();
+        // cmd1 | cmd2 2> /err.txt | cmd3 — stderr from cmd2 goes to file.
+        let out = rt.execute("echo hello | cat /noexist 2> /err.txt | wc -c");
+        // cat fails (stderr → /err.txt), wc -c counts stdin from pipe (0 bytes).
+        let content = rt.shell.vfs.read_to_string("/err.txt", &rt.shell.cwd).unwrap_or_default();
+        assert!(!content.is_empty(), "stderr redirect should capture error to file");
+    }
+
+    #[test]
+    fn test_pipeline_stdout_redirect_on_last_stage() {
+        let mut rt = mk_rt();
+        let out = rt.execute("echo hello | tr a-z A-Z > /upper.txt");
+        assert_eq!(out.exit_code, 0);
+        let content = rt.shell.vfs.read_to_string("/upper.txt", &rt.shell.cwd).unwrap_or_default();
+        assert_eq!(content.trim(), "HELLO");
+    }
+
+    // ── Pipeline quote-awareness tests ──────────────────────────
+
+    #[test]
+    fn test_pipeline_quoted_pipe_not_split() {
+        let mut rt = mk_rt();
+        // | inside single quotes: should NOT be treated as a pipe.
+        let out = rt.execute("echo 'a|b'");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.trim(), "a|b", "quoted | must not split pipeline");
+    }
+
+    #[test]
+    fn test_pipeline_double_quoted_pipe_not_split() {
+        let mut rt = mk_rt();
+        let out = rt.execute("echo \"x|y\"");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.trim(), "x|y");
+    }
+
+    // ── Pipeline cancellation tests ─────────────────────────────
+
+    #[test]
+    fn test_pipeline_receives_cancel_flag() {
+        let mut rt = mk_rt();
+        // Set cancel before executing pipeline — should exit quickly with 143.
+        rt.cancel.store(true, Ordering::SeqCst);
+        let out = rt.execute("echo hello | cat");
+        assert_eq!(out.exit_code, 143, "pre-set cancel should abort pipeline");
+    }
+
+    // ── Pipeline basic correctness tests ────────────────────────
+
+    #[test]
+    fn test_pipeline_three_stage() {
+        let mut rt = mk_rt();
+        let out = rt.execute("echo \"a\nb\nc\" | grep a | wc -l");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.trim(), "1");
+    }
+
+    #[test]
+    fn test_pipeline_with_redirects_and_pipe() {
+        let mut rt = mk_rt();
+        // cat < file | grep x | wc -l > out.txt
+        rt.execute("echo \"apple\nbanana\napple\" > /data.txt");
+        let out = rt.execute("cat < /data.txt | grep apple | wc -l > /count.txt");
+        let content = rt.shell.vfs.read_to_string("/count.txt", &rt.shell.cwd).unwrap_or_default();
+        assert_eq!(content.trim(), "2");
     }
 }

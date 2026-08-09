@@ -6,6 +6,7 @@ use crate::vfs::Vfs;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod commands;
@@ -78,6 +79,8 @@ pub struct Shell {
     pub network_ask_permission: bool,
     pub permissions: Arc<Mutex<HashMap<String, bool>>>,
     pub plugin: Arc<Mutex<Option<Box<dyn DevicePlugin>>>>,
+    /// Cooperative cancellation flag — checked by long-running builtins.
+    pub cancel: Arc<AtomicBool>,
 }
 
 impl Shell {
@@ -101,6 +104,7 @@ impl Shell {
             network_ask_permission: false,
             permissions: Arc::new(Mutex::new(HashMap::new())),
             plugin: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -129,6 +133,7 @@ impl Shell {
             network_ask_permission,
             permissions,
             plugin: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -159,7 +164,13 @@ impl Shell {
             network_ask_permission,
             permissions,
             plugin,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Replace the cancel flag (e.g. to share with the SDK's flag).
+    pub fn set_cancel_flag(&mut self, cancel: Arc<AtomicBool>) {
+        self.cancel = cancel;
     }
 
     pub fn check_device_permission(
@@ -228,6 +239,13 @@ impl Shell {
 
     pub fn execute(&mut self, command: &str, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         // (c) 2025 xiefujin <490021684@qq.com>
+        if self.cancel.load(Ordering::SeqCst) {
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: "cancelled\n".to_string(),
+                exit_code: 143,
+            };
+        }
         match command {
             "alias" => self.cmd_alias(args),
             "unalias" => self.cmd_unalias(args),

@@ -3,6 +3,7 @@
 
 use crate::shell::{CommandOutput, Shell};
 use regex::Regex;
+use std::sync::atomic::Ordering;
 
 const GREP_HELP_TEXT: &str = "\
 Usage: grep [OPTION]... PATTERN [FILE]...
@@ -280,6 +281,13 @@ impl Shell {
         } else {
             let multi_file = all_files.len() > 1;
             for file in &all_files {
+                if self.cancel.load(Ordering::SeqCst) {
+                    return CommandOutput {
+                        stdout: output,
+                        stderr: format!("{}cancelled\n", stderr),
+                        exit_code: 143,
+                    };
+                }
                 match self.vfs.read_to_string(file, &self.cwd) {
                     Ok(content) => {
                         let count = grep_lines(
@@ -325,6 +333,9 @@ impl Shell {
 
     /// Recursively collect regular files under `dir_path` into `out`.
     fn collect_files_recursive(&self, dir_path: &str, out: &mut Vec<String>, stderr: &mut String) {
+        if self.cancel.load(Ordering::SeqCst) {
+            return;
+        }
         match self.vfs.list_dir(dir_path, &self.cwd) {
             Ok(entries) => {
                 for entry in &entries {

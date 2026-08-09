@@ -2,6 +2,8 @@
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
 use crate::shell::{CommandOutput, Shell};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 const SLEEP_HELP_TEXT: &str = "\
 Usage: sleep NUMBER[SUFFIX]...
@@ -38,7 +40,20 @@ impl Shell {
             total_secs += secs;
         }
 
-        std::thread::sleep(std::time::Duration::from_secs_f64(total_secs));
+        let total_ms = (total_secs * 1000.0) as u64;
+        let mut remaining = total_ms;
+        while remaining > 0 {
+            if self.cancel.load(Ordering::SeqCst) {
+                return CommandOutput {
+                    stdout: String::new(),
+                    stderr: "cancelled\n".to_string(),
+                    exit_code: 143,
+                };
+            }
+            let chunk = remaining.min(100);
+            std::thread::sleep(Duration::from_millis(chunk));
+            remaining = remaining.saturating_sub(chunk);
+        }
         CommandOutput::success(String::new())
     }
 }
