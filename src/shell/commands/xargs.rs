@@ -64,6 +64,14 @@ impl Shell {
                 "-t" => {
                     verbose = true;
                 }
+                "-r" | "--no-run-if-empty" => {}
+                "-p" | "--interactive" | "--verbose" => {}
+                "-d" | "--delimiter" | "-L" | "--max-lines" | "-s" | "--max-chars"
+                | "-E" | "--eof" => {
+                    if i + 1 < args.len() {
+                        i += 1;
+                    }
+                }
                 a if !a.starts_with('-') && !parsing_cmd => {
                     parsing_cmd = true;
                     target_cmd.push(a.to_string());
@@ -72,7 +80,7 @@ impl Shell {
                     target_cmd.push(a.to_string());
                 }
                 _ => {
-                    eprintln!("xargs: warning: unsupported option '{}'", args[i]);
+                    crate::warn!("xargs: warning: unsupported option '{}'", args[i]);
                 }
             }
             i += 1;

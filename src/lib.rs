@@ -2,6 +2,7 @@
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
 pub mod bridge;
+pub mod js;
 pub mod python;
 #[cfg(feature = "python")]
 pub mod python_bridge;

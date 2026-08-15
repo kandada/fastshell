@@ -7,10 +7,12 @@ const CP_HELP_TEXT: &str = "\
 Usage: cp [OPTION]... SOURCE DEST
 Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
 
-  -r, -R  copy directories recursively
-  -f       if an existing destination file cannot be opened, remove it
-  -v       explain what is being done
-  -h, --help  display this help and exit
+  -a, --archive       same as -r -p (recursive, preserve)
+  -r, -R, --recursive copy directories recursively
+  -f, --force         if an existing destination file cannot be opened, remove it
+  -n, --no-clobber    do not overwrite an existing file
+  -v, --verbose       explain what is being done
+  -h, --help          display this help and exit
 ";
 
 impl Shell {
@@ -21,17 +23,35 @@ impl Shell {
         let mut recursive = false;
         let mut force = false;
         let mut verbose = false;
+        let mut no_clobber = false;
         let mut operands = Vec::new();
 
         for arg in args {
-            match *arg {
-                "-r" | "-R" => recursive = true,
-                "-f" => force = true,
-                "-v" => verbose = true,
-                _ if arg.starts_with('-') => {
-                    eprintln!("cp: warning: unsupported option '{}'", arg);
+            if arg.starts_with("--") {
+                match *arg {
+                    "--recursive" => recursive = true,
+                    "--archive" => recursive = true,
+                    "--force" => force = true,
+                    "--verbose" => verbose = true,
+                    "--no-clobber" => no_clobber = true,
+                    "--preserve" | "--preserve=mode,timestamps" | "--parents" | "--dereference"
+                    | "--no-dereference" => {}
+                    _ => crate::warn!("cp: warning: unsupported option '{}'", arg),
                 }
-                _ => operands.push(arg.to_string()),
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg.chars().skip(1) {
+                    match ch {
+                        'r' | 'R' => recursive = true,
+                        'a' => recursive = true,
+                        'f' => force = true,
+                        'v' => verbose = true,
+                        'n' => no_clobber = true,
+                        'p' | 'i' | 'L' | 'P' | 'd' | 'u' => {} // no-op in the sandbox
+                        _ => crate::warn!("cp: warning: unsupported option '-{}'", ch),
+                    }
+                }
+            } else {
+                operands.push(arg.to_string());
             }
         }
 
@@ -41,6 +61,7 @@ impl Shell {
 
         let dest = operands.pop().unwrap();
         let sources = operands;
+        let mut verbose_out = String::new();
 
         for src in &sources {
             let src_path = match self.vfs.resolve(src, &self.cwd) {
@@ -65,8 +86,15 @@ impl Shell {
                 dest.clone()
             };
 
+            if no_clobber && self.vfs.exists(&dest_path, &self.cwd) {
+                if verbose {
+                    verbose_out.push_str(&format!("skipped '{}' -> '{}'\n", src, dest_path));
+                }
+                continue;
+            }
+
             if verbose {
-                eprintln!("{} -> {}", src, &dest_path);
+                verbose_out.push_str(&format!("'{}' -> '{}'\n", src, dest_path));
             }
             if let Err(e) = self.vfs.copy(src, &dest_path, &self.cwd) {
                 if !force {
@@ -75,7 +103,7 @@ impl Shell {
             }
         }
 
-        CommandOutput::success(String::new())
+        CommandOutput::success(verbose_out)
     }
 }
 

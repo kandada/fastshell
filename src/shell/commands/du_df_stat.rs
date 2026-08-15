@@ -8,25 +8,72 @@ impl Shell {
         let mut summarize = false;
         let mut max_depth: Option<usize> = None;
         let mut human = false;
+        let mut all_files = false;
+        let mut grand_total = false;
         let mut paths = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-s" | "--summarize" => summarize = true,
-                "-h" | "--human-readable" => human = true,
-                "--max-depth" => {
-                    if i + 1 < args.len() {
-                        max_depth = args[i + 1].parse().ok();
-                        i += 1;
-                    }
+            let arg = args[i];
+            if arg == "--" {
+                i += 1;
+                while i < args.len() {
+                    paths.push(args[i].to_string());
+                    i += 1;
                 }
-                arg if arg.starts_with("--max-depth=") => {
-                    max_depth = arg[12..].parse().ok();
-                }
-                arg if !arg.starts_with('-') => paths.push(arg.to_string()),
-                _ => {}
+                break;
             }
+            if arg.starts_with("--") {
+                match arg {
+                    "--summarize" => summarize = true,
+                    "--human-readable" => human = true,
+                    "--all" => all_files = true,
+                    "--total" => grand_total = true,
+                    "--max-depth" => {
+                        if i + 1 < args.len() {
+                            max_depth = args[i + 1].parse().ok();
+                            i += 1;
+                        }
+                    }
+                    a if a.starts_with("--max-depth=") => {
+                        max_depth = a["--max-depth=".len()..].parse().ok();
+                    }
+                    _ => crate::warn!("du: warning: unsupported option '{}'", arg),
+                }
+                i += 1;
+                continue;
+            }
+            if arg.starts_with('-') && arg.len() > 1 {
+                let chars: Vec<char> = arg.chars().skip(1).collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        's' => summarize = true,
+                        'h' => human = true,
+                        'a' => all_files = true,
+                        'c' => grand_total = true,
+                        'k' | 'm' | 'B' => {}
+                        'd' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            if !rest.is_empty() {
+                                max_depth = rest.parse().ok();
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    max_depth = args[i].parse().ok();
+                                }
+                            }
+                            j = chars.len();
+                            continue;
+                        }
+                        _ => crate::warn!("du: warning: unsupported option '-{}'", chars[j]),
+                    }
+                    j += 1;
+                }
+                i += 1;
+                continue;
+            }
+            paths.push(arg.to_string());
             i += 1;
         }
 
@@ -34,8 +81,10 @@ impl Shell {
             paths.push(".".to_string());
         }
 
-        let depth = if summarize { Some(0) } else { max_depth };
+        let fmt_size = |sz: u64| if human { human_size(sz) } else { sz.to_string() };
         let mut output = String::new();
+        let mut total: u64 = 0;
+
         for path in &paths {
             let resolved = match self.vfs.resolve(path, &self.cwd) {
                 Ok(r) => r,
@@ -44,19 +93,42 @@ impl Shell {
                     continue;
                 }
             };
-            let size = du_walk(&resolved, depth, 0);
-            if human {
-                output.push_str(&format!("{}\t{}\n", human_size(size), path));
+            if summarize {
+                let sz = du_walk(&resolved, None, 0);
+                total += sz;
+                output.push_str(&format!("{}\t{}\n", fmt_size(sz), path));
             } else {
-                output.push_str(&format!("{}\t{}\n", size, path));
+                let mut entries = Vec::new();
+                let sz = du_list(&resolved, path, max_depth, 0, all_files, &mut entries);
+                total += sz;
+                for (es, ep) in entries {
+                    output.push_str(&format!("{}\t{}\n", fmt_size(es), ep));
+                }
             }
+        }
+
+        if grand_total {
+            output.push_str(&format!("{}\ttotal\n", fmt_size(total)));
         }
 
         CommandOutput::success(output)
     }
 
-    pub fn cmd_df(&self, _args: &[&str]) -> CommandOutput {
+    pub fn cmd_df(&self, args: &[&str]) -> CommandOutput {
         let vfs_root = self.vfs.root();
+        let mut human = false;
+
+        for arg in args {
+            match *arg {
+                "-h" | "--human-readable" | "-H" => human = true,
+                "-k" | "-m" | "--block-size" | "--total" | "--portability" | "-P" | "-i"
+                | "--inodes" | "-l" | "--local" | "-a" | "--all" | "-T" | "--print-type" => {}
+                a if a.starts_with('-') => {
+                    crate::warn!("df: warning: unsupported option '{}'", a);
+                }
+                _ => {}
+            }
+        }
 
         let mut output = String::new();
         output.push_str("Filesystem     1K-blocks      Used Available Use% Mounted on\n");
@@ -69,11 +141,12 @@ impl Shell {
                 } else {
                     0
                 };
+                let fmt = |v: u64| if human { human_size(v) } else { format!("{}", v / 1024) };
                 output.push_str(&format!(
                     "fastshell     {:>10} {:>10} {:>10} {:>3}% {}\n",
-                    total / 1024,
-                    used / 1024,
-                    avail / 1024,
+                    fmt(total),
+                    fmt(used),
+                    fmt(avail),
                     pct,
                     vfs_root.display(),
                 ));
@@ -88,6 +161,7 @@ impl Shell {
 
     pub fn cmd_stat(&self, args: &[&str]) -> CommandOutput {
         let mut format: Option<String> = None;
+        let mut file_system = false;
         let mut files: Vec<String> = Vec::new();
 
         let mut i = 0;
@@ -105,6 +179,7 @@ impl Shell {
                         i += 1;
                     }
                 }
+                "-f" | "--file-system" => file_system = true,
                 arg if arg.starts_with("--format=") => {
                     format = Some(arg[9..].to_string());
                 }
@@ -116,6 +191,32 @@ impl Shell {
 
         if files.is_empty() {
             return CommandOutput::error("stat: missing operand\n".to_string(), 1);
+        }
+
+        if file_system {
+            let mut output = String::new();
+            for file in &files {
+                let resolved = match self.vfs.resolve(file, &self.cwd) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        output.push_str(&format!("stat: {}: {}\n", file, e));
+                        continue;
+                    }
+                };
+                match fs_stats(&resolved) {
+                    Some((total, avail)) => {
+                        output.push_str(&format!(
+                            "  File: \"{}\"\n  ID: 0 Namelen: 255 Type: fastshell\n  Block size: 4096  Fundamental block size: 4096\n  Blocks: Total: {} Free: {} Available: {}\n",
+                            file,
+                            total / 4096,
+                            avail / 4096,
+                            avail / 4096,
+                        ));
+                    }
+                    None => output.push_str(&format!("stat: {}: cannot read filesystem stats\n", file)),
+                }
+            }
+            return CommandOutput::success(output);
         }
 
         if let Some(ref fmt) = format {
@@ -282,11 +383,69 @@ fn format_stat(path: &std::path::Path, meta: &std::fs::Metadata, fmt: &str) -> S
     result = result.replace("%x", &crate::shell::format_unix_time(atime_secs));
     result = result.replace("%y", &crate::shell::format_unix_time(mtime_secs));
     result = result.replace("%z", &crate::shell::format_unix_time(ctime_secs));
+    result = result.replace("%X", &format!("{}", atime_secs));
+    result = result.replace("%Y", &format!("{}", mtime_secs));
+    result = result.replace("%Z", &format!("{}", ctime_secs));
 
     if !result.ends_with('\n') {
         result.push('\n');
     }
     result
+}
+
+/// Recursively list sizes (dirs always, files when `all_files`) into `out`,
+/// returning the total size of `path`. `rel` is the user-relative display path.
+fn du_list(
+    path: &std::path::Path,
+    rel: &str,
+    max_depth: Option<usize>,
+    depth: usize,
+    all_files: bool,
+    out: &mut Vec<(u64, String)>,
+) -> u64 {
+    if path.is_file() {
+        let sz = path.metadata().map(|m| m.len()).unwrap_or(0);
+        if all_files {
+            out.push((sz, rel.to_string()));
+        }
+        return sz;
+    }
+
+    let beyond = max_depth.map(|d| depth >= d).unwrap_or(false);
+    if beyond {
+        let sz = du_walk(path, None, 0);
+        out.push((sz, rel.to_string()));
+        return sz;
+    }
+
+    let mut total: u64 = 0;
+    let mut items: Vec<std::fs::DirEntry> = std::fs::read_dir(path)
+        .map(|rd| rd.flatten().collect())
+        .unwrap_or_default();
+    items.sort_by(|a, b| a.path().cmp(&b.path()));
+    for entry in items {
+        let epath = entry.path();
+        let name = epath
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let child_rel = if rel == "." || rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", rel, name)
+        };
+        if epath.is_dir() {
+            total += du_list(&epath, &child_rel, max_depth, depth + 1, all_files, out);
+        } else {
+            let sz = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if all_files {
+                out.push((sz, child_rel));
+            }
+            total += sz;
+        }
+    }
+    out.push((total, rel.to_string()));
+    total
 }
 
 fn du_walk(path: &std::path::Path, max_depth: Option<usize>, current_depth: usize) -> u64 {

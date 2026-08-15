@@ -132,4 +132,21 @@ pub trait DevicePlugin: Send {
     fn keep_screen_on(&self, on: bool) -> Result<(), String>;
     fn vibrate(&self, duration_ms: u32) -> Result<(), String>;
     fn get_device_info(&self) -> Result<DeviceInfo, String>;
+
+    // ── javascript / webview ──
+    /// Evaluate JavaScript in the host app's WebView engine (Android WebView
+    /// = V8, iOS WKWebView = JavaScriptCore) and return the result string.
+    /// Defaults to unsupported for hosts that don't register a JS backend.
+    fn eval_js(&self, code: &str) -> Result<String, String> {
+        let _ = code;
+        Err("eval_js: no JavaScript backend registered by host app".to_string())
+    }
+
+    /// Render an HTML document in the host WebView and capture a screenshot
+    /// to `output_path` (host-absolute). Enables visual feedback for
+    /// frontend code. Defaults to unsupported when the host lacks a WebView.
+    fn render_html(&self, html: &str, output_path: &str) -> Result<(), String> {
+        let _ = (html, output_path);
+        Err("render_html: no WebView backend registered by host app".to_string())
+    }
 }

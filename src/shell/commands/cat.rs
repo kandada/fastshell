@@ -42,7 +42,7 @@ impl Shell {
                         'e' => { show_ends = true; show_nonprint = true; }
                         't' => { show_tabs = true; show_nonprint = true; }
                         'A' => { show_ends = true; show_tabs = true; show_nonprint = true; }
-                        _ => eprintln!("cat: warning: unsupported option '{}'", arg),
+                        _ => crate::warn!("cat: warning: unsupported option '{}'", arg),
                     }
                 }
             } else {

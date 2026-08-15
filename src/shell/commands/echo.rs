@@ -37,7 +37,7 @@ impl Shell {
                     start += 1;
                 }
                 a if a.starts_with('-') => {
-                    eprintln!("echo: warning: unsupported option '{}'", a);
+                    crate::warn!("echo: warning: unsupported option '{}'", a);
                     start += 1;
                 }
                 _ => break,

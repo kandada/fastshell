@@ -238,9 +238,21 @@ if _fs_root:
         r#"import sys,os
 _r=os.environ.get('FASTSHELL_ROOT','{}')
 _s=os.path.join(_r,'python','site-packages')
+_c=os.environ.get('FASTSHELL_CWD','/')
+_p=os.path.join(_r,_c.lstrip('/'),'site-packages') if _r else ''
 if _r and _r not in sys.path:sys.path.insert(0,_r)
 if os.path.isdir(_s) and _s not in sys.path:sys.path.insert(0,_s)
-del _r,_s
+if _p and os.path.isdir(_p) and _p not in sys.path:sys.path.insert(0,_p)
+_e=os.environ.get('PYTHONPATH','')
+if _e:
+    for _d in _e.split(':'):
+        if _d:
+            _rp=_d
+            if _rp.startswith('/') and _r:
+                _rp=os.path.join(_r,_rp.lstrip('/'))
+            if _rp not in sys.path:
+                sys.path.insert(0,_rp)
+del _r,_s,_c,_p,_e
 {}
 exec({:?})"#,
         sandbox, sandbox_wrapper, code,

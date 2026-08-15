@@ -207,6 +207,30 @@ impl Runtime {
             return CommandOutput::success(String::new());
         }
 
+        // Subshell `( cmd1; cmd2 )` — run inner commands with cwd isolated.
+        if raw.starts_with('(') && raw.ends_with(')') {
+            let inner = raw[1..raw.len() - 1].trim();
+            if !inner.is_empty() {
+                let saved_cwd = self.shell.cwd.clone();
+                let result = self.execute(inner);
+                self.shell.cwd = saved_cwd;
+                return result;
+            }
+        }
+
+        // Command group `{ cmd1; cmd2; }` — run inner commands in this shell
+        // (cwd changes propagate). Distinguish from brace expansion `{a,b}`.
+        if raw.starts_with('{') && raw.ends_with('}') && raw.len() > 2 {
+            let inner = raw[1..raw.len() - 1].trim();
+            let is_group = inner.contains(';')
+                || inner.contains("&&")
+                || inner.contains("||")
+                || inner.contains('\n');
+            if is_group && !inner.is_empty() {
+                return self.execute(inner);
+            }
+        }
+
         let first_word = raw.trim().split_whitespace().next().unwrap_or("");
         if first_word == "if" || first_word == "for" || first_word == "while" || first_word == "until" || first_word == "case" {
             return self.execute_block_construct(raw, heredoc_ref);
@@ -238,7 +262,17 @@ impl Runtime {
         }
 
         if is_python_command(input) {
-            return self.execute_python_inner(input);
+            // Align with a real shell: `python3 -c "..." 2>&1` / `... > file`
+            // must strip the redirect before passing the rest to the Python
+            // engine. Otherwise the redirect text ends up inside the `-c`
+            // code and produces a SyntaxError.
+            let tokens = parse_command(input);
+            let parts = self.expand_globs(tokens);
+            let (clean, spec) = self.extract_redirects(parts);
+            let clean_input = clean.join(" ");
+            let mut result = self.execute_python_inner(&clean_input);
+            self.apply_redirects(&mut result, &spec);
+            return result;
         }
 
         if input.contains('|') {
@@ -314,6 +348,28 @@ impl Runtime {
     /// returns (rest_of_command, was_assignment_only).
     fn consume_assignments<'a>(&mut self, input: &'a str) -> (&'a str, bool) {
         let mut rest = input;
+        // `env VAR=x cmd ...` is equivalent to `VAR=x cmd ...` (bash).
+        if let Some(r) = rest.strip_prefix("env ") {
+            let mut r = r.trim_start();
+            // `env -u VAR` (repeatable): unset variables.
+            while let Some(r2) = r.strip_prefix("-u ") {
+                let r2 = r2.trim_start();
+                let var_end = r2.find(char::is_whitespace).unwrap_or(r2.len());
+                let var = &r2[..var_end];
+                self.shell.vars.remove(var);
+                r = r2[var_end..].trim_start();
+            }
+            // `env -i`: start with an empty environment.
+            if let Some(r2) = r.strip_prefix("-i") {
+                self.shell.vars.clear();
+                r = r2.trim_start();
+            }
+            // Only strip when what follows is an assignment (or we already
+            // processed -u/-i above); a bare `env` falls through to cmd_env.
+            if take_assignment(r).is_some() || (r != input && !r.is_empty()) {
+                rest = r;
+            }
+        }
         if let Some(r) = rest.strip_prefix("export ") {
             rest = r.trim_start();
             // If first token is not a simple assignment (e.g. -n, -p, bare name),
@@ -1434,6 +1490,11 @@ impl Runtime {
 
         if same_file {
             if let Some((ref path, append)) = &spec.stdout_file {
+                if path == "/dev/null" {
+                    result.stdout = String::new();
+                    result.stderr = String::new();
+                    return;
+                }
                 let mut content = if *append {
                     self.shell.vfs.read_to_string(path, &self.shell.cwd).unwrap_or_default()
                 } else {
@@ -1460,34 +1521,38 @@ impl Runtime {
 
         // Write stdout to file
         if let Some((ref path, append)) = &spec.stdout_file {
-            let final_stdout = if *append {
-                let existing = self.shell.vfs.read_to_string(path, &self.shell.cwd).unwrap_or_default();
-                existing + &result.stdout
-            } else {
-                result.stdout.clone()
-            };
-            if let Err(e) = self.shell.vfs.write(path, &self.shell.cwd, &final_stdout) {
-                result.stderr = format!("redirect: {}: {}\n", path, e);
-                result.exit_code = 1;
+            if path != "/dev/null" {
+                let final_stdout = if *append {
+                    let existing = self.shell.vfs.read_to_string(path, &self.shell.cwd).unwrap_or_default();
+                    existing + &result.stdout
+                } else {
+                    result.stdout.clone()
+                };
+                if let Err(e) = self.shell.vfs.write(path, &self.shell.cwd, &final_stdout) {
+                    result.stderr = format!("redirect: {}: {}\n", path, e);
+                    result.exit_code = 1;
+                }
             }
             result.stdout = String::new();
         }
 
         // Write stderr to file
         if let Some((ref path, append)) = &spec.stderr_file {
-            let final_stderr = if *append {
-                let existing = self.shell.vfs.read_to_string(path, &self.shell.cwd).unwrap_or_default();
-                existing + &result.stderr
-            } else {
-                result.stderr.clone()
-            };
-            if let Err(e) = self.shell.vfs.write(path, &self.shell.cwd, &final_stderr) {
-                if result.stderr.is_empty() {
-                    result.stderr = format!("redirect: {}: {}\n", path, e);
+            if path != "/dev/null" {
+                let final_stderr = if *append {
+                    let existing = self.shell.vfs.read_to_string(path, &self.shell.cwd).unwrap_or_default();
+                    existing + &result.stderr
                 } else {
-                    result.stderr.push_str(&format!("redirect: {}: {}\n", path, e));
+                    result.stderr.clone()
+                };
+                if let Err(e) = self.shell.vfs.write(path, &self.shell.cwd, &final_stderr) {
+                    if result.stderr.is_empty() {
+                        result.stderr = format!("redirect: {}: {}\n", path, e);
+                    } else {
+                        result.stderr.push_str(&format!("redirect: {}: {}\n", path, e));
+                    }
+                    result.exit_code = 1;
                 }
-                result.exit_code = 1;
             }
             result.stderr = String::new();
         }
@@ -1672,13 +1737,15 @@ impl Runtime {
                     }
                     // Per-stage stderr file redirect.
                     if let Some((ref path, append)) = &stage_spec.stderr_file {
-                        let mut content = if *append {
-                            shell.vfs.read_to_string(path, &shell.cwd).unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
-                        content.push_str(&result.stderr);
-                        let _ = shell.vfs.write(path, &shell.cwd, &content);
+                        if path != "/dev/null" {
+                            let mut content = if *append {
+                                shell.vfs.read_to_string(path, &shell.cwd).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            content.push_str(&result.stderr);
+                            let _ = shell.vfs.write(path, &shell.cwd, &content);
+                        }
                         result.stderr.clear();
                     }
 
@@ -1701,6 +1768,8 @@ impl Runtime {
         let mut final_exit_code = 0;
         let mut final_stdout = String::new();
         let mut panicked = false;
+        let mut first_panicked: Option<usize> = None;
+        let total_stages = threads.len();
 
         let pipefail = self.shell.pipefail;
 
@@ -1743,6 +1812,9 @@ impl Runtime {
                     }
                 }
                 Ok(Err(_)) | Err(_) => {
+                    if first_panicked.is_none() {
+                        first_panicked = Some(i);
+                    }
                     panicked = true;
                 }
             }
@@ -1751,7 +1823,11 @@ impl Runtime {
         self.shell.cwd = saved_cwd;
 
         if panicked {
-            return CommandOutput::error(format!("pipeline: thread panicked\n{}", all_stderr), 1);
+            let stage = first_panicked.map(|i| i + 1).unwrap_or(0);
+            let total = total_stages;
+            return CommandOutput::error(
+                format!("pipeline: stage {}/{} panicked (may be empty pipe, stderr noise, or unrecognized option; use 2>/dev/null to silence stderr)\n{}",
+                    stage, total, all_stderr), 1);
         }
 
         let mut result = CommandOutput {
@@ -2290,6 +2366,7 @@ fn split_segments(input: &str) -> Vec<Segment> {
     let mut in_single = false;
     let mut in_double = false;
     let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
     let mut i = 0;
 
     macro_rules! flush {
@@ -2389,7 +2466,7 @@ fn split_segments(input: &str) -> Vec<Segment> {
                     i = j;
                     flush!();
                 } else {
-                    if brace_depth == 0 {
+                    if brace_depth == 0 && paren_depth == 0 {
                         flush!();
                     } else {
                         current.push(c);
@@ -2398,7 +2475,7 @@ fn split_segments(input: &str) -> Vec<Segment> {
                 }
             }
             ';' => {
-                if brace_depth == 0 {
+                if brace_depth == 0 && paren_depth == 0 {
                     flush!();
                 } else {
                     current.push(c);
@@ -2406,7 +2483,7 @@ fn split_segments(input: &str) -> Vec<Segment> {
                 i += 1;
             }
             '&' => {
-                if i + 1 < n && chars[i + 1] == '&' && brace_depth == 0 {
+                if i + 1 < n && chars[i + 1] == '&' && brace_depth == 0 && paren_depth == 0 {
                     next_connector = Connector::AndIf;
                     flush!();
                     i += 2;
@@ -2419,14 +2496,18 @@ fn split_segments(input: &str) -> Vec<Segment> {
                     // part of `2>&1` / `>&` — keep literally.
                     current.push(c);
                     i += 1;
-                } else {
+                } else if brace_depth == 0 && paren_depth == 0 {
                     // Trailing background `&` — run synchronously.
                     flush!();
+                    i += 1;
+                } else {
+                    // Inside a subshell/brace group — keep `&`/`&&` literally.
+                    current.push(c);
                     i += 1;
                 }
             }
             '|' => {
-                if i + 1 < n && chars[i + 1] == '|' && brace_depth == 0 {
+                if i + 1 < n && chars[i + 1] == '|' && brace_depth == 0 && paren_depth == 0 {
                     next_connector = Connector::OrIf;
                     flush!();
                     i += 2;
@@ -2506,6 +2587,23 @@ fn split_segments(input: &str) -> Vec<Segment> {
             '}' => {
                 if brace_depth > 0 {
                     brace_depth -= 1;
+                }
+                current.push(c);
+                i += 1;
+            }
+            '(' => {
+                // Subshell `( ... )` — unless it's `$( <( >(` (command/process
+                // substitution), which is handled during variable expansion.
+                let prev_is_op = i > 0 && matches!(chars[i - 1], '$' | '<' | '>');
+                if !prev_is_op {
+                    paren_depth += 1;
+                }
+                current.push(c);
+                i += 1;
+            }
+            ')' => {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
                 }
                 current.push(c);
                 i += 1;
@@ -2767,6 +2865,42 @@ fn parse_command(input: &str) -> Vec<ParsedToken> {
                 current.clear();
                 quoted = false;
             }
+        } else if ch == '>' || ch == '<' {
+            // Redirect operator. Fold a numeric fd prefix (or `&`) into the
+            // operator token so `2>`, `2>>`, `2>&1`, `&>` are one token —
+            // matching how bash lexes `2>/dev/null` (fd and `>` are adjacent).
+            // A non-fd word before the operator is pushed as a normal arg
+            // first (e.g. `echo hi>f` → `echo hi > f`).
+            let is_fd_prefix = !current.is_empty()
+                && (current.chars().all(|c| c.is_ascii_digit()) || current == "&");
+            if !is_fd_prefix && !current.is_empty() {
+                parts.push(ParsedToken::new(current.clone(), quoted));
+                current.clear();
+            }
+            let mut op = String::new();
+            if is_fd_prefix {
+                op.push_str(&current);
+                current.clear();
+            }
+            op.push(ch);
+            // Combine `>>`, `<<`, `<>`, `>&`.
+            if let Some(&next) = chars.peek() {
+                if next == '>' || next == '<' {
+                    op.push(chars.next().unwrap());
+                } else if ch == '>' && next == '&' {
+                    op.push(chars.next().unwrap());
+                }
+            }
+            // `2>&1` / `1>&2`: fold the trailing fd digit into the operator.
+            if op.ends_with(">&") {
+                if let Some(&next) = chars.peek() {
+                    if next.is_ascii_digit() {
+                        op.push(chars.next().unwrap());
+                    }
+                }
+            }
+            parts.push(ParsedToken::new(op, false));
+            quoted = false;
         } else {
             current.push(ch);
         }
@@ -2916,14 +3050,83 @@ fn is_range(s: &str) -> bool {
 fn expand_range(s: &str) -> Vec<String> {
     if let Some(pos) = s.find("..") {
         let start_str = &s[..pos];
-        let end_str = &s[pos + 2..];
+        // Support `{1..10..2}` step form.
+        let (end_str, step_str) = match s[pos + 2..].find("..") {
+            Some(spos) => (&s[pos + 2..pos + 2 + spos], Some(&s[pos + 2 + spos + 2..])),
+            None => (&s[pos + 2..], None),
+        };
+        let explicit_step: Option<i64> = step_str.and_then(|v| v.parse().ok());
+
+        // Numeric range (with optional leading-zero padding).
         if let (Ok(start), Ok(end)) = (start_str.parse::<i64>(), end_str.parse::<i64>()) {
-            if start <= end {
-                return (start..=end).map(|n| n.to_string()).collect();
+            // Implicit step: descending when start > end (bash `{5..1}`).
+            let step = explicit_step.unwrap_or(if start > end { -1 } else { 1 });
+            if step == 0 {
+                return vec![s.to_string()];
+            }
+            let mut out = Vec::new();
+            let mut n = start;
+            if step > 0 {
+                while n <= end {
+                    out.push(format_num(n, start_str, end_str));
+                    n += step;
+                }
+            } else {
+                while n >= end {
+                    out.push(format_num(n, start_str, end_str));
+                    n += step;
+                }
+            }
+            return out;
+        }
+
+        // Alphabetic range `{a..z}` / `{z..a}`.
+        if start_str.len() == 1 && end_str.len() == 1 {
+            if let (Some(sc), Some(ec)) = (start_str.chars().next(), end_str.chars().next()) {
+                if sc.is_ascii_alphabetic() && ec.is_ascii_alphabetic() {
+                    let step = explicit_step
+                        .unwrap_or(if sc > ec { -1 } else { 1 });
+                    if step == 0 {
+                        return vec![s.to_string()];
+                    }
+                    let mut out = Vec::new();
+                    let mut c = sc as u8 as i64;
+                    let target = ec as u8 as i64;
+                    if step > 0 {
+                        while c <= target {
+                            out.push((c as u8 as char).to_string());
+                            c += step;
+                        }
+                    } else {
+                        while c >= target {
+                            out.push((c as u8 as char).to_string());
+                            c += step;
+                        }
+                    }
+                    return out;
+                }
             }
         }
     }
     vec![s.to_string()]
+}
+
+/// Format a numeric range element, preserving leading-zero padding only when
+/// a range endpoint itself is zero-padded (e.g. `{01..10}` → 01, 02, ...;
+/// `{1..10}` → 1, 2, ...).
+fn format_num(n: i64, start_str: &str, end_str: &str) -> String {
+    let pad_zero = start_str.starts_with('0') || end_str.starts_with('0');
+    if pad_zero {
+        let width = start_str.len().max(end_str.len());
+        let s = n.to_string();
+        let digits = s.trim_start_matches('-').len();
+        if digits < width {
+            let pad = width - digits;
+            let sign = if n < 0 { "-" } else { "" };
+            return format!("{}{}{}", sign, "0".repeat(pad), s.trim_start_matches('-'));
+        }
+    }
+    n.to_string()
 }
 
 fn normalize_vpath(path: &str) -> String {
@@ -3447,6 +3650,66 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_command_redirect_attached() {
+        // bash treats `2>/dev/null` as fd 2 redirect to /dev/null (no space).
+        let parts = parse_command("ls 2>/dev/null");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["ls", "2>", "/dev/null"]);
+    }
+
+    #[test]
+    fn test_parse_command_redirect_merge_attached() {
+        let parts = parse_command("cmd 2>&1");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["cmd", "2>&1"]);
+    }
+
+    #[test]
+    fn test_parse_command_redirect_append_attached() {
+        let parts = parse_command("echo hi 2>>err.log");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["echo", "hi", "2>>", "err.log"]);
+    }
+
+    #[test]
+    fn test_parse_command_redirect_stdout_attached() {
+        let parts = parse_command("echo hi >out.txt");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["echo", "hi", ">", "out.txt"]);
+    }
+
+    #[test]
+    fn test_parse_command_redirect_both_attached() {
+        let parts = parse_command("cat x &>out.txt");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["cat", "x", "&>", "out.txt"]);
+    }
+
+    #[test]
+    fn test_parse_command_redirect_after_arg() {
+        // `echo hi>f` → hi is a normal arg, `>` redirects stdout.
+        let parts = parse_command("echo hi>f");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["echo", "hi", ">", "f"]);
+    }
+
+    #[test]
+    fn test_parse_command_redirect_in_quotes_not_split() {
+        // `>` inside quotes is literal, not a redirect.
+        let parts = parse_command("echo \"a > b\"");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["echo", "a > b"]);
+    }
+
+    #[test]
+    fn test_parse_command_redirect_with_space_still_works() {
+        // `2> /dev/null` (space) must still tokenize the same way.
+        let parts = parse_command("ls 2> /dev/null");
+        let values: Vec<String> = parts.iter().map(|t| t.value.clone()).collect();
+        assert_eq!(values, vec!["ls", "2>", "/dev/null"]);
+    }
+
+    #[test]
     fn test_parse_pipeline() {
         let stages = parse_pipeline("ls -la | grep foo | wc -l");
         assert_eq!(stages.len(), 3);
@@ -3618,6 +3881,33 @@ mod tests {
         assert_eq!(r.exit_code, 0);
         let content = rt.shell.vfs.read_to_string("/pipe_out.txt", &rt.shell.cwd).unwrap();
         assert_eq!(content.trim(), "hello");
+    }
+
+    #[test]
+    fn test_pipeline_stderr_redirect_to_dev_null() {
+        let mut rt = setup_runtime();
+        // Pipeline where first stage has stderr redirected — simulate model's pattern
+        let r = rt.execute("cat /nonexistent_file 2> /dev/null | head -20");
+        assert_eq!(r.exit_code, 0, "exit code should be 0 even with 2>/dev/null in pipe");
+    }
+
+    #[test]
+    fn test_compound_with_pipe_and_stderr_redirect() {
+        let mut rt = setup_runtime();
+        // Exact pattern from the session: ; chain with pipeline containing 2>
+        let r = rt.execute("echo before; cat /nonexistent 2> /dev/null; echo after");
+        assert_eq!(r.exit_code, 0, "compound command with 2>/dev/null should not crash");
+        assert!(r.stdout.contains("before"));
+        assert!(r.stdout.contains("after"));
+    }
+
+    #[test]
+    fn test_compound_pipe_head_with_stderr_redirect() {
+        let mut rt = setup_runtime();
+        // Pattern from session: ls piped to head, with stderr redirect elsewhere
+        let r = rt.execute("ls /tmp 2>/dev/null | head -5");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stderr.is_empty(), "stderr should be redirected, got: {}", r.stderr);
     }
 
     #[test]
@@ -4191,10 +4481,18 @@ mod tests {
     }
 
     #[test]
-    fn test_function_not_found() {
+    fn test_redirect_dev_null_does_not_create_file() {
         let mut rt = setup_runtime();
-        let out = rt.execute("nonexistent_func");
-        assert_ne!(out.exit_code, 0);
+        let _ = rt.execute("echo hello 2> /dev/null");
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd),
+            "/dev/null should not be created as a regular file");
+    }
+
+    #[test]
+    fn test_redirect_dev_null_stdout_does_not_create_file() {
+        let mut rt = setup_runtime();
+        let _ = rt.execute("echo hello > /dev/null");
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd));
     }
 
     #[test]
@@ -4502,5 +4800,225 @@ mod tests {
         let out = rt.execute("cat < /data.txt | grep apple | wc -l > /count.txt");
         let content = rt.shell.vfs.read_to_string("/count.txt", &rt.shell.cwd).unwrap_or_default();
         assert_eq!(content.trim(), "2");
+    }
+
+    // ─────── /dev/null 专项测试 ───────
+
+    #[test]
+    fn test_dev_null_stderr_on_error() {
+        let mut rt = mk_rt();
+        // Error-producing command with stderr redirected to /dev/null
+        let r = rt.execute("cat /no_such_file 2> /dev/null");
+        assert_eq!(r.exit_code, 1, "cat non-existent file should return exit code 1");
+        assert!(r.stderr.is_empty(), "stderr should be discarded, got: {}", r.stderr);
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd),
+            "/dev/null should not be created");
+    }
+
+    #[test]
+    fn test_dev_null_both_redirect() {
+        let mut rt = mk_rt();
+        // &> redirect to /dev/null
+        let r = rt.execute("cat /no_such_file &> /dev/null");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stdout.is_empty());
+        assert!(r.stderr.is_empty());
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd));
+    }
+
+    #[test]
+    fn test_dev_null_does_not_accumulate() {
+        let mut rt = mk_rt();
+        // Repeated 2>/dev/null should not create a growing file
+        for _ in 0..5 {
+            let _ = rt.execute("cat /no_such_file 2> /dev/null");
+        }
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd),
+            "repeated 2>/dev/null should not create file");
+    }
+
+    #[test]
+    fn test_dev_null_in_pipeline_with_empty_input() {
+        let mut rt = mk_rt();
+        // When previous stage produces no stdout, pipe to next is empty
+        let r = rt.execute("cat /no_such_file 2> /dev/null | grep x");
+        assert_eq!(r.exit_code, 1, "grep with no match should return 1");
+        assert!(r.stderr.is_empty(), "pipeline should not panic with 2>/dev/null");
+    }
+
+    #[test]
+    fn test_dev_null_in_compound_chain() {
+        let mut rt = mk_rt();
+        // Multiple commands with 2>/dev/null in semicolon chain
+        let r = rt.execute("echo a; cat /noexist 2> /dev/null; echo b; ls /noexist 2> /dev/null; echo c");
+        assert_eq!(r.exit_code, 0, "compound chain should complete normally, got stderr: {}", r.stderr);
+        assert!(r.stdout.contains("a"), "missing a");
+        assert!(r.stdout.contains("b"), "missing b");
+        assert!(r.stdout.contains("c"), "missing c");
+        assert!(r.stderr.is_empty(), "stderr should be gone, got: {}", r.stderr);
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd));
+    }
+
+    #[test]
+    fn test_dev_null_stdout_to_file_stderr_to_null() {
+        let mut rt = mk_rt();
+        // stdout to real file, stderr to /dev/null
+        let r = rt.execute("echo ok > /dest.txt 2> /dev/null");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.is_empty());
+        assert!(r.stderr.is_empty());
+        assert!(rt.shell.vfs.exists("/dest.txt", &rt.shell.cwd),
+            "/dest.txt should exist");
+        let content = rt.shell.vfs.read_to_string("/dest.txt", &rt.shell.cwd).unwrap();
+        assert_eq!(content.trim(), "ok");
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd));
+    }
+
+    #[test]
+    fn test_dev_null_in_three_stage_pipeline() {
+        let mut rt = mk_rt();
+        // Three-stage pipeline with stderr suppression on stage 1
+        rt.execute("echo \"apple\nbanana\napricot\" > /fruits.txt");
+        let r = rt.execute("cat /fruits.txt 2> /dev/null | grep ap | wc -l");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "2", "should count apple and apricot");
+    }
+
+    #[test]
+    fn test_pipeline_with_stderr_redirect_to_real_file() {
+        let mut rt = mk_rt();
+        // Pipeline stage with stderr to a real file (not /dev/null)
+        let r = rt.execute("cat /noexist 2> /errors.txt | head -5");
+        assert!(rt.shell.vfs.exists("/errors.txt", &rt.shell.cwd),
+            "stderr should be written to real file");
+        let err = rt.shell.vfs.read_to_string("/errors.txt", &rt.shell.cwd).unwrap();
+        assert!(!err.is_empty(), "error file should contain content");
+    }
+
+    // ─────── 连写重定向（对齐 bash） + python 重定向剥离 ───────
+
+    #[test]
+    fn test_redirect_attached_dev_null_stderr() {
+        let mut rt = mk_rt();
+        // `2>/dev/null` (no space) — the LLM's most common spelling.
+        let r = rt.execute("cat /no_such_file 2>/dev/null");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.is_empty(), "stderr should be discarded, got: {}", r.stderr);
+        assert!(!rt.shell.vfs.exists("/dev/null", &rt.shell.cwd));
+    }
+
+    #[test]
+    fn test_redirect_attached_stdout_to_file() {
+        let mut rt = mk_rt();
+        let r = rt.execute("echo hello >/out.txt");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.is_empty(), "stdout should go to file, got: {}", r.stdout);
+        let content = rt.shell.vfs.read_to_string("/out.txt", &rt.shell.cwd).unwrap();
+        assert_eq!(content.trim(), "hello");
+    }
+
+    #[test]
+    fn test_which_redirect_attached() {
+        let mut rt = mk_rt();
+        // Reproduces the session's `which pip 2>/dev/null` → "2>/dev/null not found".
+        let r = rt.execute("which pip 2>/dev/null");
+        assert!(!r.stderr.contains("2>/dev/null"), "redirect must be parsed, got: {}", r.stderr);
+    }
+
+    #[test]
+    fn test_python_c_redirect_merge_attached() {
+        let mut rt = setup_runtime();
+        // `python3 -c "..." 2>&1` must not leak `2>&1` into the code.
+        let r = rt.execute("python3 -c \"print('ok')\" 2>&1");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert!(r.stdout.contains("ok"), "stdout={}", r.stdout);
+        assert!(!r.stderr.contains("SyntaxError"), "stderr should not have SyntaxError: {}", r.stderr);
+    }
+
+    #[test]
+    fn test_python_c_redirect_stderr_null_attached() {
+        let mut rt = setup_runtime();
+        // Erroring python + stderr → /dev/null (no space).
+        let r = rt.execute("python3 -c \"import nonexistent_mod_xyz\" 2>/dev/null");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.is_empty(), "stderr should be discarded, got: {}", r.stderr);
+    }
+
+    // ─────── 子 shell / 命令组 / env / 花括号 ───────
+
+    #[test]
+    fn test_subshell_isolates_cwd() {
+        let mut rt = mk_rt();
+        rt.execute("mkdir -p /subdir");
+        // ( cd /subdir && pwd ) then pwd again should still be /.
+        let r = rt.execute("(cd /subdir && pwd); pwd");
+        assert!(r.stdout.contains("/subdir"), "subshell pwd should be /subdir: {}", r.stdout);
+        // After the subshell, cwd is restored to /.
+        let pwd = rt.execute("pwd");
+        assert_eq!(pwd.stdout.trim(), "/", "cwd must be restored after subshell, got: {}", pwd.stdout);
+    }
+
+    #[test]
+    fn test_command_group_propagates_cwd() {
+        let mut rt = mk_rt();
+        rt.execute("mkdir -p /subdir");
+        // { cd /subdir; } propagates the cd to the current shell.
+        rt.execute("{ cd /subdir; }");
+        let pwd = rt.execute("pwd");
+        assert_eq!(pwd.stdout.trim(), "/subdir", "command group cd should propagate, got: {}", pwd.stdout);
+    }
+
+    #[test]
+    fn test_env_prefix_assignment() {
+        let mut rt = mk_rt();
+        // `env VAR=x` (assignment-only) is equivalent to `VAR=x`: it sets the
+        // shell variable for subsequent commands.
+        rt.execute("env MYVAR=hello");
+        let r = rt.execute("echo $MYVAR");
+        assert!(r.stdout.contains("hello"), "env VAR=x should set the var, got: {}", r.stdout);
+    }
+
+    #[test]
+    fn test_env_unset() {
+        let mut rt = mk_rt();
+        rt.execute("MYVAR=hello");
+        assert!(rt.execute("echo $MYVAR").stdout.contains("hello"));
+        rt.execute("env -u MYVAR");
+        let r = rt.execute("echo $MYVAR");
+        assert!(!r.stdout.contains("hello"), "env -u should unset the var, got: {}", r.stdout);
+    }
+
+    #[test]
+    fn test_env_ignore_environment() {
+        let mut rt = mk_rt();
+        rt.execute("MYVAR=hello");
+        assert!(rt.execute("echo $MYVAR").stdout.contains("hello"));
+        rt.execute("env -i");
+        let r = rt.execute("echo $MYVAR");
+        assert!(!r.stdout.contains("hello"), "env -i should clear vars, got: {}", r.stdout);
+    }
+
+    #[test]
+    fn test_brace_range_descending() {
+        let r = brace_expand_inner("{5..1}");
+        assert_eq!(r, vec!["5", "4", "3", "2", "1"]);
+    }
+
+    #[test]
+    fn test_brace_range_alphabetic() {
+        let r = brace_expand_inner("{a..e}");
+        assert_eq!(r, vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn test_brace_range_step() {
+        let r = brace_expand_inner("{1..10..3}");
+        assert_eq!(r, vec!["1", "4", "7", "10"]);
+    }
+
+    #[test]
+    fn test_brace_range_zero_padding() {
+        let r = brace_expand_inner("{01..03}");
+        assert_eq!(r, vec!["01", "02", "03"]);
     }
 }

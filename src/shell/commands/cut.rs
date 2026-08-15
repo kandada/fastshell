@@ -23,6 +23,8 @@ impl Shell {
         let mut fields: Vec<FieldRange> = Vec::new();
         let mut char_mode = false;
         let mut complement = false;
+        let mut only_delimited = false;
+        let mut output_delimiter: Option<String> = None;
         let mut files = Vec::new();
 
         let mut i = 0;
@@ -47,7 +49,17 @@ impl Shell {
                         i += 1;
                     }
                 }
+                "-s" | "--only-delimited" => only_delimited = true,
                 "--complement" => complement = true,
+                "--output-delimiter" => {
+                    if i + 1 < args.len() {
+                        output_delimiter = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                arg if arg.starts_with("--output-delimiter=") => {
+                    output_delimiter = Some(arg["--output-delimiter=".len()..].to_string());
+                }
                 arg if arg.starts_with("-d") && arg.len() > 2 => {
                     delimiter = arg[2..].chars().next().unwrap_or('\t');
                 }
@@ -59,7 +71,7 @@ impl Shell {
                     char_mode = true;
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => eprintln!("cut: warning: unsupported option '{}'", args[i]),
+                _ => crate::warn!("cut: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -85,7 +97,11 @@ impl Shell {
         };
 
         let mut output = String::new();
+        let out_delim = output_delimiter.unwrap_or_else(|| delimiter.to_string());
         for line in input.lines() {
+            if only_delimited && !line.contains(delimiter) {
+                continue;
+            }
             if char_mode {
                 let chars: Vec<char> = line.chars().collect();
                 let total = chars.len();
@@ -143,14 +159,14 @@ impl Shell {
                         }
                     }
                     if !result_parts.is_empty() {
-                        output.push_str(&result_parts.join(&delimiter.to_string()));
+                        output.push_str(&result_parts.join(&out_delim));
                     }
                 } else if !parts.is_empty() {
                     let mut result_parts = Vec::new();
                     for &idx in &parts {
                         result_parts.push(cols[idx].to_string());
                     }
-                    output.push_str(&result_parts.join(&delimiter.to_string()));
+                    output.push_str(&result_parts.join(&out_delim));
                 }
             }
             output.push('\n');
@@ -205,7 +221,7 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)

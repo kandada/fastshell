@@ -47,7 +47,7 @@ impl Shell {
                         'S' => sort_size = true,
                         'r' => reverse = true,
                         '1' => single_column = true,
-                        _ => eprintln!("ls: warning: unsupported option '-{}'", ch),
+                        _ => crate::warn!("ls: warning: unsupported option '-{}'", ch),
                     }
                 }
             } else {

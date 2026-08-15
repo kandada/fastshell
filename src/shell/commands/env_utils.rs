@@ -20,9 +20,17 @@ Strip last component from file name.
 
 impl Shell {
     pub fn cmd_env(&self, args: &[&str]) -> CommandOutput {
+        // `env VAR=x cmd ...` is handled upstream by `consume_assignments`;
+        // reaching here means bare `env` (print the sandbox environment).
+        let mut entries: Vec<(&String, &String)> = self
+            .vars
+            .iter()
+            .filter(|(k, _)| self.exported.contains(*k))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
         let mut output = String::new();
-        for (key, value) in std::env::vars() {
-            output.push_str(&format!("{}={}\n", key, value));
+        for (k, v) in entries {
+            output.push_str(&format!("{}={}\n", k, v));
         }
         let _ = args;
         CommandOutput::success(output)
@@ -35,12 +43,14 @@ impl Shell {
         let mut output = String::new();
         for arg in args {
             if !arg.starts_with('-') {
-                match std::env::var(arg) {
-                    Ok(val) => {
-                        output.push_str(&val);
-                        output.push('\n');
-                    }
-                    Err(_) => {}
+                let val = self
+                    .vars
+                    .get(*arg)
+                    .cloned()
+                    .or_else(|| std::env::var(arg).ok());
+                if let Some(val) = val {
+                    output.push_str(&val);
+                    output.push('\n');
                 }
             }
         }
@@ -69,7 +79,7 @@ impl Shell {
         }
         for arg in args {
             if arg.starts_with('-') {
-                eprintln!("basename: warning: unsupported option '{}'", arg);
+                crate::warn!("basename: warning: unsupported option '{}'", arg);
             }
         }
         let files: Vec<&str> = args
@@ -108,7 +118,7 @@ impl Shell {
         }
         for arg in args {
             if arg.starts_with('-') {
-                eprintln!("dirname: warning: unsupported option '{}'", arg);
+                crate::warn!("dirname: warning: unsupported option '{}'", arg);
             }
         }
         let files: Vec<&str> = args
@@ -175,63 +185,96 @@ fn simple_printf(format: &str, args: &[&str]) -> String {
             }
             i += 2;
         } else if chars[i] == '%' && i + 1 < chars.len() {
-            match chars[i + 1] {
-                '%' => {
-                    result.push('%');
-                    i += 2;
-                }
-                's' => {
-                    if arg_idx < args.len() {
-                        result.push_str(args[arg_idx]);
-                        arg_idx += 1;
+            // Parse `%[flags][width][.precision]spec`.
+            let mut j = i + 1;
+            let mut left_align = false;
+            let mut zero_pad = false;
+            while j < chars.len() {
+                match chars[j] {
+                    '-' => {
+                        left_align = true;
+                        j += 1;
                     }
-                    i += 2;
-                }
-                'd' | 'i' => {
-                    if arg_idx < args.len() {
-                        let val: i64 = args[arg_idx].parse().unwrap_or(0);
-                        result.push_str(&val.to_string());
-                        arg_idx += 1;
+                    '0' => {
+                        zero_pad = true;
+                        j += 1;
                     }
-                    i += 2;
-                }
-                'f' => {
-                    if arg_idx < args.len() {
-                        let val: f64 = args[arg_idx].parse().unwrap_or(0.0);
-                        result.push_str(&format!("{:.6}", val));
-                        arg_idx += 1;
+                    '+' | ' ' => {
+                        j += 1;
                     }
-                    i += 2;
-                }
-                'x' => {
-                    if arg_idx < args.len() {
-                        let val: u64 = u64::from_str_radix(args[arg_idx], 16).unwrap_or(0);
-                        result.push_str(&format!("{:x}", val));
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                'o' => {
-                    if arg_idx < args.len() {
-                        let val: u64 = u64::from_str_radix(args[arg_idx], 8).unwrap_or(0);
-                        result.push_str(&format!("{:o}", val));
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                'u' => {
-                    if arg_idx < args.len() {
-                        let val: u64 = args[arg_idx].parse().unwrap_or(0);
-                        result.push_str(&val.to_string());
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                _ => {
-                    result.push(chars[i]);
-                    i += 1;
+                    _ => break,
                 }
             }
+            let mut width = 0usize;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                width = width * 10 + chars[j].to_digit(10).unwrap() as usize;
+                j += 1;
+            }
+            let mut precision: Option<usize> = None;
+            if j < chars.len() && chars[j] == '.' {
+                j += 1;
+                let mut p = 0usize;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    p = p * 10 + chars[j].to_digit(10).unwrap() as usize;
+                    j += 1;
+                }
+                precision = Some(p);
+            }
+            if j >= chars.len() {
+                result.push('%');
+                i += 1;
+                continue;
+            }
+            let spec = chars[j];
+            j += 1;
+
+            if spec == '%' {
+                result.push('%');
+                i = j;
+                continue;
+            }
+
+            let arg = args.get(arg_idx).copied().unwrap_or("");
+            arg_idx += 1;
+
+            let mut rendered = match spec {
+                's' => arg.to_string(),
+                'd' | 'i' => arg.parse::<i64>().map(|v| v.to_string()).unwrap_or_else(|_| "0".into()),
+                'u' => arg.parse::<u64>().map(|v| v.to_string()).unwrap_or_else(|_| "0".into()),
+                'f' => {
+                    let v = arg.parse::<f64>().unwrap_or(0.0);
+                    match precision {
+                        Some(p) => format!("{:.*}", p, v),
+                        None => format!("{:.6}", v),
+                    }
+                }
+                'x' => arg.parse::<u64>().map(|v| format!("{:x}", v)).unwrap_or_else(|_| "0".into()),
+                'o' => arg.parse::<u64>().map(|v| format!("{:o}", v)).unwrap_or_else(|_| "0".into()),
+                'c' => arg.chars().next().map(|c| c.to_string()).unwrap_or_default(),
+                other => format!("%{}", other),
+            };
+
+            // String precision truncates.
+            if spec == 's' {
+                if let Some(p) = precision {
+                    rendered = rendered.chars().take(p).collect();
+                }
+            }
+
+            // Apply width / alignment / zero-pad.
+            let len = rendered.chars().count();
+            if width > len {
+                let pad = width - len;
+                let pad_char = if zero_pad && !left_align && spec != 's' { '0' } else { ' ' };
+                let pad_str: String = std::iter::repeat(pad_char).take(pad).collect();
+                if left_align {
+                    rendered = format!("{}{}", rendered, pad_str);
+                } else {
+                    rendered = format!("{}{}", pad_str, rendered);
+                }
+            }
+            result.push_str(&rendered);
+            i = j;
         } else {
             result.push(chars[i]);
             i += 1;
@@ -287,5 +330,27 @@ mod tests {
         let out = s.execute("dirname", &["--help"], None);
         assert_eq!(out.exit_code, 0);
         assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_printf_width() {
+        assert_eq!(super::simple_printf("[%5s]", &["ab"]), "[   ab]");
+        assert_eq!(super::simple_printf("[%-5s]", &["ab"]), "[ab   ]");
+    }
+
+    #[test]
+    fn test_printf_zero_pad() {
+        assert_eq!(super::simple_printf("%05d", &["42"]), "00042");
+    }
+
+    #[test]
+    fn test_printf_precision() {
+        assert_eq!(super::simple_printf("%.2f", &["3.14159"]), "3.14");
+        assert_eq!(super::simple_printf("%.3s", &["hello"]), "hel");
+    }
+
+    #[test]
+    fn test_printf_char() {
+        assert_eq!(super::simple_printf("%c", &["A"]), "A");
     }
 }

@@ -19,6 +19,34 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use types::*;
 
+/// Run a shell command closure under `catch_unwind` so a panic in any builtin
+/// cannot kill the SDK worker thread. A panicking command is reported as a
+/// clear `CommandOutput` error (exit 134, SIGABRT convention) instead of an
+/// opaque "worker thread disconnected" message.
+fn guarded_execute<F>(f: F, command: &str) -> crate::shell::CommandOutput
+where
+    F: FnOnce() -> crate::shell::CommandOutput,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(output) => output,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            crate::shell::CommandOutput::error(
+                format!(
+                    "fastshell: internal error: command panicked ({msg})\n  command: {command}\n"
+                ),
+                134,
+            )
+        }
+    }
+}
+
 pub struct Fastshell {
     runtime: Arc<Mutex<Runtime>>,
     config: Config,
@@ -166,7 +194,7 @@ impl Fastshell {
                 ));
                 return;
             }
-            let output = runtime.execute(&cmd);
+            let output = guarded_execute(|| runtime.execute(&cmd), &cmd);
             let _ = tx.send(output);
         }).expect("fastshell-exec thread spawn failed");
 
@@ -180,7 +208,7 @@ impl Fastshell {
                     exit_code: 124,
                 }
             }
-            Err(_) => CommandResult::error("internal error".to_string()),
+            Err(_) => CommandResult::error(format!("internal error: worker thread disconnected (shell panicked or was dropped) while running: {command}")),
         }
     }
 
@@ -228,7 +256,7 @@ impl Fastshell {
                 ));
                 return;
             }
-            let output = runtime.execute(&cmd);
+            let output = guarded_execute(|| runtime.execute(&cmd), &cmd);
             let _ = tx.send(output);
         }).expect("fastshell-exec-tw thread spawn failed");
 
@@ -242,7 +270,7 @@ impl Fastshell {
                     exit_code: 124,
                 }
             }
-            Err(_) => CommandResult::error("internal error".to_string()),
+            Err(_) => CommandResult::error(format!("internal error: worker thread disconnected (shell panicked or was dropped) while running: {command}")),
         }
     }
 
@@ -300,7 +328,7 @@ impl Fastshell {
                 ));
                 return;
             }
-            let output = runtime.execute_with_cwd(&dir, &cmd);
+            let output = guarded_execute(|| runtime.execute_with_cwd(&dir, &cmd), &cmd);
             let _ = tx.send(output);
         }).expect("fastshell-exec-cwd thread spawn failed");
 
@@ -314,7 +342,7 @@ impl Fastshell {
                     exit_code: 124,
                 }
             }
-            Err(_) => CommandResult::error("internal error".to_string()),
+            Err(_) => CommandResult::error(format!("internal error: worker thread disconnected (shell panicked or was dropped) while running: {command}")),
         }
     }
 
@@ -522,6 +550,28 @@ mod tests {
     fn test_init() {
         let sdk = setup_sdk();
         assert!(sdk.is_initialized());
+    }
+
+    #[test]
+    fn test_guarded_execute_catches_panic() {
+        let out = guarded_execute(
+            || panic!("boom"),
+            "some command",
+        );
+        assert_eq!(out.exit_code, 134);
+        assert!(out.stderr.contains("command panicked"), "stderr={}", out.stderr);
+        assert!(out.stderr.contains("boom"), "stderr={}", out.stderr);
+        assert!(out.stderr.contains("some command"), "stderr={}", out.stderr);
+    }
+
+    #[test]
+    fn test_guarded_execute_passthrough() {
+        let out = guarded_execute(
+            || crate::shell::CommandOutput::success("ok".to_string()),
+            "echo ok",
+        );
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, "ok");
     }
 
     #[test]

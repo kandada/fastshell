@@ -27,6 +27,13 @@ python-rustpython = [
     "rustpython-stdlib",
     "rustpython-pylib",
 ]
+# JavaScript/TypeScript static syntax checking (oxc, pure Rust) backing the
+# `jscheck` / `node --check` shell commands. No engine, no native deps.
+js-oxc = [
+    "oxc_parser",
+    "oxc_allocator",
+    "oxc_span",
+]
 # Direct-JNI cdylib path (方案 A): exports Java_com_fastshell_Sdk_* symbols
 # from Rust. Leave OFF for the staticlib + NDK CMake path (方案 B, fastshell_c),
 # where the JNI layer lives in C (jni_glue.c) and Rust exposes only pure C ABI.
@@ -69,6 +76,7 @@ md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zip = "0.6"
+pdf-extract = "0.12"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 glob = "0.3"
@@ -85,3 +93,8 @@ pyo3 = { version = "0.22", optional = true }
 rustpython-vm = { version = "=0.5.0", default-features = false, features = ["compiler", "freeze-stdlib", "threading", "importlib", "encodings", "host_env", "stdio", "gc"], optional = true }
 rustpython-stdlib = { version = "=0.5.0", default-features = false, features = ["threading", "compiler"], optional = true }
 rustpython-pylib = { version = "=0.5.0", features = ["freeze-stdlib"], optional = true }
+# oxc JS/TS parser + static syntax checking (feature "js-oxc"). Version pinned
+# exactly; the parser AST API is not yet stable across minor releases.
+oxc_parser = { version = "=0.144.0", optional = true }
+oxc_allocator = { version = "=0.144.0", optional = true }
+oxc_span = { version = "=0.144.0", optional = true }

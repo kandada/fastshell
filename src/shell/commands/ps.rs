@@ -7,11 +7,14 @@ const PS_HELP_TEXT: &str = "\
 Usage: ps [OPTION]...
 Report a snapshot of the current processes.
 
-  -o FORMAT  user-defined output format (pid,ppid,rss,pcpu,comm)
+  -e, -A       select all processes
+  -f           full-format listing (accepted)
+  -o FORMAT    user-defined output format (pid,ppid,rss,pcpu,comm)
   -p PID[,PID]...  select by PID
-  -u UID     select by effective user ID
-  aux        show all processes (BSD style)
-  -ef        show all processes (System V style)
+  -u UID       select by effective user ID
+  -C CMD       select by command name
+  aux          show all processes (BSD style)
+  -ef          show all processes (System V style)
   -h, --help  display this help and exit
 ";
 
@@ -20,42 +23,99 @@ impl Shell {
         if args.contains(&"-h") || args.contains(&"--help") {
             return CommandOutput::success(PS_HELP_TEXT.to_string());
         }
-        if args.is_empty() || args.iter().any(|a| *a == "aux" || a.starts_with("aux")) || args.contains(&"-ef") {
-            let pid = std::process::id();
-            let output = format!("PID TTY TIME COMMAND\n{:>5} ? 00:00:00 fastshell\n", pid);
-            return CommandOutput::success(output);
-        }
         let mut format: Option<String> = None;
         let mut pids: Vec<u32> = Vec::new();
         let mut user_filter: Option<u32> = None;
+        let mut cmd_filter: Option<String> = None;
 
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-o" => {
-                    if i + 1 < args.len() {
-                        format = Some(args[i + 1].to_string());
-                        i += 1;
-                    }
+            let a = args[i];
+            if a == "aux" || a == "ax" {
+                // BSD all-processes style — nothing else needed.
+            } else if a.starts_with("--") {
+                match a {
+                    "--forest" | "--no-headers" | "--sort" | "--pid" | "--user" | "--format"
+                    | "--help" => {}
+                    _ => crate::warn!("ps: warning: unsupported option '{}'", a),
                 }
-                "-p" => {
-                    if i + 1 < args.len() {
-                        for pid_str in args[i + 1].split(',') {
-                            if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                                pids.push(pid);
-                            }
+            } else if a.starts_with('-') && a.len() > 1 {
+                let chars: Vec<char> = a.chars().skip(1).collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        'e' | 'A' | 'a' | 'x' | 'f' | 'l' | 'j' | 'w' => {}
+                        'o' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let val = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            format = Some(val);
+                            j = chars.len();
+                            continue;
                         }
-                        i += 1;
+                        'p' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let val = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            for pid_str in val.split(',') {
+                                if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                                    pids.push(pid);
+                                }
+                            }
+                            j = chars.len();
+                            continue;
+                        }
+                        'u' | 'U' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let val = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            user_filter = val.parse::<u32>().ok();
+                            j = chars.len();
+                            continue;
+                        }
+                        'C' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let val = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            cmd_filter = Some(val);
+                            j = chars.len();
+                            continue;
+                        }
+                        _ => crate::warn!("ps: warning: unsupported option '-{}'", chars[j]),
                     }
-                }
-                "-u" => {
-                    if i + 1 < args.len() {
-                        user_filter = args[i + 1].parse::<u32>().ok();
-                        i += 1;
-                    }
-                }
-                _ => {
-                    eprintln!("ps: warning: unsupported option '{}'", args[i]);
+                    j += 1;
                 }
             }
             i += 1;
@@ -72,7 +132,11 @@ impl Shell {
                             Some(uid) => p.uid == uid,
                             None => true,
                         };
-                        pid_ok && user_ok
+                        let cmd_ok = match &cmd_filter {
+                            Some(c) => p.comm == *c,
+                            None => true,
+                        };
+                        pid_ok && user_ok && cmd_ok
                     })
                     .collect();
 
@@ -116,6 +180,60 @@ impl Shell {
                 CommandOutput::success(output)
             }
             Err(e) => CommandOutput::error(format!("ps: {}\n", e), 1),
+        }
+    }
+
+    /// `top` / `htop` — in this non-interactive sandbox, print a single
+    /// process snapshot (equivalent to `top -b -n 1`), sorted by CPU.
+    pub fn cmd_top(&self, args: &[&str]) -> CommandOutput {
+        let mut count = 10usize;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-b" | "-p" => {}
+                "-n" => {
+                    if i + 1 < args.len() {
+                        // iterations are meaningless for a snapshot; ignore the value
+                        let _ = args[i + 1].parse::<u64>().unwrap_or(1);
+                        i += 1;
+                    }
+                }
+                "-d" => {
+                    if i + 1 < args.len() {
+                        i += 1;
+                    }
+                }
+                a if a.starts_with('-') => {
+                    crate::warn!("top: warning: unsupported option '{}'", a);
+                }
+                _ => {
+                    if let Ok(n) = args[i].parse::<usize>() {
+                        count = n;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        match crate::shell::list_processes() {
+            Ok(mut procs) => {
+                procs.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
+                let mut output = String::new();
+                output.push_str(&format!(
+                    "PID       %CPU   RSS      COMMAND\n"
+                ));
+                for p in procs.iter().take(count) {
+                    output.push_str(&format!(
+                        "{:<10} {:>5.1} {:>7}  {}\n",
+                        p.pid,
+                        p.cpu_pct,
+                        crate::shell::human_size(p.rss * 1024),
+                        p.comm
+                    ));
+                }
+                CommandOutput::success(output)
+            }
+            Err(e) => CommandOutput::error(format!("top: {}\n", e), 1),
         }
     }
 }
@@ -174,5 +292,13 @@ mod tests {
         let out = s.execute("ps", &["-ef"], None);
         assert_eq!(out.exit_code, 0);
         assert!(out.stdout.contains("PID"));
+    }
+
+    #[test]
+    fn test_top_snapshot() {
+        let mut s = mk_shell();
+        let out = s.execute("top", &["-b", "-n", "1"], None);
+        assert_eq!(out.exit_code, 0, "top should return a snapshot: {}", out.stderr);
+        assert!(out.stdout.contains("PID"), "top output should have a header: {}", out.stdout);
     }
 }

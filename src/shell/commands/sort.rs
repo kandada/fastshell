@@ -59,6 +59,8 @@ fn parse_human_size(s: &str) -> Option<u64> {
 enum SortKeyValue {
     Num(f64),
     HumanNum(u64),
+    Version(String),
+    Month(u8),
     Str(String),
 }
 
@@ -70,6 +72,8 @@ fn extract_sort_key(
     fold_case: bool,
     numeric: bool,
     human: bool,
+    version: bool,
+    month: bool,
     orig_line: &str,
 ) -> SortKeyValue {
     let fields: Vec<&str> = match delimiter {
@@ -126,6 +130,13 @@ fn extract_sort_key(
             Ok(v) => SortKeyValue::Num(v),
             Err(_) => SortKeyValue::Str(key_ref),
         }
+    } else if version {
+        SortKeyValue::Version(key_ref)
+    } else if month {
+        match month_number(&key_ref) {
+            Some(m) => SortKeyValue::Month(m),
+            None => SortKeyValue::Str(key_ref),
+        }
     } else {
         SortKeyValue::Str(key_ref)
     }
@@ -141,44 +152,129 @@ impl Shell {
         let mut reverse = false;
         let mut unique = false;
         let mut human = false;
+        let mut version = false;
+        let mut month = false;
         let mut fold_case = false;
         let mut stable_flag = false;
+        let mut random = false;
+        let mut output_file: Option<String> = None;
         let mut key_start: usize = 0;
         let mut key_end: Option<usize> = None;
         let mut delimiter: Option<char> = None;
 
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-n" => numeric = true,
-                "-r" => reverse = true,
-                "-u" => unique = true,
-                "-h" => human = true,
-                "-f" => fold_case = true,
-                "-s" => stable_flag = true,
-                "-k" => {
-                    if i + 1 < args.len() {
-                        let spec = args[i + 1];
+            let arg = args[i];
+            if arg == "--" {
+                i += 1;
+                while i < args.len() {
+                    files.push(args[i].to_string());
+                    i += 1;
+                }
+                break;
+            }
+            if arg.starts_with("--") {
+                match arg {
+                    "--numeric-sort" => numeric = true,
+                    "--reverse" => reverse = true,
+                    "--unique" => unique = true,
+                    "--human-numeric-sort" => human = true,
+                    "--version-sort" => version = true,
+                    "--month-sort" => month = true,
+                    "--ignore-case" => fold_case = true,
+                    "--stable" => stable_flag = true,
+                    "--random-sort" => random = true,
+                    "--general-numeric-sort" => numeric = true,
+                    "--output" => {
+                        if i + 1 < args.len() {
+                            output_file = Some(args[i + 1].to_string());
+                            i += 1;
+                        }
+                    }
+                    a if a.starts_with("--output=") => output_file = Some(a[9..].to_string()),
+                    a if a.starts_with("--key=") => {
+                        let spec = &a[6..];
                         let parts: Vec<&str> = spec.splitn(2, ',').collect();
                         key_start = parts[0].parse().unwrap_or(0);
-                        key_end = if parts.len() > 1 && !parts[1].is_empty() {
-                            parts[1].parse().ok()
-                        } else {
-                            None
-                        };
-                        i += 1;
+                        key_end = parts.get(1).and_then(|s| s.parse().ok());
                     }
+                    _ => crate::warn!("sort: warning: unsupported option '{}'", arg),
                 }
-                "-t" => {
-                    if i + 1 < args.len() {
-                        let sep = args[i + 1];
-                        delimiter = sep.chars().next();
-                        i += 1;
-                    }
-                }
-                arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => eprintln!("sort: warning: unsupported option '{}'", args[i]),
+                i += 1;
+                continue;
             }
+            if arg.starts_with('-') && arg.len() > 1 {
+                let chars: Vec<char> = arg.chars().skip(1).collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        'n' | 'g' => numeric = true,
+                        'r' => reverse = true,
+                        'u' => unique = true,
+                        'h' => human = true,
+                        'V' => version = true,
+                        'M' => month = true,
+                        'f' => fold_case = true,
+                        's' => stable_flag = true,
+                        'R' => random = true,
+                        'k' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let spec = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            let parts: Vec<&str> = spec.splitn(2, ',').collect();
+                            key_start = parts[0].parse().unwrap_or(0);
+                            key_end = parts.get(1).and_then(|s| s.parse().ok());
+                            j = chars.len();
+                            continue;
+                        }
+                        't' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let sep = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            delimiter = sep.chars().next();
+                            j = chars.len();
+                            continue;
+                        }
+                        'o' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let out = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            output_file = Some(out);
+                            j = chars.len();
+                            continue;
+                        }
+                        _ => crate::warn!("sort: warning: unsupported option '-{}'", chars[j]),
+                    }
+                    j += 1;
+                }
+                i += 1;
+                continue;
+            }
+            files.push(arg.to_string());
             i += 1;
         }
 
@@ -211,7 +307,8 @@ impl Shell {
                 .into_iter()
                 .map(|line| {
                     let key = extract_sort_key(
-                        &line, key_start, key_end, delimiter, fold_case, numeric, human, &line,
+                        &line, key_start, key_end, delimiter, fold_case, numeric, human,
+                        version, month, &line,
                     );
                     (key, line)
                 })
@@ -231,7 +328,33 @@ impl Shell {
 
             all_lines = indexed.into_iter().map(|(_, line)| line).collect();
         } else {
-            if numeric || human {
+            if version {
+                all_lines.sort_by(|a, b| {
+                    let cmp = compare_versions(a, b);
+                    if cmp != Ordering::Equal {
+                        return cmp;
+                    }
+                    if !stable_flag {
+                        a.cmp(b)
+                    } else {
+                        Ordering::Equal
+                    }
+                });
+            } else if month {
+                all_lines.sort_by(|a, b| {
+                    let ma = month_number(a).unwrap_or(0);
+                    let mb = month_number(b).unwrap_or(0);
+                    let cmp = ma.cmp(&mb);
+                    if cmp != Ordering::Equal {
+                        return cmp;
+                    }
+                    if !stable_flag {
+                        a.cmp(b)
+                    } else {
+                        Ordering::Equal
+                    }
+                });
+            } else if numeric || human {
                 all_lines.sort_by(|a, b| {
                     if human {
                         let ha = parse_human_size(a);
@@ -305,6 +428,10 @@ impl Shell {
             all_lines.reverse();
         }
 
+        if random {
+            shuffle_lines(&mut all_lines);
+        }
+
         let mut output = String::new();
         let mut prev: Option<&str> = None;
         for line in &all_lines {
@@ -318,7 +445,34 @@ impl Shell {
             output.push('\n');
         }
 
-        CommandOutput::success(output)
+        if let Some(f) = output_file {
+            match self.vfs.write(&f, &self.cwd, &output) {
+                Ok(_) => CommandOutput::success(String::new()),
+                Err(e) => CommandOutput::error(format!("sort: {}: {}\n", f, e), 1),
+            }
+        } else {
+            CommandOutput::success(output)
+        }
+    }
+}
+
+/// Fisher–Yates shuffle with a time-seeded xorshift PRNG (no external deps).
+fn shuffle_lines(lines: &mut [String]) {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E3779B97F4A7C15)
+        .wrapping_add(std::process::id() as u64);
+    let mut state = seed | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for i in (1..lines.len()).rev() {
+        let j = (next() as usize) % (i + 1);
+        lines.swap(i, j);
     }
 }
 
@@ -334,15 +488,55 @@ fn compare_keys(a: &SortKeyValue, b: &SortKeyValue) -> Ordering {
             }
         }),
         (SortKeyValue::HumanNum(ha), SortKeyValue::HumanNum(hb)) => ha.cmp(hb),
+        (SortKeyValue::Version(va), SortKeyValue::Version(vb)) => compare_versions(va, vb),
+        (SortKeyValue::Month(ma), SortKeyValue::Month(mb)) => ma.cmp(mb),
         (SortKeyValue::Str(sa), SortKeyValue::Str(sb)) => sa.cmp(sb),
-        // Cross-type comparisons: numbers before strings
+        // Cross-type comparisons: numbers before strings.
         (SortKeyValue::Num(_), SortKeyValue::HumanNum(_)) => Ordering::Greater,
         (SortKeyValue::Num(_), SortKeyValue::Str(_)) => Ordering::Less,
         (SortKeyValue::HumanNum(_), SortKeyValue::Num(_)) => Ordering::Less,
         (SortKeyValue::HumanNum(_), SortKeyValue::Str(_)) => Ordering::Less,
+        (SortKeyValue::Version(_), SortKeyValue::Str(_)) => Ordering::Less,
+        (SortKeyValue::Month(_), SortKeyValue::Str(_)) => Ordering::Less,
         (SortKeyValue::Str(_), SortKeyValue::Num(_)) => Ordering::Greater,
         (SortKeyValue::Str(_), SortKeyValue::HumanNum(_)) => Ordering::Greater,
+        (SortKeyValue::Str(_), SortKeyValue::Version(_)) => Ordering::Greater,
+        (SortKeyValue::Str(_), SortKeyValue::Month(_)) => Ordering::Greater,
+        _ => Ordering::Equal,
     }
+}
+
+/// Compare version numbers field-wise: `1.10` > `1.9`, `2.0.1` > `2.0`.
+fn compare_versions(a: &str, b: &str) -> Ordering {
+    let na: Vec<u64> = a
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u64>().unwrap_or(0))
+        .collect();
+    let nb: Vec<u64> = b
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u64>().unwrap_or(0))
+        .collect();
+    let len = na.len().max(nb.len());
+    for i in 0..len {
+        let x = na.get(i).copied().unwrap_or(0);
+        let y = nb.get(i).copied().unwrap_or(0);
+        match x.cmp(&y) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    Ordering::Equal
+}
+
+fn month_number(s: &str) -> Option<u8> {
+    let lower = s.trim().to_lowercase();
+    let months = [
+        "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    months.iter().position(|m| lower.starts_with(m)).map(|i| (i + 1) as u8)
 }
 
 fn compare_strings(a: &str, b: &str, fold_case: bool) -> Ordering {
@@ -360,7 +554,7 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)
@@ -372,5 +566,21 @@ mod tests {
         let out = shell.execute("sort", &["--help"], None);
         assert_eq!(out.exit_code, 0);
         assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_sort_version() {
+        let shell = mk_shell();
+        let out = shell.cmd_sort(&["-V"], Some("v1.10\nv1.9\nv1.2\n"));
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert_eq!(lines, vec!["v1.2", "v1.9", "v1.10"], "version sort should order numerically");
+    }
+
+    #[test]
+    fn test_sort_month() {
+        let shell = mk_shell();
+        let out = shell.cmd_sort(&["-M"], Some("Mar\nJan\nFeb\n"));
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert_eq!(lines, vec!["Jan", "Feb", "Mar"], "month sort should order by calendar");
     }
 }

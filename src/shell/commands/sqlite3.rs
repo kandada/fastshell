@@ -49,7 +49,7 @@ impl Shell {
                 arg if arg.starts_with('.') && dot_command.is_none() => {
                     dot_command = Some(arg.to_string());
                 }
-                _ => eprintln!("sqlite3: warning: unsupported option '{}'", args[i]),
+                _ => crate::warn!("sqlite3: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -201,6 +201,7 @@ impl Shell {
             if sql_upper.starts_with("SELECT")
                 || sql_upper.starts_with("PRAGMA")
                 || sql_upper.starts_with("EXPLAIN")
+                || sql_upper.starts_with("WITH")
             {
                 match conn.prepare(stmt_str) {
                     Ok(mut stmt) => {

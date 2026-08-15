@@ -20,7 +20,7 @@ impl Shell {
         if args.contains(&"-h") || args.contains(&"--help") {
             return CommandOutput::success(SED_HELP_TEXT.to_string());
         }
-        let mut expression: Option<String> = None;
+        let mut expressions: Vec<String> = Vec::new();
         let mut files = Vec::new();
         let mut in_place = false;
         let mut quiet = false; // -n: suppress automatic printing
@@ -30,12 +30,14 @@ impl Shell {
             match args[i] {
                 "-e" => {
                     if i + 1 < args.len() {
-                        expression = Some(args[i + 1].to_string());
+                        expressions.push(args[i + 1].to_string());
                         i += 1;
                     }
                 }
                 "-i" => in_place = true,
                 "-n" => quiet = true,
+                // -E / -r: extended regex is the default engine; accept silently.
+                "-E" | "-r" | "--regexp-extended" => {}
                 "-ni" | "-in" => {
                     quiet = true;
                     in_place = true;
@@ -44,24 +46,26 @@ impl Shell {
                     // -i.bak style backup suffix (suffix ignored, VFS keeps no backups)
                     in_place = true;
                 }
-                arg if arg.starts_with("-e") => {
-                    expression = Some(arg[2..].to_string());
+                arg if arg.starts_with("-e") && arg.len() > 2 => {
+                    expressions.push(arg[2..].to_string());
                 }
-                arg if !arg.starts_with('-') && expression.is_none() => {
-                    expression = Some(arg.to_string());
+                arg if !arg.starts_with('-') && expressions.is_empty() => {
+                    expressions.push(arg.to_string());
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => eprintln!("sed: warning: unsupported option '{}'", args[i]),
+                _ => crate::warn!("sed: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
 
-        let expr = match expression {
-            Some(e) => e,
-            None => return CommandOutput::error("sed: missing expression\n".to_string(), 1),
-        };
+        if expressions.is_empty() {
+            return CommandOutput::error("sed: missing expression\n".to_string(), 1);
+        }
 
-        let parsed = parse_sed_command(&expr);
+        let mut parsed: Vec<SedCommand> = Vec::new();
+        for expr in &expressions {
+            parsed.extend(parse_sed_command(expr));
+        }
 
         if files.is_empty() {
             match stdin {
@@ -406,7 +410,7 @@ mod tests {
     fn mk_shell() -> Shell {
         use std::fs;
         use crate::vfs::Vfs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)
@@ -426,5 +430,14 @@ mod tests {
         let out = shell.execute("sed", &["--help"], None);
         assert_eq!(out.exit_code, 0);
         assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_sed_extended_regexp_no_warning() {
+        let mut shell = mk_shell();
+        let out = shell.execute("sed", &["-E", "s/foo+/bar/"], Some("fooobar\n"));
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("bar"), "sed -E should work: {}", out.stdout);
+        assert!(!out.stderr.contains("unsupported"), "sed -E should not warn: {}", out.stderr);
     }
 }

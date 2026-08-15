@@ -58,7 +58,7 @@ impl Shell {
                     program = Some(arg.to_string());
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => eprintln!("awk: warning: unsupported option '{}'", args[i]),
+                _ => crate::warn!("awk: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -547,6 +547,8 @@ fn exec_awk_action(
 ) -> (String, bool) {
     let action = action.trim();
     let mut result = String::new();
+    // `sub`/`gsub` modify $0 in place; keep a mutable copy for that.
+    let mut cur_line = line.to_string();
     let stmts = split_statements(action);
 
     for stmt_str in &stmts {
@@ -569,10 +571,10 @@ fn exec_awk_action(
             }
             let args = parse_function_args(&expr);
             if args.len() >= 1 {
-                let fmt = awk_value_ext(&args[0], nr, nf, line, fields, vars);
+                let fmt = awk_value_ext(&args[0], nr, nf, &cur_line, fields, vars);
                 let arg_vals: Vec<String> = args[1..]
                     .iter()
-                    .map(|a| awk_value_ext(a, nr, nf, line, fields, vars))
+                    .map(|a| awk_value_ext(a, nr, nf, &cur_line, fields, vars))
                     .collect();
                 result.push_str(&awk_printf(&fmt, &arg_vals));
             }
@@ -586,7 +588,7 @@ fn exec_awk_action(
                 if k > 0 {
                     result.push(' ');
                 }
-                result.push_str(&awk_value_ext(arg, nr, nf, line, fields, vars));
+                result.push_str(&awk_value_ext(arg, nr, nf, &cur_line, fields, vars));
             }
         } else if stmt.starts_with("print ") || stmt == "print" {
             let expr = if stmt == "print" { "$0" } else { &stmt[6..] };
@@ -598,13 +600,15 @@ fn exec_awk_action(
                 if k > 0 {
                     result.push(' ');
                 }
-                result.push_str(&awk_value_ext(arg, nr, nf, line, fields, vars));
+                result.push_str(&awk_value_ext(arg, nr, nf, &cur_line, fields, vars));
             }
+        } else if stmt.starts_with("sub(") || stmt.starts_with("gsub(") {
+            awk_sub_gsub(stmt, &mut cur_line);
         } else if stmt.contains('=') && !stmt.starts_with("print") && !stmt.starts_with("printf") {
             if let Some(eq_pos) = find_toplevel_eq(stmt) {
                 let var = stmt[..eq_pos].trim().to_string();
                 let expr = stmt[eq_pos + 1..].trim();
-                let val = eval_awk_expr_full(expr, nr, nf, line, fields, vars, arrays);
+                let val = eval_awk_expr_full(expr, nr, nf, &cur_line, fields, vars, arrays);
                 vars.insert(var, val);
             }
         }
@@ -614,6 +618,41 @@ fn exec_awk_action(
         result.push('\n');
     }
     (result, false)
+}
+
+/// Handle `sub(/re/, "rep")` / `gsub(/re/, "rep")` — regex replace of `$0`.
+fn awk_sub_gsub(stmt: &str, line: &mut String) {
+    let (is_global, rest) = if let Some(r) = stmt.strip_prefix("gsub") {
+        (true, r)
+    } else if let Some(r) = stmt.strip_prefix("sub") {
+        (false, r)
+    } else {
+        return;
+    };
+    let rest = rest.trim_start_matches('(').trim().trim_end_matches(')').trim();
+    let args = split_awk_args(rest);
+    if args.len() < 2 {
+        return;
+    }
+    let re_str = args[0].trim();
+    let re = if re_str.starts_with('/') {
+        match re_str.rfind('/') {
+            Some(pos) if pos > 0 => &re_str[1..pos],
+            _ => re_str,
+        }
+    } else {
+        re_str
+    };
+    let rep = args[1].trim().trim_matches('"');
+
+    if let Ok(regex) = regex::Regex::new(re) {
+        let replaced = if is_global {
+            regex.replace_all(line, rep).to_string()
+        } else {
+            regex.replace(line, rep).to_string()
+        };
+        *line = replaced;
+    }
 }
 
 fn find_toplevel_eq(s: &str) -> Option<usize> {
@@ -731,6 +770,26 @@ fn try_awk_function_call(
         "toupper" => {
             let s = eval_args.first().map(|s| s.as_str()).unwrap_or("");
             Some(s.to_uppercase())
+        }
+        "index" => {
+            let s = eval_args.first().map(|s| s.as_str()).unwrap_or("");
+            let sub = eval_args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match s.find(sub) {
+                Some(pos) => Some((pos + 1).to_string()), // awk index is 1-based
+                None => Some("0".to_string()),
+            }
+        }
+        "match" => {
+            let s = eval_args.first().map(|s| s.as_str()).unwrap_or("");
+            let re = eval_args.get(1).map(|s| s.as_str()).unwrap_or("");
+            if let Ok(regex) = regex::Regex::new(re) {
+                match regex.find(s) {
+                    Some(m) => Some((m.start() + 1).to_string()),
+                    None => Some("0".to_string()),
+                }
+            } else {
+                Some("0".to_string())
+            }
         }
         "split" => None,
         _ => None,
@@ -1094,5 +1153,33 @@ mod tests {
         let out = shell.execute("awk", &["--help"], None);
         assert_eq!(out.exit_code, 0);
         assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_awk_sub() {
+        let shell = mk_shell();
+        let out = shell.cmd_awk(&["{sub(/foo/, \"bar\"); print}"], Some("a foo b\n"));
+        assert!(out.stdout.contains("a bar b"), "sub should replace first match: {}", out.stdout);
+    }
+
+    #[test]
+    fn test_awk_gsub() {
+        let shell = mk_shell();
+        let out = shell.cmd_awk(&["{gsub(/a/, \"x\"); print}"], Some("banana\n"));
+        assert!(out.stdout.contains("bxnxnx"), "gsub should replace all matches: {}", out.stdout);
+    }
+
+    #[test]
+    fn test_awk_index() {
+        let shell = mk_shell();
+        let out = shell.cmd_awk(&["{print index($0, \"ll\")}"], Some("hello\n"));
+        assert!(out.stdout.contains("3"), "index should be 1-based: {}", out.stdout);
+    }
+
+    #[test]
+    fn test_awk_match() {
+        let shell = mk_shell();
+        let out = shell.cmd_awk(&["{print match($0, \"[0-9]+\")}"], Some("abc123def\n"));
+        assert!(out.stdout.contains("4"), "match should return 1-based position: {}", out.stdout);
     }
 }

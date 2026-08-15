@@ -3,6 +3,7 @@
 
 use crate::sdk::plugin::DevicePlugin;
 use crate::vfs::Vfs;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command as ProcessCommand;
@@ -13,6 +14,38 @@ pub mod commands;
 
 pub const EXIT_NEED_PERMISSION: i32 = 100;
 pub const EXIT_NOT_SUPPORTED: i32 = 126;
+
+// Per-thread buffer for command warnings. `Shell::execute` drains this into
+// the returned `stderr` so that "unsupported option" style warnings are
+// actually visible to the agent (direct `eprintln!` writes to the process
+// stderr, which the SDK does not capture).
+thread_local! {
+    static WARNINGS: RefCell<String> = RefCell::new(String::new());
+}
+
+/// Append a warning line to the per-thread buffer.
+pub(crate) fn warn(msg: &str) {
+    WARNINGS.with(|w| {
+        let mut b = w.borrow_mut();
+        b.push_str(msg);
+        if !msg.ends_with('\n') {
+            b.push('\n');
+        }
+    });
+}
+
+fn take_warnings() -> String {
+    WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()))
+}
+
+/// `warn!("{cmd}: warning: unsupported option '{flag}'")` — mirrors
+/// `eprintln!` but routes into the command's stderr.
+#[macro_export]
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        $crate::shell::warn(&format!($($arg)*))
+    };
+}
 
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -246,7 +279,8 @@ impl Shell {
                 exit_code: 143,
             };
         }
-        match command {
+        let _ = take_warnings();
+        let mut result = match command {
             "alias" => self.cmd_alias(args),
             "unalias" => self.cmd_unalias(args),
             "set" => self.cmd_set(args),
@@ -274,6 +308,7 @@ impl Shell {
             "chmod" => self.cmd_chmod(args),
             "kill" => self.cmd_kill(args),
             "ps" => self.cmd_ps(args),
+            "top" | "htop" => self.cmd_top(args),
             "curl" => self.cmd_curl(args),
             "wget" => self.cmd_wget(args),
             "gzip" => self.cmd_gzip(args),
@@ -299,6 +334,7 @@ impl Shell {
             "tee" => self.cmd_tee(args, stdin),
             "xargs" => self.cmd_xargs(args, stdin),
             "which" => self.cmd_which(args),
+            "command" => self.cmd_command(args),
             "cut" => self.cmd_cut(args, stdin),
             "awk" => self.cmd_awk(args, stdin),
             "tr" => self.cmd_tr(args, stdin),
@@ -323,6 +359,18 @@ impl Shell {
             "dirname" => self.cmd_dirname(args),
             "realpath" => self.cmd_realpath(args),
             "file" => self.cmd_file(args, stdin),
+            "pdftotext" => self.cmd_pdftotext(args, stdin),
+            "pip-install" => self.cmd_pip_install(args),
+            "pip" => {
+                match args.first().copied() {
+                    Some("install") => self.cmd_pip_install(&args[1..]),
+                    Some("list") | Some("freeze") => self.cmd_pip_install(&["--list"]),
+                    Some("-h") | Some("--help") => self.cmd_pip_install(&["-h"]),
+                    _ => CommandOutput::error("pip: only 'pip install', 'pip list', 'pip freeze' are supported. Use 'pip-install' directly.\n".to_string(), 1),
+                }
+            },
+            "doctotext" => self.cmd_doctotext(args),
+            "epubtext" => self.cmd_epubtext(args),
             "column" => self.cmd_column(args, stdin),
             "seq" => self.cmd_seq(args),
             "zip" => self.cmd_zip(args),
@@ -446,6 +494,9 @@ impl Shell {
             "screen" => self.cmd_screen(args),
             "device" => self.cmd_device(args),
             "sqlite3" => self.cmd_sqlite3(args, stdin),
+            "node" | "js" => self.cmd_node(args, stdin),
+            "jscheck" | "jslint" => self.cmd_jscheck(args, stdin),
+            "render" => self.cmd_render(args, stdin),
             "arecord" => self.cmd_record(args),
             "declare" => self.cmd_declare(args),
             "unset" => self.cmd_unset(args),
@@ -460,7 +511,12 @@ impl Shell {
                     }
                 }
             }
+        };
+        let warnings = take_warnings();
+        if !warnings.is_empty() {
+            result.stderr = format!("{}{}", warnings, result.stderr);
         }
+        result
     }
 
     fn run_subprocess(&self, command: &str, args: &[&str]) -> CommandOutput {

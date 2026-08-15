@@ -27,7 +27,7 @@ fn test_sdk_initialization() {
     assert!(sdk.is_initialized());
 
     let info = sdk.get_info();
-    assert_eq!(info.version, "0.2.2");
+    assert_eq!(info.version, "0.3.0");
     assert_eq!(info.platform, std::env::consts::OS);
 }
 

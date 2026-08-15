@@ -26,25 +26,56 @@ impl Shell {
         let mut uniq_only = false;
         let mut ignore_case = false;
         let mut skip_fields: usize = 0;
+        let mut skip_chars: usize = 0;
+        let mut check_chars: Option<usize> = None;
 
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-c" => count = true,
-                "-d" => dup_only = true,
-                "-u" => uniq_only = true,
-                "-i" => ignore_case = true,
-                "-f" => {
-                    if i + 1 < args.len() {
-                        skip_fields = args[i + 1].parse().unwrap_or(0);
-                        i += 1;
+            let arg = args[i];
+            if arg.starts_with("--") {
+                match arg {
+                    "--count" => count = true,
+                    "--repeated" => dup_only = true,
+                    "--unique" => uniq_only = true,
+                    "--ignore-case" => ignore_case = true,
+                    _ => crate::warn!("uniq: warning: unsupported option '{}'", arg),
+                }
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                let chars: Vec<char> = arg.chars().skip(1).collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        'c' => count = true,
+                        'd' => dup_only = true,
+                        'u' => uniq_only = true,
+                        'i' => ignore_case = true,
+                        'f' | 's' | 'w' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let val = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            match chars[j] {
+                                'f' => skip_fields = val.parse().unwrap_or(0),
+                                's' => skip_chars = val.parse().unwrap_or(0),
+                                'w' => check_chars = val.parse().ok(),
+                                _ => {}
+                            }
+                            j = chars.len();
+                            continue;
+                        }
+                        _ => crate::warn!("uniq: warning: unsupported option '-{}'", chars[j]),
                     }
+                    j += 1;
                 }
-                arg if arg.starts_with("-f") && arg.len() > 2 => {
-                    skip_fields = arg[2..].parse().unwrap_or(0);
-                }
-                arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => eprintln!("uniq: warning: unsupported option '{}'", args[i]),
+            } else {
+                files.push(arg.to_string());
             }
             i += 1;
         }
@@ -59,6 +90,8 @@ impl Shell {
                         uniq_only,
                         ignore_case,
                         skip_fields,
+                        skip_chars,
+                        check_chars,
                     );
                 }
                 None => return CommandOutput::error("uniq: missing file operand\n".to_string(), 1),
@@ -78,6 +111,8 @@ impl Shell {
                 uniq_only,
                 ignore_case,
                 skip_fields,
+                skip_chars,
+                check_chars,
             ) {
                 CommandOutput {
                     stdout,
@@ -99,9 +134,11 @@ fn uniq_process(
     uniq_only: bool,
     ignore_case: bool,
     skip_fields: usize,
+    skip_chars: usize,
+    check_chars: Option<usize>,
 ) -> CommandOutput {
     let lines: Vec<&str> = input.lines().collect();
-    let lines: Vec<(&str, String)> = if skip_fields > 0 || ignore_case {
+    let lines: Vec<(&str, String)> = if skip_fields > 0 || skip_chars > 0 || check_chars.is_some() || ignore_case {
         lines
             .into_iter()
             .map(|l| {
@@ -115,10 +152,21 @@ fn uniq_process(
                 } else {
                     l.to_string()
                 };
-                let key = if ignore_case {
-                    cmp_part.to_lowercase()
+                // Skip leading chars.
+                let after_skip_chars = if skip_chars > 0 {
+                    cmp_part.chars().skip(skip_chars).collect::<String>()
                 } else {
                     cmp_part
+                };
+                // Limit to first N chars.
+                let limited = match check_chars {
+                    Some(n) => after_skip_chars.chars().take(n).collect::<String>(),
+                    None => after_skip_chars,
+                };
+                let key = if ignore_case {
+                    limited.to_lowercase()
+                } else {
+                    limited
                 };
                 (l, key)
             })
@@ -258,5 +306,23 @@ mod tests {
         let out = shell.execute("uniq", &["--help"], None);
         assert_eq!(out.exit_code, 0);
         assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_uniq_skip_chars() {
+        let shell = mk_shell();
+        // Skip the leading "1 "/"2 " so "a"/"a" are considered equal.
+        let out = shell.cmd_uniq(&["-s", "2"], Some("1 a\n2 a\n3 b\n"));
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["1 a", "3 b"], "skip-chars should group 1 a / 2 a");
+    }
+
+    #[test]
+    fn test_uniq_check_chars() {
+        let shell = mk_shell();
+        // Compare only the first 2 chars: "abc" vs "abd" share "ab".
+        let out = shell.cmd_uniq(&["-w", "2"], Some("abc\nabd\nxyz\n"));
+        let lines: Vec<&str> = out.stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["abc", "xyz"], "check-chars should group abc/abd");
     }
 }

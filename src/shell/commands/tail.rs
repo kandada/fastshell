@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 impl Shell {
     pub fn cmd_tail(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut lines_count: i64 = 10;
+        let mut char_count: Option<i64> = None;
         let mut from_start = false;
         let mut follow = false;
         let mut files = Vec::new();
@@ -27,7 +28,27 @@ impl Shell {
                         i += 1;
                     }
                 }
-                "-f" | "--follow" => follow = true,
+                "-c" => {
+                    if i + 1 < args.len() {
+                        let val = args[i + 1];
+                        if let Some(v) = val.strip_prefix('+') {
+                            from_start = true;
+                            char_count = Some(v.parse().unwrap_or(0));
+                        } else {
+                            char_count = Some(val.parse().unwrap_or(0));
+                        }
+                        i += 1;
+                    }
+                }
+                "-f" | "-F" | "--follow" => follow = true,
+                "-q" | "--quiet" | "--silent" | "-v" | "--verbose" | "-s" | "--sleep-interval"
+                | "--pid" | "--retry" => {
+                    if args[i] == "-s" || args[i] == "--sleep-interval" || args[i] == "--pid" {
+                        if i + 1 < args.len() {
+                            i += 1;
+                        }
+                    }
+                }
                 arg if arg.starts_with("-n") && arg.len() > 2 => {
                     let val = &arg[2..];
                     if let Some(v) = val.strip_prefix('+') {
@@ -37,10 +58,24 @@ impl Shell {
                         lines_count = val.parse().unwrap_or(10);
                     }
                 }
+                arg if arg.starts_with("-c") && arg.len() > 2 => {
+                    let val = &arg[2..];
+                    if let Some(v) = val.strip_prefix('+') {
+                        from_start = true;
+                        char_count = Some(v.parse().unwrap_or(0));
+                    } else {
+                        char_count = Some(val.parse().unwrap_or(0));
+                    }
+                }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
             }
             i += 1;
+        }
+
+        // Byte mode: `tail -c N` / `-c +N` / `-c -N`.
+        if let Some(cn) = char_count {
+            return self.tail_bytes(files, stdin, cn, from_start);
         }
 
         let count = if lines_count < 0 {
@@ -145,6 +180,67 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// `tail -c N` / `-c +N` / `-c -N` — byte-oriented tail.
+    fn tail_bytes(
+        &self,
+        files: Vec<String>,
+        stdin: Option<&str>,
+        count: i64,
+        from_start: bool,
+    ) -> CommandOutput {
+        let slice_bytes = |content: &str| -> String {
+            let bytes = content.as_bytes();
+            if from_start {
+                // `-c +N`: from the (N-1)-th byte (0-based) to the end.
+                let start = (count.saturating_sub(1)).max(0) as usize;
+                if start >= bytes.len() {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&bytes[start..]).to_string()
+                }
+            } else if count >= 0 {
+                // `-c N`: last N bytes.
+                let n = count as usize;
+                if n >= bytes.len() {
+                    content.to_string()
+                } else {
+                    String::from_utf8_lossy(&bytes[bytes.len() - n..]).to_string()
+                }
+            } else {
+                // `-c -N`: all but the last N bytes.
+                let n = (-count) as usize;
+                if n >= bytes.len() {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&bytes[..bytes.len() - n]).to_string()
+                }
+            }
+        };
+
+        if files.is_empty() {
+            match stdin {
+                Some(input) => return CommandOutput::success(slice_bytes(input)),
+                None => {
+                    return CommandOutput::error("tail: missing file operand\n".to_string(), 1)
+                }
+            }
+        }
+
+        let mut output = String::new();
+        for file in &files {
+            if files.len() > 1 {
+                output.push_str(&format!("==> {} <==\n", file));
+            }
+            match self.vfs.read_to_string(file, &self.cwd) {
+                Ok(content) => output.push_str(&slice_bytes(&content)),
+                Err(e) => {
+                    return CommandOutput::error(format!("tail: {}: {}\n", file, e), 1)
+                }
+            }
+        }
+        CommandOutput::success(output)
     }
 
     fn tail_read_files(&self, files: &[String], count: usize, from_start: bool) -> CommandOutput {
@@ -272,5 +368,26 @@ mod tests {
             .unwrap();
         let out = shell.cmd_tail(&["-n", "+3", "test.txt"], None);
         assert_eq!(out.stdout, "three\nfour\nfive\n");
+    }
+
+    #[test]
+    fn test_tail_bytes_last_n() {
+        let mut shell = mk_shell();
+        let out = shell.cmd_tail(&["-c", "4"], Some("hello world"));
+        assert_eq!(out.stdout, "orld");
+    }
+
+    #[test]
+    fn test_tail_bytes_from_start() {
+        let mut shell = mk_shell();
+        let out = shell.cmd_tail(&["-c", "+7"], Some("hello world"));
+        assert_eq!(out.stdout, "world");
+    }
+
+    #[test]
+    fn test_tail_bytes_negative() {
+        let mut shell = mk_shell();
+        let out = shell.cmd_tail(&["-c", "-6"], Some("hello world"));
+        assert_eq!(out.stdout, "hello");
     }
 }

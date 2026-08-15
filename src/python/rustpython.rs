@@ -48,6 +48,12 @@ try:
         # Allow `import localmodule` from the sandbox, like `python3 script.py`.
         if __aacode_cwd not in sys.path:
             sys.path.insert(0, __aacode_cwd)
+        # Project-local site-packages (pip-install target). `pip install`
+        # writes pure-Python wheels into <cwd>/site-packages; make them
+        # importable without manual sys.path fiddling.
+        __aacode_sp = os.path.join(__aacode_cwd, 'site-packages')
+        if os.path.isdir(__aacode_sp) and __aacode_sp not in sys.path:
+            sys.path.insert(0, __aacode_sp)
     # argv[0] like `python3 script.py` (unittest.main/argparse read it).
     sys.argv = [__aacode_file]
     # Register a real __main__ module so `import __main__` (unittest.main,
@@ -86,6 +92,12 @@ finally:
                 del sys.modules[__aacode_m]
             if __aacode_cwd in sys.path:
                 sys.path.remove(__aacode_cwd)
+            # Symmetric cleanup for the injected site-packages path so a
+            # different project's site-packages never leaks into sys.path of
+            # the persistent interpreter.
+            __aacode_sp = os.path.join(__aacode_cwd, 'site-packages')
+            if __aacode_sp in sys.path:
+                sys.path.remove(__aacode_sp)
         sys.modules.pop('__main__', None)
         import gc
         gc.collect()
@@ -458,6 +470,53 @@ print("BIGINT-OK", big % 97)
         std::fs::write(dir.join("localmod.py"), "VALUE = 2").unwrap();
         let out = e.execute("import localmod; print(localmod.VALUE)", &dir);
         assert!(out.stdout.contains('2'), "stale module cache: {}", out.stdout);
+    }
+
+    #[test]
+    fn site_packages_is_importable() {
+        // pip-install writes wheels into <cwd>/site-packages. The wrapper must
+        // inject that dir into sys.path so installed packages import directly
+        // without manual `sys.path.insert(0, 'site-packages')`.
+        let dir = tmp_dir("sitepkg");
+        let sp = dir.join("site-packages");
+        std::fs::create_dir_all(&sp).unwrap();
+        std::fs::write(sp.join("pkg_mod.py"), "VERSION = '1.0.0'\n").unwrap();
+
+        let mut e = RustPythonEngine::new();
+        let out = e.execute("import pkg_mod; print('OK', pkg_mod.VERSION)", &dir);
+        assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
+        assert!(
+            out.stdout.contains("OK 1.0.0"),
+            "site-packages module should import, stdout={} stderr={}",
+            out.stdout,
+            out.stderr
+        );
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    #[test]
+    fn site_packages_path_does_not_leak_across_projects() {
+        // The injected site-packages path must be removed after execution so a
+        // different project's site-packages never shadows another's modules.
+        let dir_a = tmp_dir("sitepkg_a");
+        let dir_b = tmp_dir("sitepkg_b");
+        let sp_a = dir_a.join("site-packages");
+        let sp_b = dir_b.join("site-packages");
+        std::fs::create_dir_all(&sp_a).unwrap();
+        std::fs::create_dir_all(&sp_b).unwrap();
+        std::fs::write(sp_a.join("sharedmod.py"), "WHO = 'A'\n").unwrap();
+        std::fs::write(sp_b.join("sharedmod.py"), "WHO = 'B'\n").unwrap();
+
+        let mut e = RustPythonEngine::new();
+        // Project A sees its own module.
+        let out_a = e.execute("import sharedmod; print(sharedmod.WHO)", &dir_a);
+        assert!(out_a.stdout.contains("A"), "A should see its own module: {}", out_a.stdout);
+        // Project B sees its own module (not A's leaked path).
+        let out_b = e.execute("import sharedmod; print(sharedmod.WHO)", &dir_b);
+        assert!(out_b.stdout.contains("B"), "B should see its own module: {}", out_b.stdout);
+
+        let _ = std::fs::remove_dir_all(&sp_a);
+        let _ = std::fs::remove_dir_all(&sp_b);
     }
 
     #[test]

@@ -15,6 +15,7 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 - **Glob expansion** — `ls *.rs`, `cat src/**/*.rs`
 - **Regex** — Full regex in `grep` and `sed s///`
 - **Python engine** — Embedded [RustPython](https://github.com/RustPython/RustPython) (MIT, pure Rust, feature `python-rustpython`): `ast`/`unittest`/frozen stdlib, no dlopen/JNI/C-TLS crash surface. Desktop prefers system `python3`.
+- **JavaScript execution** — `node`/`js` runs JavaScript in the host app's WebView engine (Android V8 / iOS JavaScriptCore), `render` renders HTML to a screenshot, `jscheck`/`node -c` static-check JS/TS syntax via [oxc](https://github.com/oxc-project/oxc) (pure Rust, optional feature `js-oxc`).
 - **Virtual filesystem** — Sandbox isolation, path escape prevention
 - **Thread-safe SDK** — `Arc<Mutex<Runtime>>`, timeout enforcement
 - **Cross-platform** — Single codebase compiles to Android, iOS, macOS, Linux
@@ -288,7 +289,7 @@ Built-in commands (`ls`, `grep`, `curl`, `git`, etc.) work everywhere regardless
 Requires Rust stable toolchain.
 
 ```bash
-# 1. Build for your target (add --features python-rustpython for embedded Python)
+# 1. Build for your target (optional features: python-rustpython = embedded Python, js-oxc = JS/TS syntax checking)
 cargo build --release --target aarch64-apple-darwin        # macOS ARM64
 cargo build --release --target x86_64-apple-darwin          # macOS Intel
 cargo build --release --target aarch64-apple-ios            # iOS (macOS host)
@@ -362,6 +363,9 @@ final `.so` dramatically, and one archive carries fastshell + the aacode-rs agen
 ### Database
 `sqlite3` (built-in, bundled — no system dependency)
 
+### JavaScript
+`node` `js` `render` `jscheck` (`node -c` syntax-checks without executing)
+
 ### Device (requires plugin)
 `camera` `screencapture` `photolib` `record` `arecord` `play` `say` `speech` `contacts` `location` `clipboard` `pbpaste` `pbcopy` `sensor` `notify` `notify-send` `share` `open` `xdg-open` `auth` `battery` `vibrate` `screen` `device`
 
@@ -376,6 +380,7 @@ fastshell/
 │   ├── vfs/       # Layer 1 — Virtual sandbox filesystem
 │   ├── shell/     # Layer 1 — 180+ built-in shell commands (pure Rust)
 │   ├── python/    # Layer 1 — Python engine (subprocess / CPython)
+│   ├── js/        # Layer 1 — JS/TS static syntax checking (oxc, feature js-oxc)
 │   ├── bridge/    # Layer 2 — Script execution, I/O, pipeline, glob
 │   └── sdk/       # Layer 3 — Public API + platform FFI (JNI / C)
 ├── docs/          # Documentation (API, commands, integration, plugin, security, etc.)

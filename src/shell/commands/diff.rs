@@ -41,6 +41,10 @@ impl Shell {
                 "-b" => ignore_ws = Some(IgnoreWs::Changes),
                 "-w" => ignore_ws = Some(IgnoreWs::All),
                 "-q" => brief = true,
+                "-N" | "--new-file" => {} // treat absent files as empty (no-op here)
+                ,
+                "-a" | "--text" => {} // treat all files as text (already text)
+                ,
                 "-U" => {
                     if i + 1 < args.len() {
                         if let Ok(n) = args[i + 1].parse::<usize>() {
@@ -63,11 +67,12 @@ impl Shell {
                             'b' => ignore_ws = Some(IgnoreWs::Changes),
                             'w' => ignore_ws = Some(IgnoreWs::All),
                             'q' => brief = true,
-                            _ => eprintln!("diff: warning: unsupported option '-{}'", ch),
+                            'N' | 'a' => {}
+                            _ => crate::warn!("diff: warning: unsupported option '-{}'", ch),
                         }
                     }
                 }
-                _ => eprintln!("diff: warning: unsupported option '{}'", args[i]),
+                _ => crate::warn!("diff: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }

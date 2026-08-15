@@ -30,7 +30,7 @@ impl Shell {
                     force = true;
                 }
                 _ if arg.starts_with('-') => {
-                    eprintln!("rm: warning: unsupported option '{}'", arg);
+                    crate::warn!("rm: warning: unsupported option '{}'", arg);
                 }
                 _ => targets.push(arg.to_string()),
             }

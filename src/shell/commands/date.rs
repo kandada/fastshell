@@ -21,22 +21,41 @@ impl Shell {
         let mut use_utc = false;
         let mut date_str: Option<String> = None;
         let mut format = None;
+        let mut rfc_email = false;
+        let mut iso8601 = false;
+        let mut iso_suffix = String::new();
         let mut i = 0;
 
         while i < args.len() {
             match args[i] {
-                "-u" => use_utc = true,
-                "-d" => {
+                "-u" | "--utc" | "--universal" => use_utc = true,
+                "-d" | "--date" => {
                     if i + 1 < args.len() {
                         date_str = Some(args[i + 1].to_string());
                         i += 1;
                     }
                 }
+                "-R" | "--rfc-email" | "--rfc-2822" => rfc_email = true,
+                "-I" | "--iso-8601" => {
+                    iso8601 = true;
+                    iso_suffix = "date".to_string();
+                }
+                a if a.starts_with("-I") && a.len() > 2 => {
+                    iso8601 = true;
+                    iso_suffix = a[2..].to_string();
+                }
+                a if a.starts_with("--iso-8601=") => {
+                    iso8601 = true;
+                    iso_suffix = a[11..].to_string();
+                }
+                a if a.starts_with("--date=") => {
+                    date_str = Some(a[7..].to_string());
+                }
                 arg if arg.starts_with('+') => {
                     format = Some(arg[1..].to_string());
                 }
                 _ => {
-                    eprintln!("date: warning: unsupported option '{}'", args[i]);
+                    crate::warn!("date: warning: unsupported option '{}'", args[i]);
                 }
             }
             i += 1;
@@ -45,7 +64,10 @@ impl Shell {
         let secs = if let Some(ref ds) = date_str {
             match parse_iso8601(ds) {
                 Some(s) => s,
-                None => return CommandOutput::error(format!("date: invalid date '{}'\n", ds), 1),
+                None => match parse_relative_time(ds) {
+                    Some(s) => s,
+                    None => return CommandOutput::error(format!("date: invalid date '{}'\n", ds), 1),
+                },
             }
         } else {
             let dur = std::time::SystemTime::now()
@@ -59,14 +81,14 @@ impl Shell {
             }
         };
 
-        let output = match format {
-            Some(ref fmt) => format_date(secs, use_utc, fmt),
-            None => {
-                if use_utc {
-                    format!("{}\n", crate::shell::format_unix_time(secs))
-                } else {
-                    format!("{}\n", crate::shell::format_unix_time(secs))
-                }
+        let output = if rfc_email {
+            format!("{}\n", format_rfc2822(secs))
+        } else if iso8601 {
+            format!("{}\n", format_iso8601(secs, &iso_suffix))
+        } else {
+            match format {
+                Some(ref fmt) => format_date(secs, use_utc, fmt),
+                None => format!("{}\n", crate::shell::format_unix_time(secs)),
             }
         };
 
@@ -74,7 +96,82 @@ impl Shell {
     }
 }
 
-fn parse_iso8601(s: &str) -> Option<u64> {
+fn format_rfc2822(secs: u64) -> String {
+    let days_since_epoch = (secs / 86400) as i32;
+    let tod = secs % 86400;
+    let (year, month, day) = crate::shell::civil_from_days(days_since_epoch);
+    let (hour, minute, second) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        [((days_since_epoch as i64 + 4) % 7) as usize];
+    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    format!(
+        "{}, {:02} {} {} {:02}:{:02}:{:02} +0000",
+        weekday, day, month_names[(month - 1).max(0) as usize], year, hour, minute, second
+    )
+}
+
+fn format_iso8601(secs: u64, suffix: &str) -> String {
+    let days_since_epoch = (secs / 86400) as i32;
+    let tod = secs % 86400;
+    let (year, month, day) = crate::shell::civil_from_days(days_since_epoch);
+    let (hour, minute, second) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    match suffix {
+        "seconds" => format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00", year, month, day, hour, minute, second),
+        "minutes" => format!("{:04}-{:02}-{:02}T{:02}:{:02}+00:00", year, month, day, hour, minute),
+        "hours" => format!("{:04}-{:02}-{:02}T{:02}:00+00:00", year, month, day, hour),
+        "ns" => format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000000000+00:00", year, month, day, hour, minute, second),
+        _ => format!("{:04}-{:02}-{:02}", year, month, day),
+    }
+}
+
+/// Parse a GNU-date-style relative time expression: `yesterday`, `tomorrow`,
+/// `-3 days`, `+2 hours`, `5 minutes ago`, etc. Returns epoch seconds.
+pub(crate) fn parse_relative_time(s: &str) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    let s = s.trim().to_lowercase();
+
+    let delta: Option<i64> = if s == "yesterday" {
+        Some(-86400)
+    } else if s == "tomorrow" {
+        Some(86400)
+    } else if s == "now" {
+        Some(0)
+    } else if let Some(rest) = s.strip_prefix('-') {
+        Some(-parse_duration(rest)?)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        Some(parse_duration(rest)?)
+    } else if let Some(rest) = s.strip_suffix(" ago") {
+        Some(-parse_duration(rest.trim())?)
+    } else if let Some(rest) = s.strip_suffix(" hence") {
+        Some(parse_duration(rest.trim())?)
+    } else {
+        None
+    };
+
+    delta.map(|d| (now + d).max(0) as u64)
+}
+
+/// Parse a duration like "3 days", "2 hours", "10 minutes" into seconds.
+fn parse_duration(s: &str) -> Option<i64> {
+    let mut parts = s.trim().split_whitespace();
+    let num: i64 = parts.next()?.parse().ok()?;
+    let unit = parts.next().unwrap_or("second").trim_end_matches('s');
+    match unit {
+        "second" | "sec" => Some(num),
+        "minute" | "min" => Some(num * 60),
+        "hour" | "hr" => Some(num * 3600),
+        "day" => Some(num * 86400),
+        "week" => Some(num * 7 * 86400),
+        "month" => Some(num * 30 * 86400),
+        "year" => Some(num * 365 * 86400),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_iso8601(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.len() < 10 {
         return None;
@@ -171,6 +268,9 @@ fn format_date(secs: u64, use_utc: bool, fmt: &str) -> String {
     let tz_offset = if use_utc { "+0000".to_string() } else { timezone_offset() };
 
     let mut result = fmt.to_string();
+    result = result.replace("%F", &format!("{:04}-{:02}-{:02}", year, month, day));
+    result = result.replace("%T", &format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
+    result = result.replace("%e", &format!("{:2}", day));
     result = result.replace("%Y", &format!("{:04}", year));
     result = result.replace("%m", &format!("{:02}", month));
     result = result.replace("%d", &format!("{:02}", day));
@@ -262,5 +362,66 @@ mod tests {
         let out = s.execute("date", &["--help"], None);
         assert_eq!(out.exit_code, 0);
         assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_date_full_date_format() {
+        let mut s = mk_shell();
+        let out = s.execute("date", &["+%F"], None);
+        // %F = %Y-%m-%d
+        let re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
+        assert!(re.is_match(out.stdout.trim()), "%F should be YYYY-MM-DD, got: {}", out.stdout);
+    }
+
+    #[test]
+    fn test_date_full_time_format() {
+        let mut s = mk_shell();
+        let out = s.execute("date", &["+%T"], None);
+        // %T = %H:%M:%S
+        let re = regex::Regex::new(r"^\d{2}:\d{2}:\d{2}$").unwrap();
+        assert!(re.is_match(out.stdout.trim()), "%T should be HH:MM:SS, got: {}", out.stdout);
+    }
+
+    #[test]
+    fn test_parse_duration_days() {
+        assert_eq!(super::parse_duration("3 days"), Some(3 * 86400));
+        assert_eq!(super::parse_duration("2 hours"), Some(2 * 3600));
+        assert_eq!(super::parse_duration("10 minutes"), Some(10 * 60));
+        assert_eq!(super::parse_duration("1 week"), Some(7 * 86400));
+    }
+
+    #[test]
+    fn test_parse_relative_time_yesterday() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let yesterday = super::parse_relative_time("yesterday").unwrap();
+        assert!(
+            (yesterday as i64 - (now as i64 - 86400)).abs() < 5,
+            "yesterday should be ~now-86400"
+        );
+    }
+
+    #[test]
+    fn test_parse_relative_time_ago() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let v = super::parse_relative_time("5 minutes ago").unwrap();
+        assert!((v as i64 - (now as i64 - 300)).abs() < 5, "5 minutes ago should be ~now-300");
+    }
+
+    #[test]
+    fn test_date_d_yesterday() {
+        let mut s = mk_shell();
+        let out = s.execute("date", &["-d", "yesterday", "+%s"], None);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let val: i64 = out.stdout.trim().parse().unwrap();
+        assert!((val - (now as i64 - 86400)).abs() < 5, "date -d yesterday +%s should be ~now-86400");
     }
 }

@@ -30,7 +30,7 @@ impl Shell {
 
         for arg in args {
             if arg.starts_with('-') {
-                eprintln!("sleep: warning: unsupported option '{}'", arg);
+                crate::warn!("sleep: warning: unsupported option '{}'", arg);
                 continue;
             }
             let secs = match parse_duration(arg) {

@@ -6,22 +6,51 @@ use crate::shell::{CommandOutput, Shell};
 impl Shell {
     pub fn cmd_paste(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut delimiter = '\t';
+        let mut serial = false;
         let mut files = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-d" => {
-                    if i + 1 < args.len() {
-                        delimiter = args[i + 1].chars().next().unwrap_or('\t');
-                        i += 1;
+            let arg = args[i];
+            if arg.starts_with("--") {
+                match arg {
+                    "--serial" => serial = true,
+                    "--delimiters" => {
+                        if i + 1 < args.len() {
+                            delimiter = args[i + 1].chars().next().unwrap_or('\t');
+                            i += 1;
+                        }
                     }
+                    _ => {}
                 }
-                arg if arg.starts_with("-d") && arg.len() > 2 => {
-                    delimiter = arg[2..].chars().next().unwrap_or('\t');
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                let chars: Vec<char> = arg.chars().skip(1).collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        's' => serial = true,
+                        'd' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let val = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            delimiter = val.chars().next().unwrap_or('\t');
+                            j = chars.len();
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    j += 1;
                 }
-                arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+            } else {
+                files.push(arg.to_string());
             }
             i += 1;
         }
@@ -46,36 +75,64 @@ impl Shell {
             }
         }
 
-        let max_rows = columns.iter().map(|c| c.len()).max().unwrap_or(0);
         let mut output = String::new();
-        for row in 0..max_rows {
-            let parts: Vec<&str> = columns
-                .iter()
-                .map(|col| col.get(row).map(|s| s.as_str()).unwrap_or(""))
-                .collect();
-            output.push_str(&parts.join(&delimiter.to_string()));
-            output.push('\n');
+        if serial {
+            for col in &columns {
+                output.push_str(&col.join(&delimiter.to_string()));
+                output.push('\n');
+            }
+        } else {
+            let max_rows = columns.iter().map(|c| c.len()).max().unwrap_or(0);
+            for row in 0..max_rows {
+                let parts: Vec<&str> = columns
+                    .iter()
+                    .map(|col| col.get(row).map(|s| s.as_str()).unwrap_or(""))
+                    .collect();
+                output.push_str(&parts.join(&delimiter.to_string()));
+                output.push('\n');
+            }
         }
 
         CommandOutput::success(output)
     }
 
     pub fn cmd_timeout(&mut self, args: &[&str]) -> CommandOutput {
-        if args.is_empty() {
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-s" | "--signal" | "-k" | "--kill-after" => {
+                    if i + 1 < args.len() {
+                        i += 1; // consume signal/duration value (not enforced in sandbox)
+                    }
+                }
+                "--preserve-status" | "--foreground" => {}
+                a if a.starts_with('-') && a.len() > 1 => {
+                    return CommandOutput::error(
+                        format!("timeout: unrecognized option '{}'\n", a),
+                        125,
+                    );
+                }
+                _ => break,
+            }
+            i += 1;
+        }
+
+        if i >= args.len() {
             return CommandOutput::error("timeout: missing duration\n".to_string(), 1);
         }
 
-        let duration = match parse_timeout_duration(args[0]) {
+        let duration = match parse_timeout_duration(args[i]) {
             Ok(d) => d,
             Err(e) => return CommandOutput::error(format!("timeout: {}\n", e), 1),
         };
+        i += 1;
 
-        if args.len() < 2 {
+        if i >= args.len() {
             return CommandOutput::error("timeout: missing command\n".to_string(), 1);
         }
 
-        let cmd = args[1];
-        let cmd_args: Vec<&str> = args[2..].to_vec();
+        let cmd = args[i];
+        let cmd_args: Vec<&str> = args[i + 1..].to_vec();
         let vfs_root = self.vfs.root().to_path_buf();
         let cwd = if self.cwd == "/" {
             vfs_root.clone()

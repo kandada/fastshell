@@ -48,6 +48,7 @@ pub type Result<T> = std::result::Result<T, VfsError>;
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+    pub is_symlink: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
 }
@@ -286,10 +287,14 @@ impl Vfs {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&target)? {
             let entry = entry?;
+            // file_type() does not follow symlinks, so a symlink to a dir is
+            // still reported as a symlink (needed for `find -type l`).
+            let file_type = entry.file_type()?;
             let metadata = entry.metadata()?;
             entries.push(DirEntry {
                 name: entry.file_name().to_string_lossy().to_string(),
                 is_dir: metadata.is_dir(),
+                is_symlink: file_type.is_symlink(),
                 size: metadata.len(),
                 modified: metadata.modified().ok(),
             });

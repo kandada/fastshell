@@ -363,6 +363,15 @@ impl DevicePlugin for CallbackDevicePlugin {
             screen_height: v.get("screen_height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
         })
     }
+
+    fn eval_js(&self, code: &str) -> Result<String, String> {
+        let v = self.call("eval_js", json!({"code": code}))?;
+        Ok(Self::str_field(&v, &["result", "value", "output"]))
+    }
+
+    fn render_html(&self, html: &str, output_path: &str) -> Result<(), String> {
+        self.call_unit("render_html", json!({"html": html, "path": output_path}))
+    }
 }
 
 fn parse_contact(v: &Value) -> Contact {

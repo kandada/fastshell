@@ -24,7 +24,7 @@ impl Shell {
                 "-a" => append = true,
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {
-                    eprintln!("tee: warning: unsupported option '{}'", arg);
+                    crate::warn!("tee: warning: unsupported option '{}'", arg);
                 }
             }
         }

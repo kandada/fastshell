@@ -21,17 +21,35 @@ impl Shell {
         let mut delete = false;
         let mut squeeze = false;
         let mut complement = false;
+        let mut truncate_set1 = false;
         let mut set1 = String::new();
         let mut set2 = String::new();
 
         for arg in args {
-            match *arg {
-                "-d" => delete = true,
-                "-s" => squeeze = true,
-                "-c" => complement = true,
-                _ if !arg.starts_with('-') && set1.is_empty() => set1 = arg.to_string(),
-                _ if !arg.starts_with('-') && set2.is_empty() => set2 = arg.to_string(),
-                _ => eprintln!("tr: warning: unsupported option '{}'", arg),
+            if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
+                for ch in arg.chars().skip(1) {
+                    match ch {
+                        'd' => delete = true,
+                        's' => squeeze = true,
+                        'c' | 'C' => complement = true,
+                        't' => truncate_set1 = true,
+                        _ => crate::warn!("tr: warning: unsupported option '-{}'", ch),
+                    }
+                }
+            } else if arg.starts_with("--") {
+                match *arg {
+                    "--delete" => delete = true,
+                    "--squeeze-repeats" => squeeze = true,
+                    "--complement" => complement = true,
+                    "--truncate-set1" => truncate_set1 = true,
+                    _ => crate::warn!("tr: warning: unsupported option '{}'", arg),
+                }
+            } else if set1.is_empty() {
+                set1 = arg.to_string();
+            } else if set2.is_empty() {
+                set2 = arg.to_string();
+            } else {
+                crate::warn!("tr: warning: extra operand '{}'", arg);
             }
         }
 
@@ -46,7 +64,7 @@ impl Shell {
 
         let set1_expanded = resolve_char_classes(&set1);
         let chars1_raw = expand_set(&unescape_tr(&set1_expanded));
-        let chars1: Vec<char> = if complement {
+        let mut chars1: Vec<char> = if complement {
             complement_set(&chars1_raw)
         } else {
             chars1_raw
@@ -54,6 +72,10 @@ impl Shell {
 
         let set2_expanded = resolve_char_classes(&set2);
         let chars2 = expand_set(&unescape_tr(&set2_expanded));
+
+        if truncate_set1 {
+            chars1.truncate(chars2.len());
+        }
 
         let squeeze_chars: &[char] = if squeeze { &chars1 } else { &[] };
 
@@ -197,7 +219,7 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)

@@ -4,7 +4,7 @@
 use crate::sdk::plugin::DevicePlugin;
 use crate::shell::{CommandOutput, Shell};
 
-fn plugin<T>(
+pub(crate) fn plugin<T>(
     shell: &Shell,
     f: impl FnOnce(&Box<dyn DevicePlugin>) -> Result<T, String>,
 ) -> Result<T, CommandOutput> {
@@ -29,7 +29,7 @@ impl Shell {
     /// the photo where the agent could never see it. Resolving here — against
     /// THIS instance's VFS — puts device files exactly where the caller's
     /// `ls` will find them, and keeps the path-escape protection.
-    fn device_host_path(&self, vpath: &str) -> Result<String, CommandOutput> {
+    pub(crate) fn device_host_path(&self, vpath: &str) -> Result<String, CommandOutput> {
         match self.vfs.resolve(vpath, &self.cwd) {
             Ok(p) => Ok(p.to_string_lossy().to_string()),
             Err(e) => Err(CommandOutput::error(format!("{vpath}: {e}\n"), 1)),

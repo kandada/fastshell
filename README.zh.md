@@ -15,6 +15,7 @@
 - **通配符展开** — `ls *.rs`、`cat src/**/*.rs`
 - **正则表达式** — `grep` 和 `sed s///` 使用完整正则
 - **Python 引擎** — 内嵌 [RustPython](https://github.com/RustPython/RustPython)（MIT，纯 Rust，feature `python-rustpython`）：支持 `ast`/`unittest`/冻结标准库，无 dlopen/JNI/C-TLS 崩溃面。桌面端优先使用系统 `python3`。
+- **JavaScript 执行** — `node`/`js` 在宿主 App 的 WebView 引擎（Android V8 / iOS JavaScriptCore）里运行 JS，`render` 把 HTML 渲染成截图，`jscheck`/`node -c` 用 [oxc](https://github.com/oxc-project/oxc) 做 JS/TS 语法静态检查（纯 Rust，可选 feature `js-oxc`）。
 - **虚拟文件系统** — 沙箱隔离，防止路径逃逸
 - **线程安全** — `Arc<Mutex<Runtime>>`，支持超时控制
 - **跨平台** — 统一代码库编译 Android / iOS / macOS / Linux
@@ -288,7 +289,7 @@ ls -la | grep foo | wc -l
 需要 Rust 稳定版工具链。
 
 ```bash
-# 1. 编译目标平台（加 --features python-rustpython 启用内嵌 Python）
+# 1. 编译目标平台（可选 feature：python-rustpython = 内嵌 Python，js-oxc = JS/TS 语法检查）
 cargo build --release --target aarch64-apple-darwin        # macOS ARM64
 cargo build --release --target x86_64-apple-darwin          # macOS Intel
 cargo build --release --target aarch64-apple-ios            # iOS（需 macOS 宿主机）
@@ -360,6 +361,9 @@ target/aarch64-linux-android/release/libfastshell.so
 ### 数据库
 `sqlite3`（内置，bundled，无系统依赖）
 
+### JavaScript
+`node` `js` `render` `jscheck`（`node -c` 只做语法检查不执行）
+
 ### 设备能力（需插件）
 `camera` `screencapture` `photolib` `record` `arecord` `play` `say` `speech` `contacts` `location` `clipboard` `pbpaste` `pbcopy` `sensor` `notify` `notify-send` `share` `open` `xdg-open` `auth` `battery` `vibrate` `screen` `device`
 
@@ -374,6 +378,7 @@ fastshell/
 │   ├── vfs/       # 层1 — 虚拟沙箱文件系统
 │   ├── shell/     # 层1 — 180+ 内置命令（纯 Rust 实现）
 │   ├── python/    # 层1 — Python 引擎（子进程 / CPython）
+│   ├── js/        # 层1 — JS/TS 语法静态检查（oxc，feature js-oxc）
 │   ├── bridge/    # 层2 — 脚本执行、I/O、管道、通配符
 │   └── sdk/       # 层3 — 公共 API + 平台 FFI（JNI / C）
 ├── docs/          # 文档（API、命令、集成、插件、安全等）

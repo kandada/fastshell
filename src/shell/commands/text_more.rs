@@ -124,19 +124,45 @@ impl Shell {
 
     pub fn cmd_strings(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut min_len = 4usize;
+        let mut print_filename = false;
+        let mut radix: Option<char> = None;
         let mut files = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
             match args[i] {
+                "-h" | "--help" => {
+                    return CommandOutput::success(STRINGS_HELP_TEXT.to_string());
+                }
                 "-n" => {
                     if i + 1 < args.len() {
                         min_len = args[i + 1].parse().unwrap_or(4);
                         i += 1;
                     }
                 }
+                "-f" | "--print-file-name" => print_filename = true,
+                "-t" => {
+                    if i + 1 < args.len() {
+                        radix = args[i + 1].chars().next();
+                        i += 1;
+                    }
+                }
+                "--radix" => {
+                    if i + 1 < args.len() {
+                        radix = Some(match args[i + 1] {
+                            "o" | "octal" => 'o',
+                            "d" | "decimal" => 'd',
+                            "x" | "hex" => 'x',
+                            _ => 'd',
+                        });
+                        i += 1;
+                    }
+                }
                 arg if arg.starts_with("-n") && arg.len() > 2 => {
                     min_len = arg[2..].parse().unwrap_or(4);
+                }
+                arg if arg.starts_with("-t") && arg.len() > 2 => {
+                    radix = arg[2..].chars().next();
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
@@ -144,40 +170,31 @@ impl Shell {
             i += 1;
         }
 
-        let data = if files.is_empty() {
+        if files.is_empty() {
             match stdin {
-                Some(s) => s.as_bytes().to_vec(),
-                None => return CommandOutput::error("strings: missing input\n".to_string(), 1),
-            }
-        } else {
-            let mut all = Vec::new();
-            for file in &files {
-                match self.vfs.read(file, &self.cwd) {
-                    Ok(d) => all.extend_from_slice(&d),
-                    Err(e) => {
-                        return CommandOutput::error(format!("strings: {}: {}\n", file, e), 1)
-                    }
+                Some(s) => {
+                    let output = extract_strings(s.as_bytes(), min_len, None, radix);
+                    return CommandOutput::success(output);
                 }
-            }
-            all
-        };
-
-        let mut output = String::new();
-        let mut current = String::new();
-        for &byte in &data {
-            if byte >= 0x20 && byte < 0x7f {
-                current.push(byte as char);
-            } else {
-                if current.len() >= min_len {
-                    output.push_str(&current);
-                    output.push('\n');
+                None => {
+                    return CommandOutput::error("strings: missing input\n".to_string(), 1);
                 }
-                current.clear();
             }
         }
-        if current.len() >= min_len {
-            output.push_str(&current);
-            output.push('\n');
+
+        let mut output = String::new();
+        for file in &files {
+            let data = match self.vfs.read(file, &self.cwd) {
+                Ok(d) => d,
+                Err(e) => {
+                    return CommandOutput::error(format!("strings: {}: {}\n", file, e), 1)
+                }
+            };
+            if print_filename && files.len() > 1 {
+                output.push_str(&format!("\n{}:\n", file));
+            }
+            let label = if print_filename { Some(file.as_str()) } else { None };
+            output.push_str(&extract_strings(&data, min_len, label, radix));
         }
 
         CommandOutput::success(output)
@@ -361,6 +378,71 @@ impl Shell {
     }
 }
 
+const STRINGS_HELP_TEXT: &str = "\
+Usage: strings [OPTION]... [FILE]...
+Print the sequences of printable characters in files.
+
+  -n N         minimum string length (default 4)
+  -f           print the name of the file before each string
+  -t {o,d,x}   print the offset (octal, decimal, hex) before each string
+      --radix={o,d,x}  same as -t
+  -h, --help     display this help and exit
+";
+
+fn extract_strings(data: &[u8], min_len: usize, label: Option<&str>, radix: Option<char>) -> String {
+    let mut output = String::new();
+    let mut current = String::new();
+    let mut start_offset: usize = 0;
+    let mut in_string = false;
+
+    for (i, &byte) in data.iter().enumerate() {
+        if byte >= 0x20 && byte < 0x7f {
+            if !in_string {
+                start_offset = i;
+                in_string = true;
+            }
+            current.push(byte as char);
+        } else {
+            if in_string {
+                if current.len() >= min_len {
+                    if let Some(name) = label {
+                        output.push_str(name);
+                        output.push_str(": ");
+                    }
+                    if let Some(r) = radix {
+                        match r {
+                            'o' => output.push_str(&format!("{:>7o} ", start_offset)),
+                            'd' => output.push_str(&format!("{:>7} ", start_offset)),
+                            'x' | _ => output.push_str(&format!("{:>7x} ", start_offset)),
+                        }
+                    }
+                    output.push_str(&current);
+                    output.push('\n');
+                }
+                current.clear();
+                in_string = false;
+            }
+        }
+    }
+    if in_string && current.len() >= min_len {
+        if let Some(name) = label {
+            output.push_str(name);
+            output.push_str(": ");
+        }
+        if let Some(r) = radix {
+            match r {
+                'o' => output.push_str(&format!("{:>7o} ", start_offset)),
+                'd' => output.push_str(&format!("{:>7} ", start_offset)),
+                'x' | _ => output.push_str(&format!("{:>7x} ", start_offset)),
+            }
+        }
+        output.push_str(&current);
+        output.push('\n');
+    }
+
+    output
+}
+
 fn get_file_content(
     shell: &Shell,
     files: &[String],
@@ -403,5 +485,67 @@ fn parse_truncate_size(s: &str) -> Option<u64> {
         rest.parse::<u64>().ok().map(|n| n * 1024 * 1024 * 1024)
     } else {
         s.parse().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shell;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn mk_shell() -> Shell {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fastshell_strings_test_{}_{}", std::process::id(), n));
+        let _ = fs::remove_dir_all(&dir);
+        let vfs = crate::vfs::Vfs::new(dir).unwrap();
+        Shell::new(vfs)
+    }
+
+    #[test]
+    fn test_strings_help() {
+        let mut s = mk_shell();
+        let out = s.execute("strings", &["-h"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("Usage: strings"));
+    }
+
+    #[test]
+    fn test_strings_help_long() {
+        let mut s = mk_shell();
+        let out = s.execute("strings", &["--help"], None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("Usage: strings"));
+    }
+
+    #[test]
+    fn test_strings_basic() {
+        let mut s = mk_shell();
+        let out = s.execute("strings", &["-n", "3"], Some("hello\0\x01world\0\x02test"));
+        assert!(out.exit_code == 0);
+        assert!(out.stdout.contains("hello"));
+        assert!(out.stdout.contains("world"));
+        assert!(out.stdout.contains("test"));
+    }
+
+    #[test]
+    fn test_strings_offset_hex() {
+        let mut s = mk_shell();
+        let out = s.execute("strings", &["-t", "x", "-n", "3"], Some("ab\0\x01hello"));
+        assert!(out.exit_code == 0);
+        // "ab" is 2 chars, filtered; "hello" starts at offset 4
+        assert!(out.stdout.contains("hello"));
+    }
+
+    #[test]
+    fn test_strings_filename_flag() {
+        let mut s = mk_shell();
+        let file = "test_strings_f.txt";
+        s.vfs.write(file, &s.cwd, "hello\0world").unwrap();
+        let out = s.execute("strings", &["-f", file], None);
+        assert!(out.exit_code == 0);
+        assert!(out.stdout.contains("test_strings_f.txt"));
     }
 }

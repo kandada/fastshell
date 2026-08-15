@@ -33,10 +33,14 @@ Options:
 #[derive(Debug, Clone)]
 enum ConditionKind {
     Name(String),
+    Iname(String),
     Type(char),
     Empty,
     Mtime { days: i64, greater_than: bool },
     Size { bytes: i64, greater_than: bool },
+    Regex(String),
+    IRegex(String),
+    Newer(SystemTime),
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,20 @@ impl Shell {
                         i += 1;
                     }
                 }
+                "-iname" => {
+                    if i + 1 < args.len() {
+                        let pat = args[i + 1].to_string();
+                        add_condition(
+                            &mut conditions,
+                            Condition {
+                                negate: negate_next,
+                                kind: ConditionKind::Iname(pat),
+                            },
+                        );
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
                 "-type" => {
                     if i + 1 < args.len() {
                         if let Some(ch) = args[i + 1].chars().next() {
@@ -157,6 +175,53 @@ impl Shell {
                         i += 1;
                     }
                 }
+                "-regex" => {
+                    if i + 1 < args.len() {
+                        add_condition(
+                            &mut conditions,
+                            Condition {
+                                negate: negate_next,
+                                kind: ConditionKind::Regex(args[i + 1].to_string()),
+                            },
+                        );
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
+                "-iregex" => {
+                    if i + 1 < args.len() {
+                        add_condition(
+                            &mut conditions,
+                            Condition {
+                                negate: negate_next,
+                                kind: ConditionKind::IRegex(args[i + 1].to_string()),
+                            },
+                        );
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
+                "-newer" => {
+                    if i + 1 < args.len() {
+                        let ref_time = self
+                            .vfs
+                            .resolve(args[i + 1], &self.cwd)
+                            .ok()
+                            .and_then(|p| std::fs::metadata(&p).ok())
+                            .and_then(|m| m.modified().ok());
+                        if let Some(t) = ref_time {
+                            add_condition(
+                                &mut conditions,
+                                Condition {
+                                    negate: negate_next,
+                                    kind: ConditionKind::Newer(t),
+                                },
+                            );
+                        }
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
                 "-print0" => {
                     actions.push(Action::Print0);
                 }
@@ -193,7 +258,7 @@ impl Shell {
                     path = arg.to_string();
                     path_set = true;
                 }
-                _ => eprintln!("find: warning: unsupported option '{}'", args[i]),
+                _ => crate::warn!("find: warning: unsupported option '{}'", args[i]),
             }
             i += 1;
         }
@@ -209,7 +274,10 @@ impl Shell {
                     .iter()
                     .map(|c| {
                         let compiled = match &c.kind {
-                            ConditionKind::Name(pat) => Some(compile_glob(pat)),
+                            ConditionKind::Name(pat) => Some(compile_glob_ci(pat, false)),
+                            ConditionKind::Iname(pat) => Some(compile_glob_ci(pat, true)),
+                            ConditionKind::Regex(pat) => regex::Regex::new(pat).ok(),
+                            ConditionKind::IRegex(pat) => regex::Regex::new(&format!("(?i){}", pat)).ok(),
                             _ => None,
                         };
                         (c.negate, compiled, c.kind.clone())
@@ -224,14 +292,15 @@ impl Shell {
 
         // Check the starting path itself
         if let Ok(resolved) = self.vfs.resolve(&path, &self.cwd) {
-            if let Ok(metadata) = resolved.metadata() {
+            if let Ok(metadata) = std::fs::symlink_metadata(&resolved) {
                 let entry_name = resolved
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.clone());
                 let start_entry = crate::vfs::DirEntry {
                     name: entry_name.clone(),
-                    is_dir: metadata.is_dir(),
+                    is_dir: resolved.metadata().map(|m| m.is_dir()).unwrap_or(false),
+                    is_symlink: metadata.file_type().is_symlink(),
                     size: metadata.len(),
                     modified: metadata.modified().ok(),
                 };
@@ -423,13 +492,22 @@ fn evaluate_conditions(
         }
         let group_match = group.iter().all(|(negate, compiled, kind)| {
             let result = match kind {
-                ConditionKind::Name(_) => match compiled {
+                ConditionKind::Name(_) | ConditionKind::Iname(_) => match compiled {
                     Some(re) => re.is_match(&name),
                     None => true,
+                },
+                ConditionKind::Regex(_) | ConditionKind::IRegex(_) => match compiled {
+                    Some(re) => re.is_match(&name),
+                    None => false,
+                },
+                ConditionKind::Newer(ref_time) => match entry.modified {
+                    Some(mod_time) => mod_time > *ref_time,
+                    None => false,
                 },
                 ConditionKind::Type(ch) => match ch {
                     'd' => entry.is_dir,
                     'f' => !entry.is_dir,
+                    'l' => entry.is_symlink,
                     _ => true,
                 },
                 ConditionKind::Empty => {
@@ -545,8 +623,11 @@ fn parse_size(arg: &str) -> Option<ConditionKind> {
     })
 }
 
-fn compile_glob(pattern: &str) -> regex::Regex {
+fn compile_glob_ci(pattern: &str, ignore_case: bool) -> regex::Regex {
     let mut regex_str = String::new();
+    if ignore_case {
+        regex_str.push_str("(?i)");
+    }
     regex_str.push('^');
     for ch in pattern.chars() {
         match ch {
@@ -615,6 +696,60 @@ mod tests {
 
         let out = shell.cmd_find(&["src", "-type", "d"]);
         assert!(out.stdout.contains("src"));
+    }
+
+    #[test]
+    fn test_find_iname_case_insensitive() {
+        let shell = mk_shell();
+        shell.cmd_touch(&["Report.PDF"]);
+        shell.cmd_touch(&["notes.txt"]);
+
+        // -iname matches case-insensitively.
+        let out = shell.cmd_find(&[".", "-iname", "*.pdf"]);
+        assert!(
+            out.stdout.contains("Report.PDF"),
+            "-iname should match Report.PDF: {}",
+            out.stdout
+        );
+        assert!(
+            !out.stdout.contains("notes.txt"),
+            "-iname *.pdf should not match notes.txt"
+        );
+    }
+
+    #[test]
+    fn test_find_name_is_case_sensitive() {
+        let shell = mk_shell();
+        shell.cmd_touch(&["Report.PDF"]);
+
+        // -name is case-sensitive, so *.pdf must NOT match Report.PDF.
+        let out = shell.cmd_find(&[".", "-name", "*.pdf"]);
+        assert!(
+            !out.stdout.contains("Report.PDF"),
+            "-name *.pdf should not match Report.PDF"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_find_type_l() {
+        let shell = mk_shell();
+        shell.cmd_touch(&["target.txt"]);
+        // Create a symlink to target.txt.
+        let root = shell.vfs.root().to_path_buf();
+        let _ = std::os::unix::fs::symlink(root.join("target.txt"), root.join("link.txt"));
+
+        let out = shell.cmd_find(&[".", "-type", "l"]);
+        assert!(
+            out.stdout.contains("link.txt"),
+            "-type l should match the symlink: {}",
+            out.stdout
+        );
+        assert!(
+            !out.stdout.contains("target.txt"),
+            "-type l should not match a regular file: {}",
+            out.stdout
+        );
     }
 
     #[test]

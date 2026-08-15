@@ -7,24 +7,54 @@ use base64::Engine as _;
 impl Shell {
     pub fn cmd_base64(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut decode = false;
+        let mut ignore_garbage = false;
         let mut wrap = 76usize;
         let mut files = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-d" | "--decode" => decode = true,
-                "-w" => {
-                    if i + 1 < args.len() {
-                        wrap = args[i + 1].parse().unwrap_or(76);
-                        i += 1;
+            let arg = args[i];
+            if arg.starts_with("--") {
+                match arg {
+                    "--decode" => decode = true,
+                    "--ignore-garbage" => ignore_garbage = true,
+                    "--wrap" => {
+                        if i + 1 < args.len() {
+                            wrap = args[i + 1].parse().unwrap_or(76);
+                            i += 1;
+                        }
                     }
+                    _ => {}
                 }
-                arg if arg.starts_with("-w") && arg.len() > 2 => {
-                    wrap = arg[2..].parse().unwrap_or(76);
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                let chars: Vec<char> = arg.chars().skip(1).collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        'd' => decode = true,
+                        'i' => ignore_garbage = true,
+                        'w' => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let val = if !rest.is_empty() {
+                                rest
+                            } else {
+                                i += 1;
+                                if i < args.len() {
+                                    args[i].to_string()
+                                } else {
+                                    String::new()
+                                }
+                            };
+                            wrap = val.parse().unwrap_or(76);
+                            j = chars.len();
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    j += 1;
                 }
-                arg if !arg.starts_with('-') => files.push(arg.to_string()),
-                _ => {}
+            } else {
+                files.push(arg.to_string());
             }
             i += 1;
         }
@@ -46,10 +76,17 @@ impl Shell {
         };
 
         if decode {
-            let cleaned: String = String::from_utf8_lossy(&input_data)
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
+            let cleaned: String = if ignore_garbage {
+                String::from_utf8_lossy(&input_data)
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
+                    .collect()
+            } else {
+                String::from_utf8_lossy(&input_data)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect()
+            };
             match base64::engine::general_purpose::STANDARD.decode(&cleaned) {
                 Ok(bytes) => CommandOutput::success(String::from_utf8_lossy(&bytes).to_string()),
                 Err(e) => CommandOutput::error(format!("base64: decode error: {}\n", e), 1),
