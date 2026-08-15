@@ -91,12 +91,11 @@ static char *jstring_to_utf8(JNIEnv *env, jstring str) {
 
 /* ── aacode-rs native agent C ABI (exported from libaacode_rs.a) ────── */
 
-typedef void (*aacode_stream_callback)(const char *line);
-extern void aacode_register_stream_callback(aacode_stream_callback cb);
-extern char *aacode_run_task(const char *task_json);
-extern char *aacode_run_task_with_cb(const char *task_json, aacode_stream_callback cb);
-extern void aacode_cancel(void);
-extern void aacode_cancel_task(const char *task_id);
+typedef void (*aacode_event_fn)(const char *line, void *userdata);
+extern void *aacode_task_start(const char *task_json, aacode_event_fn cb, void *userdata);
+extern char *aacode_task_wait(void *handle);
+extern void aacode_task_cancel(void *handle);
+extern void aacode_task_free(void *handle);
 extern char *aacode_validate_api_key(const char *config_json);
 extern char *aacode_list_sessions(const char *project_path);
 extern char *aacode_get_session_messages(const char *project_path, const char *session_id);
@@ -110,9 +109,9 @@ extern void fastshell_register_device_callback(fastshell_device_callback cb);
 /* ── JavaVM + streaming callback state ─────────────────────────────── */
 
 static JavaVM *g_vm = NULL;
-static jobject g_stream_cb = NULL;      /* global ref to StreamCallback   */
-static jmethodID g_on_chunk = NULL;     /* onChunk(Ljava/lang/String;)V   */
-static pthread_mutex_t g_cb_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Forward declaration (defined below with the per-task context registry). */
+static void clear_all_task_ctx(void);
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
@@ -123,17 +122,9 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
     (void)vm;
     (void)reserved;
-    // Clear the stream callback to prevent use-after-free on Rust worker threads
-    // that might still be running during shutdown.
-    fastshell_register_stream_callback(NULL);
-    pthread_mutex_lock(&g_cb_lock);
-    if (g_stream_cb != NULL) {
-        // We can't call DeleteGlobalRef here because JNI_OnUnload runs after
-        // the JVM has started tearing down. Just clear our reference.
-        g_stream_cb = NULL;
-        g_on_chunk = NULL;
-    }
-    pthread_mutex_unlock(&g_cb_lock);
+    // Clear per-task callback contexts to prevent use-after-free on Rust worker
+    // threads that might still be running during shutdown.
+    clear_all_task_ctx();
     g_vm = NULL;
 }
 
@@ -180,74 +171,88 @@ static JNIEnv *get_env(void) {
     return env;
 }
 
-/* ── Inline-trampoline context for aacode_run_task_with_cb ──────────── */
+/* ── Per-task callback context (userdata) for aacode_task_start ─────── */
 
 typedef struct {
-    JNIEnv *env;
-    jobject cb;
-    jmethodID mid;
-} stream_trampoline_ctx;
+    jobject cb;      /* global ref to the Kotlin StreamCallback */
+    jmethodID mid;   /* onChunk(Ljava/lang/String;)V             */
+} jni_cb_ctx;
 
-static pthread_key_t g_inline_ctx_key;
-static pthread_once_t g_inline_ctx_once = PTHREAD_ONCE_INIT;
-
-static void make_inline_ctx_key(void) {
-    pthread_key_create(&g_inline_ctx_key, NULL);
-}
-
-static void set_inline_ctx(stream_trampoline_ctx *ctx) {
-    pthread_once(&g_inline_ctx_once, make_inline_ctx_key);
-    pthread_setspecific(g_inline_ctx_key, ctx);
-}
-
-static stream_trampoline_ctx *get_inline_ctx(void) {
-    return (stream_trampoline_ctx *)pthread_getspecific(g_inline_ctx_key);
-}
-
-/* Per-task trampoline — uses thread-local ctx so concurrent tasks on
- * different threads don't interfere with each other. */
-static void inline_trampoline(const char *chunk) {
-    stream_trampoline_ctx *ctx = get_inline_ctx();
-    if (ctx == NULL || chunk == NULL || ctx->cb == NULL || ctx->mid == NULL) return;
-    jstring jc = utf8_to_jstring(ctx->env, chunk);
-    if (jc == NULL) { if ((*ctx->env)->ExceptionCheck(ctx->env)) (*ctx->env)->ExceptionClear(ctx->env); return; }
-    (*ctx->env)->CallVoidMethod(ctx->env, ctx->cb, ctx->mid, jc);
-    if ((*ctx->env)->ExceptionCheck(ctx->env)) (*ctx->env)->ExceptionClear(ctx->env);
-    (*ctx->env)->DeleteLocalRef(ctx->env, jc);
-}
-
-/* Trampoline registered with Rust; forwards each chunk to Java onChunk(). */
-static void stream_trampoline(const char *chunk) {
-    if (chunk == NULL || g_vm == NULL) {
-        return;
-    }
-    pthread_mutex_lock(&g_cb_lock);
-    jobject cb = g_stream_cb;
-    jmethodID mid = g_on_chunk;
-    pthread_mutex_unlock(&g_cb_lock);
-    if (cb == NULL || mid == NULL) {
-        return;
-    }
-
+/*
+ * Callback trampoline: Rust worker threads invoke this with the userdata we
+ * supplied at aacode_task_start. We re-acquire a JNIEnv per thread (worker
+ * threads attach once and stay attached) and forward the line to Java.
+ */
+static void event_trampoline(const char *line, void *userdata) {
+    jni_cb_ctx *ctx = (jni_cb_ctx *)userdata;
+    if (ctx == NULL || line == NULL || ctx->cb == NULL || ctx->mid == NULL) return;
     JNIEnv *env = get_env();
-    if (env == NULL) {
+    if (env == NULL) return;
+
+    jstring js = utf8_to_jstring(env, line);
+    if (js == NULL) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         return;
     }
+    (*env)->CallVoidMethod(env, ctx->cb, ctx->mid, js);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, js);
+}
 
-    jstring jchunk = utf8_to_jstring(env, chunk);
-    if (jchunk == NULL) {
-        // OutOfMemoryError — clear and continue
-        if ((*env)->ExceptionCheck(env)) {
-            (*env)->ExceptionClear(env);
+/* ── handle → ctx registry (for freeing callback contexts) ──────────── */
+
+#define MAX_AGENT_TASKS 64
+
+typedef struct {
+    void *handle;
+    jni_cb_ctx *ctx;
+    int in_use;
+} agent_task_slot;
+
+static agent_task_slot g_agent_tasks[MAX_AGENT_TASKS];
+static pthread_mutex_t g_agent_tasks_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void register_task_ctx(void *handle, jni_cb_ctx *ctx) {
+    pthread_mutex_lock(&g_agent_tasks_lock);
+    for (int i = 0; i < MAX_AGENT_TASKS; i++) {
+        if (!g_agent_tasks[i].in_use) {
+            g_agent_tasks[i].handle = handle;
+            g_agent_tasks[i].ctx = ctx;
+            g_agent_tasks[i].in_use = 1;
+            break;
         }
-        return;
     }
+    pthread_mutex_unlock(&g_agent_tasks_lock);
+}
 
-    (*env)->CallVoidMethod(env, cb, mid, jchunk);
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionClear(env);
+static jni_cb_ctx *unregister_task_ctx(void *handle) {
+    jni_cb_ctx *ctx = NULL;
+    pthread_mutex_lock(&g_agent_tasks_lock);
+    for (int i = 0; i < MAX_AGENT_TASKS; i++) {
+        if (g_agent_tasks[i].in_use && g_agent_tasks[i].handle == handle) {
+            ctx = g_agent_tasks[i].ctx;
+            g_agent_tasks[i].handle = NULL;
+            g_agent_tasks[i].ctx = NULL;
+            g_agent_tasks[i].in_use = 0;
+            break;
+        }
     }
-    (*env)->DeleteLocalRef(env, jchunk);
+    pthread_mutex_unlock(&g_agent_tasks_lock);
+    return ctx;
+}
+
+/* Called on JNI_OnUnload: clear contexts without DeleteGlobalRef (the JVM is
+ * already tearing down). */
+static void clear_all_task_ctx(void) {
+    pthread_mutex_lock(&g_agent_tasks_lock);
+    for (int i = 0; i < MAX_AGENT_TASKS; i++) {
+        if (g_agent_tasks[i].in_use) {
+            g_agent_tasks[i].handle = NULL;
+            g_agent_tasks[i].ctx = NULL;
+            g_agent_tasks[i].in_use = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_agent_tasks_lock);
 }
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
@@ -337,67 +342,6 @@ Java_com_fastshell_Sdk_nativeCancelExecution(JNIEnv *env, jclass cls) {
     fastshell_cancel_execution();
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_fastshell_Sdk_nativeStartAgentServer(JNIEnv *env, jclass cls) {
-    (void)cls;
-    char *result = fastshell_start_agent_server();
-    jstring jresult = utf8_to_jstring(env, result ? result : "{\"ok\":false,\"error\":\"null result\"}");
-    if (result) fastshell_free_string(result);
-    return jresult;
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_fastshell_Sdk_nativeSubmitTask(JNIEnv *env, jclass cls,
-                                        jstring task_id, jstring task_json) {
-    (void)cls;
-    char *cid = jstring_to_utf8(env, task_id);
-    char *cjson = jstring_to_utf8(env, task_json);
-    char *result = fastshell_submit_task(cid, cjson);
-    free(cid);
-    free(cjson);
-    jstring jresult = utf8_to_jstring(env, result ? result : "{\"ok\":false,\"error\":\"null result\"}");
-    if (result) fastshell_free_string(result);
-    return jresult;
-}
-
-JNIEXPORT void JNICALL
-Java_com_fastshell_Sdk_nativeRegisterStreamCallback(JNIEnv *env, jclass cls, jobject callback) {
-    (void)cls;
-
-    pthread_mutex_lock(&g_cb_lock);
-    if (g_stream_cb != NULL) {
-        (*env)->DeleteGlobalRef(env, g_stream_cb);
-        g_stream_cb = NULL;
-        g_on_chunk = NULL;
-    }
-
-    if (callback == NULL) {
-        pthread_mutex_unlock(&g_cb_lock);
-        fastshell_register_stream_callback(NULL);
-        return;
-    }
-
-    jobject gref = (*env)->NewGlobalRef(env, callback);
-    jclass cbcls = (*env)->GetObjectClass(env, callback);
-    jmethodID mid = (*env)->GetMethodID(env, cbcls, "onChunk", "(Ljava/lang/String;)V");
-    (*env)->DeleteLocalRef(env, cbcls);
-
-    if (gref == NULL || mid == NULL) {
-        if (gref != NULL) {
-            (*env)->DeleteGlobalRef(env, gref);
-        }
-        pthread_mutex_unlock(&g_cb_lock);
-        fastshell_register_stream_callback(NULL);
-        return;
-    }
-
-    g_stream_cb = gref;
-    g_on_chunk = mid;
-    pthread_mutex_unlock(&g_cb_lock);
-
-    fastshell_register_stream_callback(stream_trampoline);
-}
-
 /* ═══════════════════════════════════════════════════════════════════
  * Device capability bridge: fastshell (Rust) → Kotlin PluginRegistrar
  * ═══════════════════════════════════════════════════════════════════ */
@@ -472,75 +416,50 @@ Java_com_fastshell_Sdk_nativeRegisterDeviceCallback(JNIEnv *env, jclass cls) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * aacode-rs Native Agent JNI (replaces the CPython Python agent)
+ * aacode-rs Native Agent JNI (handle-based)
  * ═══════════════════════════════════════════════════════════════════ */
-JNIEXPORT void JNICALL
-Java_com_fastshell_Sdk_nativeAgentRegisterStreamCallback(JNIEnv *env, jclass cls, jobject callback) {
-    (void)cls;
-    pthread_mutex_lock(&g_cb_lock);
-    if (g_stream_cb != NULL) {
-        (*env)->DeleteGlobalRef(env, g_stream_cb);
-        g_stream_cb = NULL;
-        g_on_chunk = NULL;
-    }
-    if (callback == NULL) {
-        pthread_mutex_unlock(&g_cb_lock);
-        aacode_register_stream_callback(NULL);
-        return;
-    }
-    jobject gref = (*env)->NewGlobalRef(env, callback);
-    jclass cbcls = (*env)->GetObjectClass(env, callback);
-    jmethodID mid = (*env)->GetMethodID(env, cbcls, "onChunk", "(Ljava/lang/String;)V");
-    (*env)->DeleteLocalRef(env, cbcls);
-    if (gref == NULL || mid == NULL) {
-        if (gref != NULL) (*env)->DeleteGlobalRef(env, gref);
-        pthread_mutex_unlock(&g_cb_lock);
-        aacode_register_stream_callback(NULL);
-        return;
-    }
-    g_stream_cb = gref;
-    g_on_chunk = mid;
-    pthread_mutex_unlock(&g_cb_lock);
-    aacode_register_stream_callback(stream_trampoline);
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_fastshell_Sdk_nativeAgentRunTask(JNIEnv *env, jclass cls, jstring task_json) {
-    (void)cls;
-    char *json = jstring_to_utf8(env, task_json);
-    char *result = aacode_run_task(json);
-    free(json);
-    jstring js = utf8_to_jstring(env, result ? result : "{\"status\":\"error\",\"error\":\"null result\"}");
-    if (result) aacode_free_string(result);
-    return js;
-}
 
 /**
- * Run an agent task WITH an inline streaming callback — supports concurrent
- * tasks because each call carries its own callback, avoiding the global
- * callback slot conflict of the older register-then-run API.
+ * Start an agent task with a streaming callback (non-blocking). Returns the
+ * opaque Rust task handle as a jlong (0 on catastrophic failure). Events stream
+ * through the callback; call nativeAgentWaitTask to block for the result.
  */
-JNIEXPORT jstring JNICALL
+JNIEXPORT jlong JNICALL
 Java_com_fastshell_Sdk_nativeAgentRunTaskWithCallback(JNIEnv *env, jclass cls,
     jstring task_json, jobject callback) {
     (void)cls;
     char *json = jstring_to_utf8(env, task_json);
 
-    stream_trampoline_ctx ctx;
-    ctx.env = env;
-    ctx.cb = callback;
-    ctx.mid = NULL;
+    jni_cb_ctx *ctx = (jni_cb_ctx *)calloc(1, sizeof(jni_cb_ctx));
+    if (ctx == NULL) {
+        free(json);
+        return 0;
+    }
     if (callback != NULL) {
+        ctx->cb = (*env)->NewGlobalRef(env, callback);
         jclass cbcls = (*env)->GetObjectClass(env, callback);
-        ctx.mid = (*env)->GetMethodID(env, cbcls, "onChunk", "(Ljava/lang/String;)V");
+        ctx->mid = (*env)->GetMethodID(env, cbcls, "onChunk", "(Ljava/lang/String;)V");
         (*env)->DeleteLocalRef(env, cbcls);
     }
-    set_inline_ctx(&ctx);
 
-    char *result = aacode_run_task_with_cb(json, ctx.mid ? inline_trampoline : NULL);
-    set_inline_ctx(NULL);
-
+    void *handle = aacode_task_start(json, ctx->mid ? event_trampoline : NULL, ctx);
     free(json);
+
+    if (handle == NULL) {
+        if (ctx->cb != NULL) (*env)->DeleteGlobalRef(env, ctx->cb);
+        free(ctx);
+        return 0;
+    }
+    register_task_ctx(handle, ctx);
+    return (jlong)handle;
+}
+
+/** Block until the task finishes; returns the terminal JSON result string. */
+JNIEXPORT jstring JNICALL
+Java_com_fastshell_Sdk_nativeAgentWaitTask(JNIEnv *env, jclass cls, jlong handle) {
+    (void)cls;
+    if (handle == 0) return utf8_to_jstring(env, "{\"status\":\"error\",\"error\":\"null handle\"}");
+    char *result = aacode_task_wait((void *)handle);
     jstring js = utf8_to_jstring(env, result ? result : "{\"status\":\"error\",\"error\":\"null result\"}");
     if (result) aacode_free_string(result);
     return js;
@@ -555,20 +474,25 @@ Java_com_fastshell_Sdk_nativeGetFeatures(JNIEnv *env, jclass cls) {
     return js;
 }
 
+/* Cancel the task identified by its handle. */
 JNIEXPORT void JNICALL
-Java_com_fastshell_Sdk_nativeAgentCancel(JNIEnv *env, jclass cls) {
+Java_com_fastshell_Sdk_nativeAgentCancelTask(JNIEnv *env, jclass cls, jlong handle) {
     (void)env; (void)cls;
-    aacode_cancel();
+    if (handle == 0) return;
+    aacode_task_cancel((void *)handle);
 }
 
-/* Cancel ONLY the task registered with this client_task_id. */
+/* Free a finished task handle + its callback context. */
 JNIEXPORT void JNICALL
-Java_com_fastshell_Sdk_nativeAgentCancelTask(JNIEnv *env, jclass cls, jstring task_id) {
+Java_com_fastshell_Sdk_nativeAgentFreeTask(JNIEnv *env, jclass cls, jlong handle) {
     (void)cls;
-    if (task_id == NULL) return;
-    char *tid = jstring_to_utf8(env, task_id);
-    aacode_cancel_task(tid);
-    free(tid);
+    if (handle == 0) return;
+    jni_cb_ctx *ctx = unregister_task_ctx((void *)handle);
+    if (ctx != NULL) {
+        if (ctx->cb != NULL) (*env)->DeleteGlobalRef(env, ctx->cb);
+        free(ctx);
+    }
+    aacode_task_free((void *)handle);
 }
 
 JNIEXPORT jstring JNICALL

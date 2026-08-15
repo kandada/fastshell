@@ -50,16 +50,34 @@ c_dist/arm64-v8a/
 |--------------------------|------------------------|
 | `fastshell_init` | `nativeInit` |
 | `fastshell_execute` | `nativeExecute` |
+| `fastshell_execute_in` | `nativeExecuteIn` |
 | `fastshell_execute_python` | `nativeExecutePython` |
 | `fastshell_execute_python_script` | `nativeExecutePythonScript` |
 | `fastshell_get_cwd` | `nativeGetCwd` |
 | `fastshell_set_permission` | `nativeSetPermission` |
 | `fastshell_cancel_execution` | `nativeCancelExecution` |
-| `fastshell_register_stream_callback` | `nativeRegisterStreamCallback`（回调 `onChunk`）|
 | `fastshell_free_string` | —（C 层内部释放 Rust 字符串）|
 
-流式回调：C 层在 `JNI_OnLoad` 缓存 `JavaVM`，注册时缓存回调对象 GlobalRef + `onChunk` methodID，
-向 Rust 传入 `stream_trampoline`；每个 chunk 到来时按需 `AttachCurrentThread` 后回调 Java。
+### aacode-rs Agent API（句柄式，从 `libaacode_rs.a` 导出）
+
+原生 Agent 通过**句柄式 C ABI**（见 `aacode-rs/src/ffi.rs`）嵌入，`jni_glue.c` 包装为：
+
+| C 函数 | Kotlin `external fun` |
+|--------|------------------------|
+| `aacode_task_start` | `nativeAgentRunTaskWithCallback(json, cb): Long` — 非阻塞，返回句柄 |
+| `aacode_task_wait` | `nativeAgentWaitTask(handle): String` — 阻塞取终态 JSON |
+| `aacode_task_cancel` | `nativeAgentCancelTask(handle)` |
+| `aacode_task_free` | `nativeAgentFreeTask(handle)` |
+| `aacode_validate_api_key` | `nativeAgentValidateApiKey` |
+| `aacode_list_sessions` | `nativeAgentListSessions` |
+| `aacode_get_session_messages` | `nativeAgentGetSessionMessages` |
+| `aacode_free_string` | —（内部）|
+
+**流式回调**：`aacode_task_start` 接收 `(cb, userdata)`；`jni_glue.c` 为每个任务分配一个
+`jni_cb_ctx`（Kotlin 回调的 GlobalRef + `onChunk` methodID）作为 userdata。Rust worker 线程
+调用 `event_trampoline`，按线程重新获取 `JNIEnv`（`get_env`，一次性 attach）后把每条 JSONL
+行转发给 `onChunk`。**没有全局回调槽、没有线程局部 hack**——每个任务自带上下文，并发任务
+天然隔离。一个小型 handle→ctx 注册表（`g_agent_tasks`）在 `free` 时释放 GlobalRef。
 
 ---
 
@@ -102,7 +120,11 @@ object Sdk {
     external fun nativeInit(sandboxPath: String): String
     external fun nativeExecute(command: String): String
     external fun nativeExecutePython(code: String): String
-    // ...
+    // ... aacode-rs agent（句柄式）：
+    external fun nativeAgentRunTaskWithCallback(taskJson: String, callback: Any): Long
+    external fun nativeAgentWaitTask(handle: Long): String
+    external fun nativeAgentCancelTask(handle: Long)
+    external fun nativeAgentFreeTask(handle: Long)
 }
 ```
 

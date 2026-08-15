@@ -50,17 +50,37 @@ c_dist/arm64-v8a/
 |----------------------------|------------------------|
 | `fastshell_init` | `nativeInit` |
 | `fastshell_execute` | `nativeExecute` |
+| `fastshell_execute_in` | `nativeExecuteIn` |
 | `fastshell_execute_python` | `nativeExecutePython` |
 | `fastshell_execute_python_script` | `nativeExecutePythonScript` |
 | `fastshell_get_cwd` | `nativeGetCwd` |
 | `fastshell_set_permission` | `nativeSetPermission` |
 | `fastshell_cancel_execution` | `nativeCancelExecution` |
-| `fastshell_register_stream_callback` | `nativeRegisterStreamCallback` (calls `onChunk`) |
 | `fastshell_free_string` | — (internal, frees Rust strings) |
 
-**Streaming callback**: `JNI_OnLoad` caches `JavaVM`. On registration, caches callback
-GlobalRef + `onChunk` methodID, passes `stream_trampoline` to Rust. Each chunk triggers
-`AttachCurrentThread` + JNI callback to Java.
+### aacode-rs agent API (handle-based, exported from `libaacode_rs.a`)
+
+The native agent is embedded through a **handle-based C ABI** (see
+`aacode-rs/src/ffi.rs`). `jni_glue.c` wraps it as:
+
+| C Function | Kotlin `external fun` |
+|------------|------------------------|
+| `aacode_task_start` | `nativeAgentRunTaskWithCallback(json, cb): Long` — non-blocking, returns handle |
+| `aacode_task_wait` | `nativeAgentWaitTask(handle): String` — blocks for terminal JSON |
+| `aacode_task_cancel` | `nativeAgentCancelTask(handle)` |
+| `aacode_task_free` | `nativeAgentFreeTask(handle)` |
+| `aacode_validate_api_key` | `nativeAgentValidateApiKey` |
+| `aacode_list_sessions` | `nativeAgentListSessions` |
+| `aacode_get_session_messages` | `nativeAgentGetSessionMessages` |
+| `aacode_free_string` | — (internal) |
+
+**Streaming callback**: `aacode_task_start` takes `(cb, userdata)`; `jni_glue.c`
+allocates a per-task `jni_cb_ctx` (a GlobalRef to the Kotlin callback + `onChunk`
+methodID) as the userdata. Rust worker threads invoke `event_trampoline`, which
+re-acquires a `JNIEnv` per thread (`get_env`, attach-once) and forwards each JSONL
+line to `onChunk`. There is **no global callback slot and no thread-local hack** —
+each task carries its own context, so concurrent tasks are isolated. A small
+handle→ctx registry (`g_agent_tasks`) releases the GlobalRef on `free`.
 
 ---
 
@@ -102,7 +122,11 @@ object Sdk {
     external fun nativeExecute(command: String): String
     external fun nativeExecuteIn(dir: String, command: String): String
     external fun nativeExecutePython(code: String): String
-    // ... agent entry points: nativeAgentRunTaskWithCallback / nativeAgentCancelTask / ...
+    // ... aacode-rs agent (handle-based):
+    external fun nativeAgentRunTaskWithCallback(taskJson: String, callback: Any): Long
+    external fun nativeAgentWaitTask(handle: Long): String
+    external fun nativeAgentCancelTask(handle: Long)
+    external fun nativeAgentFreeTask(handle: Long)
 }
 ```
 
