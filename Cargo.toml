@@ -3,11 +3,17 @@
 
 [package]
 name = "fastshell"
-version = "0.3.0"
+version = "0.3.3"
 edition = "2021"
 description = "Lightweight Bash + Python runtime SDK for mobile AI agents"
 license = "Apache-2.0"
 authors = ["xiefujin <490021684@qq.com>"]
+repository = "https://github.com/kandada/fastshell"
+homepage = "https://github.com/kandada/fastshell"
+documentation = "https://docs.rs/fastshell"
+readme = "README.md"
+keywords = ["shell", "mobile", "ai-agent", "sandbox", "python"]
+categories = ["command-line-utilities", "development-tools", "embedded"]
 
 [lib]
 crate-type = ["lib", "cdylib", "staticlib"]

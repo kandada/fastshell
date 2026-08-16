@@ -1,5 +1,8 @@
 # fastshell
 
+[![Crates.io](https://img.shields.io/crates/v/fastshell.svg)](https://crates.io/crates/fastshell)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 A lightweight, cross-platform shell runtime SDK for mobile AI agents — providing 180+ Linux-compatible commands, pipelines, glob expansion, Python execution, and built-in SQLite.
 
 ## Why
@@ -25,6 +28,13 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 [**aacode**](https://github.com/kandada/aacode) — a mobile AI coding assistant, running on fastshell:
 - The entire shell sandbox, 180+ commands, embedded Python, device bridge, and native C-ABI agent interface are powered by fastshell.
 - Available via [**APK direct download**](https://github.com/kandada/aacode/raw/main/mobile_app/aacode-v1.7.24-arm64.apk). Google Play and other app stores are still in the listing process.
+
+## Installation
+
+```toml
+[dependencies]
+fastshell = "0.3.3"
+```
 
 ## Quick Start
 

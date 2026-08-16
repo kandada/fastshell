@@ -1,5 +1,8 @@
 # fastshell
 
+[![Crates.io](https://img.shields.io/crates/v/fastshell.svg)](https://crates.io/crates/fastshell)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 轻量级跨平台 Shell 运行时 SDK，面向移动端 AI Agent——提供 180+ Linux 兼容命令、管道、通配符展开、Python 执行、内置 SQLite。
 
 ## 解决的问题
@@ -26,6 +29,13 @@
 - 整个 shell 沙箱、180+ 命令、内置 Python、设备桥接、原生 C-ABI agent 接口均由 fastshell 提供。
 - 可通过 [**APK 下载**](https://github.com/kandada/aacode/raw/main/mobile_app/aacode-v1.7.24-arm64.apk) 安装。Google Play 等应用市场还在上架流程中。
 - 可通过  [**APK 下载**](https://github.com/kandada/aacode/raw/main/mobile_app/aacode-v1.7.24-arm64.apk) 安装。Google Play等应用市场还在上架流程中。
+
+## 安装
+
+```toml
+[dependencies]
+fastshell = "0.3.3"
+```
 
 ## 快速开始
 
