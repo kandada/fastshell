@@ -35,29 +35,23 @@ impl Shell {
         for file in &files {
             let data = match self.vfs.read(file, &self.cwd) {
                 Ok(d) => d,
-                Err(e) => {
-                    return CommandOutput::error(
-                        format!("epubtext: {}: {}\n", file, e),
-                        1,
-                    )
-                }
+                Err(e) => return CommandOutput::error(format!("epubtext: {}: {}\n", file, e), 1),
             };
 
             if data.len() > EPUBTEXT_MAX_SIZE {
                 return CommandOutput::error(
-                    format!("epubtext: {}: file too large (max {} MB)\n", file, EPUBTEXT_MAX_SIZE / 1024 / 1024),
+                    format!(
+                        "epubtext: {}: file too large (max {} MB)\n",
+                        file,
+                        EPUBTEXT_MAX_SIZE / 1024 / 1024
+                    ),
                     1,
                 );
             }
 
             match extract_epub_text(&data) {
                 Ok(text) => output.push_str(&text),
-                Err(e) => {
-                    return CommandOutput::error(
-                        format!("epubtext: {}: {}\n", file, e),
-                        1,
-                    )
-                }
+                Err(e) => return CommandOutput::error(format!("epubtext: {}: {}\n", file, e), 1),
             }
         }
 
@@ -122,14 +116,10 @@ fn strip_html_tags(html: &str) -> String {
     while i < chars.len() {
         if chars[i] == '<' {
             // Check for comments
-            if i + 4 <= chars.len()
-                && chars[i..i + 4].iter().collect::<String>() == "<!--"
-            {
+            if i + 4 <= chars.len() && chars[i..i + 4].iter().collect::<String>() == "<!--" {
                 // Skip until -->
                 while i < chars.len() {
-                    if i + 3 <= chars.len()
-                        && chars[i..i + 3].iter().collect::<String>() == "-->"
-                    {
+                    if i + 3 <= chars.len() && chars[i..i + 3].iter().collect::<String>() == "-->" {
                         i += 3;
                         break;
                     }
@@ -234,9 +224,17 @@ mod tests {
         let options =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-        writer.start_file("mimetype", zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        writer
+            .start_file(
+                "mimetype",
+                zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
         writer.write_all(b"application/epub+zip").unwrap();
-        writer.start_file("META-INF/container.xml", options).unwrap();
+        writer
+            .start_file("META-INF/container.xml", options)
+            .unwrap();
         writer.write_all(container_xml).unwrap();
         writer.start_file("chapter1.xhtml", options).unwrap();
         writer.write_all(chapter_html).unwrap();

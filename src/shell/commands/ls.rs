@@ -17,6 +17,7 @@ List information about the FILEs (the current directory by default).
   -S  sort by file size, largest first
   -r  reverse order while sorting
   -1  list one file per line
+  -d  list directories themselves, not their contents
   -h, --help  display this help and exit
 ";
 
@@ -33,6 +34,7 @@ impl Shell {
         let mut sort_size = false;
         let mut reverse = false;
         let mut single_column = false;
+        let mut dirs_as_files = false;
         let mut paths: Vec<&str> = Vec::new();
 
         for arg in args {
@@ -47,6 +49,7 @@ impl Shell {
                         'S' => sort_size = true,
                         'r' => reverse = true,
                         '1' => single_column = true,
+                        'd' => dirs_as_files = true,
                         _ => crate::warn!("ls: warning: unsupported option '-{}'", ch),
                     }
                 }
@@ -60,6 +63,8 @@ impl Shell {
         }
 
         let mut output = String::new();
+        let mut err_out = String::new();
+        let mut had_err = false;
 
         // Like real ls: file operands are listed plainly first; directory
         // operands get "name:" headers only when there are multiple operands.
@@ -67,16 +72,50 @@ impl Shell {
         let mut dir_paths: Vec<&str> = Vec::new();
         for path in &paths {
             match self.vfs.resolve(path, &self.cwd) {
-                Ok(p) if p.is_file() => file_paths.push(path),
-                Ok(_) => dir_paths.push(path),
-                Err(e) => return CommandOutput::error(e.to_string(), 1),
+                // A non-existent path must error (previously `-d missing` printed
+                // the name with rc=0, which looked like "the file still exists").
+                Ok(p) if p.exists() && (p.is_file() || dirs_as_files) => file_paths.push(path),
+                Ok(p) if p.exists() => dir_paths.push(path),
+                Ok(_) => {
+                    // Missing target — but a dangling symlink still lists as a link.
+                    match self.vfs.resolve_no_follow(path, &self.cwd) {
+                        Ok(p)
+                            if std::fs::symlink_metadata(&p)
+                                .map(|m| m.is_symlink())
+                                .unwrap_or(false) =>
+                        {
+                            file_paths.push(path);
+                        }
+                        _ => {
+                            err_out.push_str(&format!("ls: {}: No such file or directory\n", path));
+                            had_err = true;
+                        }
+                    }
+                }
+                Err(e) => {
+                    // A dangling symlink still "exists" as a link: list it.
+                    match self.vfs.resolve_no_follow(path, &self.cwd) {
+                        Ok(p)
+                            if std::fs::symlink_metadata(&p)
+                                .map(|m| m.is_symlink())
+                                .unwrap_or(false) =>
+                        {
+                            file_paths.push(path);
+                        }
+                        _ => {
+                            err_out.push_str(&format!("ls: {}: {}\n", path, e));
+                            had_err = true;
+                        }
+                    }
+                }
             }
         }
         let multi = paths.len() > 1;
         let use_long = long_format && !single_column;
 
         for path in &file_paths {
-            if let Ok(target) = self.vfs.resolve(path, &self.cwd) {
+            // Do NOT follow the final symlink: `ls -l link` must show the link.
+            if let Ok(target) = self.vfs.resolve_no_follow(path, &self.cwd) {
                 if use_long {
                     if let Some(s) = self.format_ls_entry(&target, true, human_readable) {
                         output.push_str(&s);
@@ -89,7 +128,8 @@ impl Shell {
         }
 
         for (pi, path) in dir_paths.iter().enumerate() {
-            if multi {
+            // `-R` always prints a `dir:` header (GNU), even for a single operand.
+            if multi || recursive {
                 if pi > 0 || !file_paths.is_empty() {
                     output.push('\n');
                 }
@@ -98,16 +138,35 @@ impl Shell {
 
             let target = match self.vfs.resolve(path, &self.cwd) {
                 Ok(p) => p,
-                Err(e) => return CommandOutput::error(e.to_string(), 1),
+                Err(e) => {
+                    err_out.push_str(&format!("ls: {}: {}\n", path, e));
+                    had_err = true;
+                    continue;
+                }
             };
 
-            self.ls_list_dir(
-                path, &target, show_all, use_long, human_readable,
-                recursive, sort_time, sort_size, reverse, &mut output,
-            );
+            if let Some(e) = self.ls_list_dir(
+                path,
+                &target,
+                show_all,
+                use_long,
+                human_readable,
+                recursive,
+                sort_time,
+                sort_size,
+                reverse,
+                &mut output,
+            ) {
+                err_out.push_str(&format!("ls: {}: {}\n", path, e));
+                had_err = true;
+            }
         }
 
-        CommandOutput::success(output)
+        CommandOutput {
+            stdout: output,
+            stderr: err_out,
+            exit_code: if had_err { 1 } else { 0 },
+        }
     }
 
     fn ls_list_dir(
@@ -122,12 +181,11 @@ impl Shell {
         sort_size: bool,
         reverse: bool,
         output: &mut String,
-    ) {
+    ) -> Option<String> {
         let mut entries = match self.vfs.list_dir(vpath, &self.cwd) {
             Ok(e) => e,
             Err(e) => {
-                output.push_str(&format!("ls: {}: {}\n", vpath, e));
-                return;
+                return Some(e.to_string());
             }
         };
 
@@ -135,12 +193,22 @@ impl Shell {
         if sort_time {
             entries.sort_by_key(|e| {
                 let full = real_path.join(&e.name);
-                full.metadata().ok().and_then(|m| m.modified().ok())
-                    .map(|t| t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs()).unwrap_or(0))
+                full.metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        t.duration_since(UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                    })
                     .unwrap_or(0)
             });
+            // `-t`: newest first.
+            entries.reverse();
         } else if sort_size {
-            entries.sort_by_key(|e| e.size);
+            // `-S`: largest first.
+            entries.sort_by(|a, b| b.size.cmp(&a.size));
         } else {
             entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         }
@@ -190,12 +258,23 @@ impl Shell {
         for sub in &dirs {
             output.push_str(&format!("\n{}:\n", sub));
             if let Ok(sub_real) = self.vfs.resolve(sub, &self.cwd) {
-                self.ls_list_dir(
-                    sub, &sub_real, show_all, long_format, human_readable,
-                    recursive, sort_time, sort_size, reverse, output,
-                );
+                if let Some(e) = self.ls_list_dir(
+                    sub,
+                    &sub_real,
+                    show_all,
+                    long_format,
+                    human_readable,
+                    recursive,
+                    sort_time,
+                    sort_size,
+                    reverse,
+                    output,
+                ) {
+                    return Some(e);
+                }
             }
         }
+        None
     }
 
     fn format_ls_entry(
@@ -213,6 +292,17 @@ impl Shell {
         if !long_format {
             return Some(format!("{}\n", name));
         }
+
+        // `l` marker + ` -> target` for symlinks (metadata above is from
+        // symlink_metadata, so it already reports the link itself).
+        let display_name = if metadata.is_symlink() {
+            match std::fs::read_link(path) {
+                Ok(t) => format!("{} -> {}", name, t.display()),
+                Err(_) => name.clone(),
+            }
+        } else {
+            name.clone()
+        };
 
         let file_type = if metadata.is_dir() {
             'd'
@@ -239,7 +329,7 @@ impl Shell {
 
         Some(format!(
             "{}{} {:>8} {} {}\n",
-            file_type, mode, size, modified, name
+            file_type, mode, size, modified, display_name
         ))
     }
 }
@@ -254,7 +344,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_ls_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_ls_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)

@@ -46,7 +46,10 @@ fn setup_repo(s: &mut Fastshell) {
         0,
         "git config user.name"
     );
-    assert_eq!(s.execute("git config user.email t@example.com").exit_code, 0);
+    assert_eq!(
+        s.execute("git config user.email t@example.com").exit_code,
+        0
+    );
     s.execute("echo v1 > f.txt");
     assert_eq!(s.execute("git add f.txt").exit_code, 0);
     let out = s.execute("git commit -m 'first commit'");
@@ -77,7 +80,11 @@ fn porcelain_status_with_branch_header() {
     let out = s.execute("git status --porcelain -b");
     assert_eq!(out.exit_code, 0);
     let lines: Vec<&str> = out.stdout.lines().collect();
-    assert!(lines[0].starts_with("## "), "missing branch header: {:?}", lines);
+    assert!(
+        lines[0].starts_with("## "),
+        "missing branch header: {:?}",
+        lines
+    );
     assert!(
         out.stdout.contains(" M f.txt"),
         "worktree-modified should be ' M': {}",
@@ -106,7 +113,14 @@ fn log_custom_format() {
     // GitManager format: --format=%H%n%s%n%an%n%ci%n---
     let out = s.execute("git log -n 5 --format=%H%n%s%n%an%n%ci%n---");
     assert_eq!(out.exit_code, 0);
-    let block: Vec<&str> = out.stdout.split("---").next().unwrap().trim().lines().collect();
+    let block: Vec<&str> = out
+        .stdout
+        .split("---")
+        .next()
+        .unwrap()
+        .trim()
+        .lines()
+        .collect();
     assert_eq!(block.len(), 4, "H/s/an/ci lines expected: {:?}", block);
     assert_eq!(block[0].len(), 40, "full hash expected: {}", block[0]);
     assert_eq!(block[1], "first commit");
@@ -144,7 +158,11 @@ fn checkout_syncs_working_tree() {
     );
     // And status must be clean (index synced too).
     let st = s.execute("git status --porcelain");
-    assert!(st.stdout.trim().is_empty(), "status must be clean: {}", st.stdout);
+    assert!(
+        st.stdout.trim().is_empty(),
+        "status must be clean: {}",
+        st.stdout
+    );
 
     // Switch forward again: feat.txt returns.
     s.execute("git checkout feature");
@@ -265,7 +283,10 @@ fn merge_fast_forward_and_conflict() {
     let out = s.execute("git merge feature");
     assert_eq!(out.exit_code, 0, "ff merge: {}", out.stderr);
     let ls = s.execute("ls");
-    assert!(ls.stdout.contains("feat.txt"), "ff merge must update worktree");
+    assert!(
+        ls.stdout.contains("feat.txt"),
+        "ff merge must update worktree"
+    );
 
     // Conflicting merge
     s.execute("git checkout -b left");
@@ -284,7 +305,11 @@ fn merge_fast_forward_and_conflict() {
     let out = s.execute("git merge --abort");
     assert_eq!(out.exit_code, 0, "merge --abort: {}", out.stderr);
     let st = s.execute("git status --porcelain");
-    assert!(st.stdout.trim().is_empty(), "clean after abort: {}", st.stdout);
+    assert!(
+        st.stdout.trim().is_empty(),
+        "clean after abort: {}",
+        st.stdout
+    );
 }
 
 #[test]
@@ -390,7 +415,11 @@ fn commit_without_identity_uses_fallback() {
     assert_eq!(s.execute("git init").exit_code, 0);
     s.execute("echo x > a.txt && git add a.txt");
     let out = s.execute("git commit -m fallback-sig");
-    assert_eq!(out.exit_code, 0, "commit must not require config: {}", out.stderr);
+    assert_eq!(
+        out.exit_code, 0,
+        "commit must not require config: {}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -514,10 +543,14 @@ fn concurrent_git_on_same_repo_is_serialized() {
                 ..Default::default()
             })
             .unwrap();
-            s.execute(&format!("git config user.name t{t} && git config user.email t{t}@e.c"));
+            s.execute(&format!(
+                "git config user.name t{t} && git config user.email t{t}@e.c"
+            ));
             for i in 0..5 {
                 let f = format!("f_{t}_{i}.txt");
-                let out = s.execute(&format!("echo x > {f} && git add {f} && git commit -m 'c_{t}_{i}'"));
+                let out = s.execute(&format!(
+                    "echo x > {f} && git add {f} && git commit -m 'c_{t}_{i}'"
+                ));
                 assert_eq!(out.exit_code, 0, "thread {t} iter {i}: {}", out.stderr);
             }
         }));
@@ -536,9 +569,17 @@ fn concurrent_git_on_same_repo_is_serialized() {
     let log = s2.execute("git log --oneline");
     assert_eq!(log.exit_code, 0);
     let commits = log.stdout.lines().count();
-    assert_eq!(commits, 21, "1 initial + 20 concurrent commits, got {commits}:\n{}", log.stdout);
+    assert_eq!(
+        commits, 21,
+        "1 initial + 20 concurrent commits, got {commits}:\n{}",
+        log.stdout
+    );
     let st = s2.execute("git status --porcelain");
-    assert!(st.stdout.trim().is_empty(), "repo must end clean: {}", st.stdout);
+    assert!(
+        st.stdout.trim().is_empty(),
+        "repo must end clean: {}",
+        st.stdout
+    );
 }
 
 /// Extract the sandbox path used by an instance (via its VFS root).

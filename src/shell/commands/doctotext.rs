@@ -35,29 +35,23 @@ impl Shell {
         for file in &files {
             let data = match self.vfs.read(file, &self.cwd) {
                 Ok(d) => d,
-                Err(e) => {
-                    return CommandOutput::error(
-                        format!("doctotext: {}: {}\n", file, e),
-                        1,
-                    )
-                }
+                Err(e) => return CommandOutput::error(format!("doctotext: {}: {}\n", file, e), 1),
             };
 
             if data.len() > DOCTOTEXT_MAX_SIZE {
                 return CommandOutput::error(
-                    format!("doctotext: {}: file too large (max {} MB)\n", file, DOCTOTEXT_MAX_SIZE / 1024 / 1024),
+                    format!(
+                        "doctotext: {}: file too large (max {} MB)\n",
+                        file,
+                        DOCTOTEXT_MAX_SIZE / 1024 / 1024
+                    ),
                     1,
                 );
             }
 
             match extract_docx_text(&data) {
                 Ok(text) => output.push_str(&text),
-                Err(e) => {
-                    return CommandOutput::error(
-                        format!("doctotext: {}: {}\n", file, e),
-                        1,
-                    )
-                }
+                Err(e) => return CommandOutput::error(format!("doctotext: {}: {}\n", file, e), 1),
             }
         }
 
@@ -255,7 +249,8 @@ mod tests {
 
     #[test]
     fn test_extract_from_docx_xml_basic() {
-        let xml = r#"<w:document><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"#;
+        let xml =
+            r#"<w:document><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"#;
         let result = extract_from_docx_xml(xml).unwrap();
         assert_eq!(result, "Hello\n");
     }

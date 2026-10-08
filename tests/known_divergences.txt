@@ -1,0 +1,50 @@
+# Known, accepted divergences between fastshell and the bash oracle.
+#
+# One substring per line; any generated command containing it is skipped.
+# Keep each entry justified — this is an allowlist, not a graveyard.
+#
+# Format:
+#   <substring>          # skip always (platform / formatting / intentional)
+#   bash3:<substring>    # skip only when the oracle is bash 3.x (macOS /bin/bash)
+
+# --- bash 3.2 (macOS /bin/bash) lacks these modern features; fastshell
+#     implements the bash 4/5 behaviour, so the *oracle* is wrong. When a
+#     bash ≥4 oracle is available these cases run and must match. ---
+bash3:${v^^}
+bash3:${v,,}
+bash3:${v^}
+bash3:${v,}
+
+# --- Output formatting differences (column widths / padding) are cosmetic
+#     and platform-specific; behaviour is equivalent. ---
+wc -
+uniq -c
+od -
+xxd
+
+# --- Platform tools absent from the bash oracle (macOS): fastshell provides
+#     them, bash exits 127. ---
+tac
+timeout
+
+# --- BSD `wc` column width differs from GNU (fastshell follows GNU). ---
+wc a.txt
+wc a.txt b.txt
+wc a.txt
+
+# --- BSD `head` lacks -q/-v (exits 1); fastshell implements the GNU flags. ---
+head -q
+head -v
+
+# --- BSD vs GNU `sed` address commands differ on macOS. ---
+sed '2i
+sed '1a
+
+# --- BSD vs GNU coreutils differences (platform). fastshell follows GNU, but
+#     the local oracle may be BSD (macOS) or GNU (Linux); skip on both so the
+#     differential is platform-robust. ---
+seq -s
+sum 
+stat -
+du -
+ls -

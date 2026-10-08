@@ -90,7 +90,10 @@ impl Shell {
                             #[cfg(unix)]
                             {
                                 use std::os::unix::fs::PermissionsExt;
-                                let _ = std::fs::set_permissions(&resolved, std::fs::Permissions::from_mode(m));
+                                let _ = std::fs::set_permissions(
+                                    &resolved,
+                                    std::fs::Permissions::from_mode(m),
+                                );
                             }
                             #[cfg(not(unix))]
                             {

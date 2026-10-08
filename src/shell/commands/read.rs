@@ -9,10 +9,22 @@ impl Shell {
         let mut _silent = false;
         let mut _timeout: Option<u32> = None;
         let mut _delim: Option<char> = None;
+        let mut array_target: Option<String> = None;
         let mut i = 0;
 
         while i < args.len() {
             match args[i] {
+                "-a" => {
+                    i += 1;
+                    if i < args.len() {
+                        array_target = Some(args[i].to_string());
+                    } else {
+                        return CommandOutput::error(
+                            "read: -a requires an array name\n".to_string(),
+                            1,
+                        );
+                    }
+                }
                 "-p" => {
                     i += 1;
                     if i < args.len() {
@@ -26,6 +38,10 @@ impl Shell {
                 }
                 "-s" => {
                     _silent = true;
+                }
+                "-r" => {
+                    // Raw mode: our reader never interprets backslashes, so
+                    // this is effectively the default behaviour.
                 }
                 "-t" => {
                     i += 1;
@@ -55,7 +71,7 @@ impl Shell {
         }
 
         let var_args = &args[i..];
-        if var_args.is_empty() {
+        if var_args.is_empty() && array_target.is_none() {
             return CommandOutput::error(
                 "read: usage: read [-p prompt] [-s] [-t timeout] [-d delim] name...\n".to_string(),
                 1,
@@ -67,10 +83,41 @@ impl Shell {
             stderr_out.push_str(&p);
         }
 
-        let input = stdin.unwrap_or("").trim_end_matches('\n');
+        // `read` consumes exactly ONE line (bash semantics); the remainder is
+        // left for the next `read`. Using the whole stdin made `read x < file`
+        // join every line into one value ("L1 L2").
+        let input = stdin.unwrap_or("");
+        let had_input = !input.is_empty();
+        let line = input.split('\n').next().unwrap_or("");
+        let line = line.trim_end_matches('\r');
 
-        let parts: Vec<&str> = input.split_whitespace().collect();
+        // Split on the shell's IFS (default: whitespace). `IFS=, read a b`
+        // splits on commas.
+        let ifs = self
+            .vars
+            .get("IFS")
+            .cloned()
+            .unwrap_or_else(|| " \t\n".to_string());
+        let default_ifs = ifs == " \t\n" || ifs == " \t\n\r" || ifs == " \t";
+        let parts: Vec<&str> = if default_ifs || ifs.is_empty() {
+            line.split_whitespace().collect()
+        } else {
+            let seps: Vec<char> = ifs.chars().collect();
+            line.split(|c| seps.contains(&c))
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
         let n_vars = var_args.len();
+
+        if let Some(name) = array_target {
+            self.arrays
+                .insert(name, parts.iter().map(|s| s.to_string()).collect());
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: stderr_out,
+                exit_code: if had_input { 0 } else { 1 },
+            };
+        }
 
         for j in 0..n_vars {
             let val = if j == n_vars - 1 && parts.len() > j {
@@ -86,7 +133,8 @@ impl Shell {
         CommandOutput {
             stdout: String::new(),
             stderr: stderr_out,
-            exit_code: 0,
+            // bash: `read` returns 1 at EOF (no input) so `while read` ends.
+            exit_code: if had_input { 0 } else { 1 },
         }
     }
 }
@@ -102,11 +150,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "fastshell_read_test_{}_{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_read_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }
@@ -138,7 +183,10 @@ mod tests {
         let out = shell.cmd_read(&["a", "b"], Some("one two three four"));
         assert_eq!(out.exit_code, 0);
         assert_eq!(shell.vars.get("a").map(|s| s.as_str()), Some("one"));
-        assert_eq!(shell.vars.get("b").map(|s| s.as_str()), Some("two three four"));
+        assert_eq!(
+            shell.vars.get("b").map(|s| s.as_str()),
+            Some("two three four")
+        );
     }
 
     #[test]
@@ -162,7 +210,8 @@ mod tests {
     fn test_read_no_stdin() {
         let mut shell = mk_shell();
         let out = shell.cmd_read(&["foo"], None);
-        assert_eq!(out.exit_code, 0);
+        // bash returns 1 at EOF (no input line).
+        assert_ne!(out.exit_code, 0);
         assert_eq!(shell.vars.get("foo").map(|s| s.as_str()), Some(""));
     }
 }

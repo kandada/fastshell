@@ -3,7 +3,7 @@
 
 [package]
 name = "fastshell"
-version = "0.3.3"
+version = "0.3.6"
 edition = "2021"
 description = "Lightweight Bash + Python runtime SDK for mobile AI agents"
 license = "Apache-2.0"
@@ -90,14 +90,20 @@ sha1 = "0.10"
 num_cpus = "1"
 liblzma = "0.4"  # xz2 fork; shares liblzma-sys with rustpython-stdlib (no native-lib link conflict)
 sha3 = "0.10"
+blake2 = "0.10"
 bzip2 = "0.4"
+zstd = "0.11"
 rusqlite = { version = "0.31", features = ["bundled"] }
 jni = { version = "0.21", optional = true }
-pyo3 = { version = "0.22", optional = true }
+pyo3 = { version = "0.27", optional = true }
 # Embedded RustPython (feature "python-rustpython"). Version pinned exactly —
 # upgrades must follow the audit checklist in fastshell/vendor/README.md.
 rustpython-vm = { version = "=0.5.0", default-features = false, features = ["compiler", "freeze-stdlib", "threading", "importlib", "encodings", "host_env", "stdio", "gc"], optional = true }
-rustpython-stdlib = { version = "=0.5.0", default-features = false, features = ["threading", "compiler"], optional = true }
+# Vendored fork of rustpython-stdlib 0.5.0 whose only change is redirecting its
+# `pymath` dependency to our fork (which pins malachite-bigint to ^0.9). See
+# vendor/rustpython-stdlib and docs/lgpl-malachite.md. Published as
+# `fastshell-rustpython-stdlib`; sourced locally via path.
+rustpython-stdlib = { package = "fastshell-rustpython-stdlib", version = "=0.5.100", path = "vendor/rustpython-stdlib", default-features = false, features = ["threading", "compiler", "host_env", "ssl-rustls"], optional = true }
 rustpython-pylib = { version = "=0.5.0", features = ["freeze-stdlib"], optional = true }
 # oxc JS/TS parser + static syntax checking (feature "js-oxc"). Version pinned
 # exactly; the parser AST API is not yet stable across minor releases.

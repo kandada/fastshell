@@ -34,7 +34,10 @@ impl Shell {
                     "--force" => force = true,
                     "--verbose" => verbose = true,
                     "--no-clobber" => no_clobber = true,
-                    "--preserve" | "--preserve=mode,timestamps" | "--parents" | "--dereference"
+                    "--preserve"
+                    | "--preserve=mode,timestamps"
+                    | "--parents"
+                    | "--dereference"
                     | "--no-dereference" => {}
                     _ => crate::warn!("cp: warning: unsupported option '{}'", arg),
                 }
@@ -93,6 +96,23 @@ impl Shell {
                 continue;
             }
 
+            // Refuse to copy a directory into itself (or a subdirectory of
+            // itself): otherwise the recursive copy re-copies the growing
+            // destination forever and overflows the stack.
+            if src_path.is_dir() {
+                if let Ok(dest_abs) = self.vfs.resolve(&dest_path, &self.cwd) {
+                    if dest_abs.starts_with(&src_path) {
+                        return CommandOutput::error(
+                            format!(
+                                "cp: cannot copy a directory, '{}', into itself, '{}'\n",
+                                src, dest_path
+                            ),
+                            1,
+                        );
+                    }
+                }
+            }
+
             if verbose {
                 verbose_out.push_str(&format!("'{}' -> '{}'\n", src, dest_path));
             }
@@ -117,7 +137,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_cp_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_cp_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)

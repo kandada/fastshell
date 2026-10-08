@@ -115,7 +115,7 @@ impl Shell {
         }
     }
 
-    pub fn cmd_id(&self, _args: &[&str]) -> CommandOutput {
+    pub fn cmd_id(&self, args: &[&str]) -> CommandOutput {
         #[cfg(unix)]
         {
             let uid = unsafe { libc::getuid() };
@@ -130,7 +130,42 @@ impl Shell {
                         .to_string()
                 }
             };
-            CommandOutput::success(format!("uid={}({}) gid={}\n", uid, name, gid))
+            let grp = unsafe { libc::getgrgid(gid) };
+            let gname = if grp.is_null() {
+                gid.to_string()
+            } else {
+                unsafe {
+                    std::ffi::CStr::from_ptr((*grp).gr_name)
+                        .to_string_lossy()
+                        .to_string()
+                }
+            };
+            let only_uid = args.iter().any(|a| *a == "-u" || *a == "--user");
+            let only_gid = args.iter().any(|a| *a == "-g" || *a == "--group");
+            let only_name = args.iter().any(|a| *a == "-n" || *a == "--name");
+            let only_real = args.iter().any(|a| *a == "-r" || *a == "--real");
+            let _ = only_real;
+            if only_uid {
+                return CommandOutput::success(format!(
+                    "{}\n",
+                    if only_name {
+                        name.clone()
+                    } else {
+                        uid.to_string()
+                    }
+                ));
+            }
+            if only_gid {
+                return CommandOutput::success(format!(
+                    "{}\n",
+                    if only_name {
+                        gname.clone()
+                    } else {
+                        gid.to_string()
+                    }
+                ));
+            }
+            CommandOutput::success(format!("uid={}({}) gid={}({})\n", uid, name, gid, gname))
         }
         #[cfg(not(unix))]
         {
@@ -207,6 +242,10 @@ impl Shell {
         let mut output = String::new();
         for proc in &procs {
             if proc.comm.to_lowercase().contains(&pattern_lower) {
+                // Never signal this process.
+                if proc.pid as u32 == std::process::id() {
+                    continue;
+                }
                 #[cfg(unix)]
                 {
                     unsafe {

@@ -34,20 +34,28 @@ impl Shell {
             match args[i] {
                 "-csv" => csv_mode = true,
                 "-header" | "-headers" => header_mode = true,
-                "-line" => {} // accepted, simple line mode
+                "-line" | "-column" | "-list" | "-separator" => {} // accepted
+                "--version" | "-version" => {
+                    return CommandOutput::success(format!("{}\n", rusqlite::version()));
+                }
                 arg if !arg.starts_with('-') && !arg.starts_with('.') => {
                     if db_path.is_none() {
                         db_path = Some(arg.to_string());
                     } else {
                         // Accumulate SQL tokens (handles `sqlite3 db.sqlite SELECT * FROM users`)
                         match sql {
-                            Some(ref mut s) => { s.push(' '); s.push_str(arg); }
+                            Some(ref mut s) => {
+                                s.push(' ');
+                                s.push_str(arg);
+                            }
                             None => sql = Some(arg.to_string()),
                         }
                     }
                 }
                 arg if arg.starts_with('.') && dot_command.is_none() => {
-                    dot_command = Some(arg.to_string());
+                    // Dot commands take the rest of the line as arguments.
+                    dot_command = Some(args[i..].join(" "));
+                    break;
                 }
                 _ => crate::warn!("sqlite3: warning: unsupported option '{}'", args[i]),
             }
@@ -65,10 +73,14 @@ impl Shell {
             }
         };
 
-        // Resolve VFS path
-        let abs_path = match self.vfs.resolve(&db_path, &self.cwd) {
-            Ok(p) => p,
-            Err(e) => return CommandOutput::error(format!("sqlite3: {}\n", e), 1),
+        // `:memory:` is an in-memory DB, not a sandbox file.
+        let abs_path = if db_path == ":memory:" {
+            std::path::PathBuf::from(":memory:")
+        } else {
+            match self.vfs.resolve(&db_path, &self.cwd) {
+                Ok(p) => p,
+                Err(e) => return CommandOutput::error(format!("sqlite3: {}\n", e), 1),
+            }
         };
 
         // Handle dot-commands
@@ -110,10 +122,15 @@ impl Shell {
             Ok(c) => c,
             Err(e) => return CommandOutput::error(format!("sqlite3: {}\n", e), 1),
         };
+        let mut parts = cmd.split_whitespace();
+        let head = parts.next().unwrap_or("");
+        let rest: Vec<&str> = parts.collect();
 
-        match cmd {
+        match head {
             ".tables" | ".table" => {
-                match conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name") {
+                match conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                {
                     Ok(mut stmt) => {
                         let mut output = String::new();
                         let rows = stmt.query_map([], |row| row.get::<_, String>(0));
@@ -133,10 +150,24 @@ impl Shell {
                 }
             }
             ".schema" => {
-                match conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name") {
+                let (sql, params): (&str, Vec<String>) = if let Some(t) = rest.first() {
+                    (
+                        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name = ?1 ORDER BY type, name",
+                        vec![t.to_string()],
+                    )
+                } else {
+                    (
+                        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name",
+                        Vec::new(),
+                    )
+                };
+                match conn.prepare(sql) {
                     Ok(mut stmt) => {
                         let mut output = String::new();
-                        let rows = stmt.query_map([], |row| row.get::<_, String>(0));
+                        let rows = stmt
+                            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                                row.get::<_, String>(0)
+                            });
                         match rows {
                             Ok(mapped) => {
                                 for sql in mapped.flatten() {
@@ -151,26 +182,52 @@ impl Shell {
                     Err(e) => CommandOutput::error(format!("sqlite3: {}\n", e), 1),
                 }
             }
-            ".help" | ".h" => {
-                CommandOutput::success(
-                    ".tables          List tables\n\
-                     .schema           Show CREATE statements\n\
-                     .help             Show this message\n\
-                     .quit             Exit\n".to_string()
-                )
-            }
-            ".quit" | ".q" | ".exit" => {
-                CommandOutput::success(String::new())
-            }
-            ".dump" => {
-                match conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL UNION ALL SELECT 'INSERT INTO ' || name || ' VALUES(...);' FROM sqlite_master WHERE type='table'") {
-                    Ok(_) => CommandOutput::error("sqlite3: .dump not fully implemented\n".to_string(), 1),
-                    Err(e) => CommandOutput::error(format!("sqlite3: {}\n", e), 1),
+            // `.mode` is accepted (output modes are selected via flags here).
+            ".mode" => CommandOutput::success(String::new()),
+            ".import" => {
+                if rest.len() < 2 {
+                    return CommandOutput::error(
+                        "sqlite3: usage: .import FILE TABLE\n".to_string(),
+                        1,
+                    );
                 }
+                let (file, table) = (rest[0], rest[1]);
+                let data = match self.vfs.read_to_string(file, &self.cwd) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return CommandOutput::error(format!("sqlite3: {}: {}\n", file, e), 1)
+                    }
+                };
+                let mut count = 0usize;
+                for line in data.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let vals: Vec<String> = line
+                        .split(',')
+                        .map(|v| format!("'{}'", v.trim().replace('\'', "''")))
+                        .collect();
+                    let sql = format!("INSERT INTO {} VALUES ({})", table, vals.join(","));
+                    if conn.execute(&sql, []).is_ok() {
+                        count += 1;
+                    }
+                }
+                CommandOutput::success(format!("{} rows imported\n", count))
             }
-            _ => {
-                CommandOutput::error(format!("sqlite3: unknown command: {}\n", cmd), 1)
+            ".help" | ".h" => CommandOutput::success(
+                ".tables          List tables\n\
+                 .schema [TABLE]  Show CREATE statements\n\
+                 .mode MODE       Accept output mode (no-op)\n\
+                 .import F TABLE  Import a CSV file\n\
+                 .help            Show this message\n\
+                 .quit            Exit\n"
+                    .to_string(),
+            ),
+            ".quit" | ".q" | ".exit" => CommandOutput::success(String::new()),
+            ".dump" => {
+                CommandOutput::error("sqlite3: .dump not fully implemented\n".to_string(), 1)
             }
+            _ => CommandOutput::error(format!("sqlite3: unknown command: {}\n", cmd), 1),
         }
     }
 

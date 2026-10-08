@@ -186,14 +186,16 @@ impl Shell {
         for file in &files {
             let data = match self.vfs.read(file, &self.cwd) {
                 Ok(d) => d,
-                Err(e) => {
-                    return CommandOutput::error(format!("strings: {}: {}\n", file, e), 1)
-                }
+                Err(e) => return CommandOutput::error(format!("strings: {}: {}\n", file, e), 1),
             };
             if print_filename && files.len() > 1 {
                 output.push_str(&format!("\n{}:\n", file));
             }
-            let label = if print_filename { Some(file.as_str()) } else { None };
+            let label = if print_filename {
+                Some(file.as_str())
+            } else {
+                None
+            };
             output.push_str(&extract_strings(&data, min_len, label, radix));
         }
 
@@ -230,7 +232,7 @@ impl Shell {
         } else {
             let mut all = String::new();
             for file in &files {
-                match self.vfs.read_to_string(file, &self.cwd) {
+                match self.read_text_lossy(file) {
                     Ok(c) => all.push_str(&c),
                     Err(e) => return CommandOutput::error(format!("fold: {}: {}\n", file, e), 1),
                 }
@@ -389,7 +391,12 @@ Print the sequences of printable characters in files.
   -h, --help     display this help and exit
 ";
 
-fn extract_strings(data: &[u8], min_len: usize, label: Option<&str>, radix: Option<char>) -> String {
+fn extract_strings(
+    data: &[u8],
+    min_len: usize,
+    label: Option<&str>,
+    radix: Option<char>,
+) -> String {
     let mut output = String::new();
     let mut current = String::new();
     let mut start_offset: usize = 0;
@@ -457,7 +464,7 @@ fn get_file_content(
     } else {
         let mut all = String::new();
         for file in files {
-            match shell.vfs.read_to_string(file, &shell.cwd) {
+            match shell.read_text_lossy(file) {
                 Ok(c) => all.push_str(&c),
                 Err(e) => {
                     return Err(CommandOutput::error(
@@ -498,7 +505,11 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_strings_test_{}_{}", std::process::id(), n));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_strings_test_{}_{}",
+            std::process::id(),
+            n
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)

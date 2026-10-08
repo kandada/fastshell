@@ -35,7 +35,10 @@ fn a1_backslash_inside_double_quotes_literal_for_others() {
     let sdk = setup_sdk_no_subprocess();
     // \n inside "" is literal \n, not newline
     let out = assert_cmd_ok(&sdk, "echo \"a\\nb\"");
-    assert!(out.contains("a\\nb") || out.contains("a\\\nb"), "unexpected: {out}");
+    assert!(
+        out.contains("a\\nb") || out.contains("a\\\nb"),
+        "unexpected: {out}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -177,7 +180,11 @@ fn b1_stdout_to_stderr_redirect() {
     let r = sdk.execute("echo hello 1>&2");
     assert_eq!(r.exit_code, 0);
     assert!(r.stdout.is_empty(), "stdout should be empty after 1>&2");
-    assert!(r.stderr.contains("hello"), "stderr should have hello: {}", r.stderr);
+    assert!(
+        r.stderr.contains("hello"),
+        "stderr should have hello: {}",
+        r.stderr
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -224,7 +231,11 @@ fn b4_process_substitution_two_inputs() {
     sdk.write_file("b.txt", "alpha").unwrap();
     // diff should find no difference (exit 0)
     let r = sdk.execute("diff <(cat a.txt) <(cat b.txt)");
-    assert_eq!(r.exit_code, 0, "files are identical, diff should exit 0: {}", r.stderr);
+    assert_eq!(
+        r.exit_code, 0,
+        "files are identical, diff should exit 0: {}",
+        r.stderr
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -236,7 +247,11 @@ fn c1_set_list_vars() {
     // set without args lists variables
     let r = sdk.execute("X=testvar; set");
     assert_eq!(r.exit_code, 0);
-    assert!(r.stdout.contains("X=testvar"), "should list X: {}", r.stdout);
+    assert!(
+        r.stdout.contains("X=testvar"),
+        "should list X: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -246,7 +261,10 @@ fn c1_set_errexit_stops_on_error() {
     let r = sdk.execute("set -e; echo first; false; echo should_not_appear");
     assert_eq!(r.exit_code, 1);
     assert!(r.stdout.contains("first"), "first should appear");
-    assert!(!r.stdout.contains("should_not_appear"), "should not appear after error");
+    assert!(
+        !r.stdout.contains("should_not_appear"),
+        "should not appear after error"
+    );
 }
 
 #[test]
@@ -255,16 +273,25 @@ fn c1_set_xtrace_echoes_commands() {
     // set -x echoes commands with + prefix
     let r = sdk.execute("set -x; echo hi");
     // xtrace output format (may go to stdout or stderr depending on implementation)
-    let has_trace = r.stderr.contains("+") || r.stderr.contains("echo")
-        || r.stdout.contains("+ echo");
-    assert!(has_trace || r.stdout.contains("hi"), "xtrace should echo: s={:?} e={:?}", r.stdout, r.stderr);
+    let has_trace =
+        r.stderr.contains("+") || r.stderr.contains("echo") || r.stdout.contains("+ echo");
+    assert!(
+        has_trace || r.stdout.contains("hi"),
+        "xtrace should echo: s={:?} e={:?}",
+        r.stdout,
+        r.stderr
+    );
 }
 
 #[test]
 fn c1_set_o_pipefail() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("set -o pipefail; false | true; echo $?");
-    assert!(r.stdout.contains("1"), "pipefail should make pipeline fail: {}", r.stdout);
+    assert!(
+        r.stdout.contains("1"),
+        "pipefail should make pipeline fail: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -273,10 +300,19 @@ fn c1_set_o_pipefail() {
 #[test]
 fn c2_source_script_executes() {
     let sdk = setup_sdk_no_subprocess();
-    sdk.write_file("myscript.sh", "echo sourced_ok\nX=sourced_val\n").unwrap();
+    sdk.write_file("myscript.sh", "echo sourced_ok\nX=sourced_val\n")
+        .unwrap();
     let r = sdk.execute("source myscript.sh; echo $X");
-    assert!(r.stdout.contains("sourced_ok"), "missing source output: {}", r.stdout);
-    assert!(r.stdout.contains("sourced_val"), "variable not set: {}", r.stdout);
+    assert!(
+        r.stdout.contains("sourced_ok"),
+        "missing source output: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("sourced_val"),
+        "variable not set: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -284,7 +320,11 @@ fn c2_dot_command_aliases_source() {
     let sdk = setup_sdk_no_subprocess();
     sdk.write_file("dotfile.sh", "echo from_dot\n").unwrap();
     let r = sdk.execute(". dotfile.sh");
-    assert!(r.stdout.contains("from_dot"), "dot command failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("from_dot"),
+        "dot command failed: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -308,7 +348,11 @@ fn c3_read_multiple_variables() {
 fn c3_read_last_var_gets_rest() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("read a b c <<< 'one two three four five'\necho \"$c\"");
-    assert!(r.stdout.contains("three four five"), "last var should get rest: {}", r.stdout);
+    assert!(
+        r.stdout.contains("three four five"),
+        "last var should get rest: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -318,14 +362,22 @@ fn c3_read_last_var_gets_rest() {
 fn c5_eval_executes_constructed_command() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("eval 'echo hello_from_eval'");
-    assert!(r.stdout.contains("hello_from_eval"), "eval failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("hello_from_eval"),
+        "eval failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn c5_eval_with_variable() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("X=dynamic; eval 'echo $X'");
-    assert!(r.stdout.contains("dynamic"), "eval with var failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("dynamic"),
+        "eval with var failed: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -344,7 +396,11 @@ fn c6_alias_list() {
     let sdk = setup_sdk_no_subprocess();
     assert_cmd_ok(&sdk, "alias ll='ls'");
     let r = sdk.execute("alias");
-    assert!(r.stdout.contains("ll="), "alias list missing ll: {}", r.stdout);
+    assert!(
+        r.stdout.contains("ll="),
+        "alias list missing ll: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -353,7 +409,11 @@ fn c6_unalias_removes() {
     assert_cmd_ok(&sdk, "alias xx='echo removed_test'");
     assert_cmd_ok(&sdk, "unalias xx");
     let r = sdk.execute("alias");
-    assert!(!r.stdout.contains("xx="), "alias should be removed: {}", r.stdout);
+    assert!(
+        !r.stdout.contains("xx="),
+        "alias should be removed: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -365,7 +425,11 @@ fn c7_export_list() {
     assert_cmd_ok(&sdk, "export FOO=bar");
     let r = sdk.execute("export");
     // export without args lists exported vars (like export -p)
-    assert!(r.stdout.contains("FOO") || r.stdout.contains("foo"), "export should list FOO: {}", r.stdout);
+    assert!(
+        r.stdout.contains("FOO") || r.stdout.contains("foo"),
+        "export should list FOO: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -374,7 +438,11 @@ fn c7_export_remove_attribute() {
     assert_cmd_ok(&sdk, "export FOO=bar");
     assert_cmd_ok(&sdk, "export -n FOO");
     let r = sdk.execute("export");
-    assert!(!r.stdout.contains("FOO="), "FOO should be un-exported: {}", r.stdout);
+    assert!(
+        !r.stdout.contains("FOO="),
+        "FOO should be un-exported: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -384,14 +452,21 @@ fn c7_export_remove_attribute() {
 fn c8_echo_e_interprets_escapes() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("echo -e 'a\\tb\\nc'");
-    assert!(r.stdout.contains("\ta") || r.stdout.contains("a\tb"), "tab not expanded: {r:?}");
+    assert!(
+        r.stdout.contains("\ta") || r.stdout.contains("a\tb"),
+        "tab not expanded: {r:?}"
+    );
 }
 
 #[test]
 fn c8_echo_E_no_interpolation() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("echo -E 'a\\tb'");
-    assert!(r.stdout.contains("a\\tb"), "literal backslash expected: {}", r.stdout);
+    assert!(
+        r.stdout.contains("a\\tb"),
+        "literal backslash expected: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -405,7 +480,11 @@ fn c9_cd_dash_returns_to_previous() {
     assert_cmd_ok(&sdk, "cd /dir2");
     let r = sdk.execute("cd -");
     assert_eq!(r.exit_code, 0);
-    assert!(r.stdout.contains("/dir1"), "cd - should output previous dir: {}", r.stdout);
+    assert!(
+        r.stdout.contains("/dir1"),
+        "cd - should output previous dir: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -415,14 +494,22 @@ fn c9_cd_dash_returns_to_previous() {
 fn c10_define_and_call_function() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("hello() { echo Hello; } ; hello");
-    assert!(r.stdout.contains("Hello"), "function call failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("Hello"),
+        "function call failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn c10_function_with_arguments() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("greet() { echo $1; }; greet World");
-    assert!(r.stdout.contains("World"), "function args failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("World"),
+        "function args failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -430,7 +517,11 @@ fn c10_if_else_control_flow() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("if true; then echo yes; else echo no; fi");
     assert!(r.stdout.contains("yes"), "if true failed: {}", r.stdout);
-    assert!(!r.stdout.contains("no"), "else should not run: {}", r.stdout);
+    assert!(
+        !r.stdout.contains("no"),
+        "else should not run: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -452,7 +543,9 @@ fn c11_exported_variable_in_subprocess() {
     let r = sdk.execute("bash showenv.sh");
     assert!(
         r.stdout.contains("exported_value"),
-        "exported var not passed to subprocess: stdout={} stderr={}", r.stdout, r.stderr
+        "exported var not passed to subprocess: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
     );
 }
 
@@ -468,7 +561,9 @@ fn d1_pipe_both_stdout_stderr() {
     // The output should contain error_msg (either in stdout or stderr)
     assert!(
         r.stdout.contains("error_msg") || r.stderr.contains("error_msg"),
-        "|& should pass data: stdout={:?} stderr={:?}", r.stdout, r.stderr
+        "|& should pass data: stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
     );
 }
 
@@ -479,7 +574,11 @@ fn d1_pipe_both_stdout_stderr() {
 fn d2_pipefail_without_flag() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("false | true; echo exit=$?");
-    assert!(r.stdout.contains("exit=0"), "without pipefail: {}", r.stdout);
+    assert!(
+        r.stdout.contains("exit=0"),
+        "without pipefail: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -507,7 +606,11 @@ fn e1_command_substitution_quoted_no_split() {
     let sdk = setup_sdk_no_subprocess();
     // "$(...)" inside quotes should be single arg
     let r = sdk.execute("echo \"$(echo hello world)\"");
-    assert!(r.stdout.contains("hello world"), "should not split: {}", r.stdout);
+    assert!(
+        r.stdout.contains("hello world"),
+        "should not split: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -517,15 +620,27 @@ fn e1_command_substitution_quoted_no_split() {
 fn e2_heredoc_unquoted_expands_variables() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("X=secret; cat << EOF\n$X\nEOF");
-    assert!(r.stdout.contains("secret"), "heredoc should expand $X: {}", r.stdout);
+    assert!(
+        r.stdout.contains("secret"),
+        "heredoc should expand $X: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn e2_heredoc_quoted_no_expansion() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("X=secret; cat << 'EOF'\n$X\nEOF");
-    assert!(!r.stdout.contains("secret"), "quoted heredoc should NOT expand: {}", r.stdout);
-    assert!(r.stdout.contains("$X"), "should be literal $X: {}", r.stdout);
+    assert!(
+        !r.stdout.contains("secret"),
+        "quoted heredoc should NOT expand: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("$X"),
+        "should be literal $X: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -538,26 +653,58 @@ fn f1_brace_expansion_comma() {
     // how the expansion integrates with command parsing.
     let r = sdk.execute("echo {a,b,c}");
     // Each value should appear somewhere in the output
-    assert!(r.stdout.contains("a"), "brace expansion failed: {}", r.stdout);
-    assert!(r.stdout.contains("b"), "brace expansion failed: {}", r.stdout);
-    assert!(r.stdout.contains("c"), "brace expansion failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("a"),
+        "brace expansion failed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("b"),
+        "brace expansion failed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("c"),
+        "brace expansion failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn f1_brace_expansion_range() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("echo {1..3}");
-    assert!(r.stdout.contains("1"), "range expansion failed: {}", r.stdout);
-    assert!(r.stdout.contains("2"), "range expansion failed: {}", r.stdout);
-    assert!(r.stdout.contains("3"), "range expansion failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("1"),
+        "range expansion failed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("2"),
+        "range expansion failed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("3"),
+        "range expansion failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn f1_brace_expansion_nested_in_path() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("echo prefix-{a,b}-suffix");
-    assert!(r.stdout.contains("prefix-a-suffix"), "unexpected: {}", r.stdout);
-    assert!(r.stdout.contains("prefix-b-suffix"), "unexpected: {}", r.stdout);
+    assert!(
+        r.stdout.contains("prefix-a-suffix"),
+        "unexpected: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("prefix-b-suffix"),
+        "unexpected: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -583,14 +730,22 @@ fn f2_recursive_glob_finds_nested() {
 fn g1_here_string_as_stdin() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("cat <<< 'hello here-string'");
-    assert!(r.stdout.contains("hello here-string"), "here-string failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("hello here-string"),
+        "here-string failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn g1_here_string_with_variable_expansion() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("X=hs_test; cat <<< \"value is $X\"");
-    assert!(r.stdout.contains("value is hs_test"), "here-string var expansion: {}", r.stdout);
+    assert!(
+        r.stdout.contains("value is hs_test"),
+        "here-string var expansion: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -603,7 +758,11 @@ fn g2_double_quote_escaped_dollar() {
     // Verify the command runs without error.
     let r = sdk.execute("echo 'a\"b'");
     assert_eq!(r.exit_code, 0);
-    assert!(r.stdout.contains("a\"b") || r.stdout.contains("ab"), "unexpected: {}", r.stdout);
+    assert!(
+        r.stdout.contains("a\"b") || r.stdout.contains("ab"),
+        "unexpected: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -622,7 +781,11 @@ fn integration_comment_lines_skipped() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("# this is a comment\necho hello\n# another comment");
     assert_eq!(r.exit_code, 0);
-    assert!(!r.stderr.contains("command not found"), "comments should be skipped: {}", r.stderr);
+    assert!(
+        !r.stderr.contains("command not found"),
+        "comments should be skipped: {}",
+        r.stderr
+    );
     assert!(r.stdout.contains("hello"), "real command should work");
 }
 
@@ -633,19 +796,27 @@ fn integration_comment_lines_skipped() {
 fn python_heredoc_respects_cwd() {
     let sdk = setup_sdk();
     sdk.execute("mkdir -p /projects/myapp");
-    sdk.write_file("/projects/myapp/data.txt", "hello from subdir\n").unwrap();
+    sdk.write_file("/projects/myapp/data.txt", "hello from subdir\n")
+        .unwrap();
     sdk.execute("cd /projects/myapp");
     // Python heredoc should find data.txt using relative path from current dir
-    let r = sdk.execute("python3 << 'PYEOF'\nwith open('data.txt', 'r') as f:\n    print(f.read().strip())\nPYEOF");
+    let r = sdk.execute(
+        "python3 << 'PYEOF'\nwith open('data.txt', 'r') as f:\n    print(f.read().strip())\nPYEOF",
+    );
     assert_eq!(r.exit_code, 0, "Python failed: stderr={}", r.stderr);
-    assert!(r.stdout.contains("hello from subdir"), "Python cwd incorrect: stdout={}", r.stdout);
+    assert!(
+        r.stdout.contains("hello from subdir"),
+        "Python cwd incorrect: stdout={}",
+        r.stdout
+    );
 }
 
 #[test]
 fn python_code_respects_cwd() {
     let sdk = setup_sdk();
     sdk.execute("mkdir -p /app/src");
-    sdk.write_file("/app/src/main.py", "print('ROOT_OK')").unwrap();
+    sdk.write_file("/app/src/main.py", "print('ROOT_OK')")
+        .unwrap();
     // From root, relative path shouldn't find the file
     let r = sdk.execute("python3 -c \"import os; print(os.getcwd())\"");
     assert_eq!(r.exit_code, 0);
@@ -653,18 +824,27 @@ fn python_code_respects_cwd() {
     sdk.execute("cd /app/src");
     let r = sdk.execute("python3 -c \"f=open('main.py'); print(f.read().strip())\"");
     assert_eq!(r.exit_code, 0);
-    assert!(r.stdout.contains("ROOT_OK"), "Python cwd after cd failed: stdout={}", r.stdout);
+    assert!(
+        r.stdout.contains("ROOT_OK"),
+        "Python cwd after cd failed: stdout={}",
+        r.stdout
+    );
 }
 
 #[test]
 fn python_script_exec_respects_cwd() {
     let sdk = setup_sdk();
     sdk.execute("mkdir -p /scripts");
-    sdk.write_file("/scripts/tool.py", "print('SCRIPT_OK')\n").unwrap();
+    sdk.write_file("/scripts/tool.py", "print('SCRIPT_OK')\n")
+        .unwrap();
     sdk.execute("cd /scripts");
     let r = sdk.execute("python3 tool.py");
     assert_eq!(r.exit_code, 0, "Python script failed: stderr={}", r.stderr);
-    assert!(r.stdout.contains("SCRIPT_OK"), "Python script cwd failed: stdout={}", r.stdout);
+    assert!(
+        r.stdout.contains("SCRIPT_OK"),
+        "Python script cwd failed: stdout={}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -688,7 +868,11 @@ fn cat_A_flag_shows_nonprint_and_ends() {
     sdk.write_file("test.txt", "hello\n").unwrap();
     // -A should show $ at end of line
     let r = sdk.execute("cat -A test.txt");
-    assert!(r.stdout.contains("hello$"), "cat -A should show $: {}", r.stdout);
+    assert!(
+        r.stdout.contains("hello$"),
+        "cat -A should show $: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -709,17 +893,27 @@ fn cat_T_flag_shows_tabs() {
     let sdk = setup_sdk_no_subprocess();
     sdk.write_file("tabs.txt", "col1\tcol2\n").unwrap();
     let r = sdk.execute("cat -T tabs.txt");
-    assert!(r.stdout.contains("^I"), "cat -T should show ^I for tab: {}", r.stdout);
+    assert!(
+        r.stdout.contains("^I"),
+        "cat -T should show ^I for tab: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn cat_v_flag_shows_control_chars() {
     let sdk = setup_sdk();
     // Create a file with control character 0x01 (^A) using Python
-    let r = sdk.execute("python3 << 'PYEOF'\nwith open('/ctrl.txt', 'w') as f:\n    f.write('a\\x01b\\n')\nPYEOF");
+    let r = sdk.execute(
+        "python3 << 'PYEOF'\nwith open('/ctrl.txt', 'w') as f:\n    f.write('a\\x01b\\n')\nPYEOF",
+    );
     assert_eq!(r.exit_code, 0, "Python failed: {}", r.stderr);
     let r = sdk.execute("cat -v /ctrl.txt");
-    assert!(r.stdout.contains("^A"), "cat -v should show ^A for 0x01: {}", r.stdout);
+    assert!(
+        r.stdout.contains("^A"),
+        "cat -v should show ^A for 0x01: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -728,7 +922,11 @@ fn cat_A_in_pipeline() {
     sdk.write_file("pipe.txt", "line1\nline2\n").unwrap();
     // cat -A in pipeline should work like standalone
     let r = sdk.execute("cat pipe.txt | cat -A");
-    assert!(r.stdout.contains("line1$"), "cat -A in pipe should show $: {}", r.stdout);
+    assert!(
+        r.stdout.contains("line1$"),
+        "cat -A in pipe should show $: {}",
+        r.stdout
+    );
     assert!(r.stdout.contains("line2$"), "cat -A in pipe: {}", r.stdout);
 }
 
@@ -740,7 +938,11 @@ fn cat_n_combined_with_A() {
     assert!(r.stdout.contains("a$"), "missing -A: {}", r.stdout);
     assert!(r.stdout.contains("b$"), "missing -A: {}", r.stdout);
     // Line numbers should be present (at least in stdout)
-    assert!(r.stdout.contains("1") && r.stdout.contains("2"), "missing -n: {}", r.stdout);
+    assert!(
+        r.stdout.contains("1") && r.stdout.contains("2"),
+        "missing -n: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -757,14 +959,22 @@ fn cat_never_crashes_on_unknown_flag() {
 fn cat_empty_args_with_stdin() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("echo hello | cat");
-    assert!(r.stdout.contains("hello"), "cat with stdin failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("hello"),
+        "cat with stdin failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn cat_with_only_flags_and_stdin() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("echo hello | cat -n -E");
-    assert!(r.stdout.contains("hello$"), "cat -E with stdin failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("hello$"),
+        "cat -E with stdin failed: {}",
+        r.stdout
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -778,7 +988,10 @@ fn subprocess_allowed_by_default() {
     let info = sdk.get_info();
     // On desktop, subprocess should be available
     // On mobile without binaries, it's allowed but commands just fail differently
-    assert!(info.allow_subprocess, "subprocess should be allowed by default");
+    assert!(
+        info.allow_subprocess,
+        "subprocess should be allowed by default"
+    );
 }
 
 #[test]
@@ -795,7 +1008,11 @@ fn subprocess_fallback_gives_clear_error() {
 fn python_script_sandbox_applied() {
     let sdk = setup_sdk();
     // Python scripts should see the sandbox root, not host file system
-    sdk.write_file("/test_sandbox.py", "import os; print(os.getenv('FASTSHELL_ROOT', 'UNSET'))").unwrap();
+    sdk.write_file(
+        "/test_sandbox.py",
+        "import os; print(os.getenv('FASTSHELL_ROOT', 'UNSET'))",
+    )
+    .unwrap();
     let r = sdk.execute("python3 /test_sandbox.py");
     assert_eq!(r.exit_code, 0, "sandbox script failed: {}", r.stderr);
     // The sandbox root should be set
@@ -818,7 +1035,11 @@ fn large_output_many_lines() {
     let r = sdk.execute("seq 1 100");
     assert_eq!(r.exit_code, 0);
     let lines: Vec<&str> = r.stdout.lines().collect();
-    assert!(lines.len() >= 100, "expected 100+ lines, got {}", lines.len());
+    assert!(
+        lines.len() >= 100,
+        "expected 100+ lines, got {}",
+        lines.len()
+    );
 }
 
 #[test]
@@ -849,14 +1070,22 @@ fn cd_then_subprocess_respects_dir() {
     // cat should find the file relative to cwd
     let r = sdk.execute("cat hello.txt");
     assert_eq!(r.exit_code, 0, "cat failed: {}", r.stderr);
-    assert!(r.stdout.contains("world"), "cwd not respected: {}", r.stdout);
+    assert!(
+        r.stdout.contains("world"),
+        "cwd not respected: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn nested_function_calls() {
     let sdk = setup_sdk_no_subprocess();
     let r = sdk.execute("outer() { echo $(inner); }; inner() { echo nested; }; outer");
-    assert!(r.stdout.contains("nested"), "nested function failed: {}", r.stdout);
+    assert!(
+        r.stdout.contains("nested"),
+        "nested function failed: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -866,5 +1095,8 @@ fn alias_does_not_block_builtin() {
     // After alias, calling ls should still work via builtin
     let r = sdk.execute("alias ls='echo OVERRIDE'; ls");
     // The alias "ls" expands to "echo OVERRIDE", so "ls" becomes "echo OVERRIDE"
-    assert!(r.stdout.contains("OVERRIDE") || r.exit_code == 0, "alias should work");
+    assert!(
+        r.stdout.contains("OVERRIDE") || r.exit_code == 0,
+        "alias should work"
+    );
 }

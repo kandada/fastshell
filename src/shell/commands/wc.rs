@@ -20,39 +20,39 @@ impl Shell {
         if args.contains(&"-h") || args.contains(&"--help") {
             return CommandOutput::success(WC_HELP_TEXT.to_string());
         }
-        let mut show_lines = true;
-        let mut show_words = true;
-        let mut show_bytes = true;
-        let mut show_max_width = false;
-        let mut bytes_mode = true;
+        // Counter flags SELECT which columns to print; they must not cancel
+        // each other (`wc -c -w` must show bytes AND words). Track the requested
+        // set, then fall back to the default three only when no flag was given.
+        let mut want_lines = false;
+        let mut want_words = false;
+        let mut want_bytes = false;
+        let mut want_chars = false;
+        let mut want_max_width = false;
+        let mut any_flag = false;
         let mut files = Vec::new();
 
         for arg in args {
             if arg.starts_with("--") {
                 match *arg {
                     "--lines" => {
-                        show_words = false;
-                        show_bytes = false;
+                        want_lines = true;
+                        any_flag = true;
                     }
                     "--words" => {
-                        show_lines = false;
-                        show_bytes = false;
+                        want_words = true;
+                        any_flag = true;
                     }
                     "--bytes" => {
-                        show_lines = false;
-                        show_words = false;
-                        bytes_mode = true;
+                        want_bytes = true;
+                        any_flag = true;
                     }
                     "--chars" => {
-                        show_lines = false;
-                        show_words = false;
-                        bytes_mode = false;
+                        want_chars = true;
+                        any_flag = true;
                     }
                     "--max-line-length" => {
-                        show_lines = false;
-                        show_words = false;
-                        show_bytes = false;
-                        show_max_width = true;
+                        want_max_width = true;
+                        any_flag = true;
                     }
                     _ => crate::warn!("wc: warning: unsupported option '{}'", arg),
                 }
@@ -60,28 +60,24 @@ impl Shell {
                 for ch in arg.chars().skip(1) {
                     match ch {
                         'l' => {
-                            show_words = false;
-                            show_bytes = false;
+                            want_lines = true;
+                            any_flag = true;
                         }
                         'w' => {
-                            show_lines = false;
-                            show_bytes = false;
+                            want_words = true;
+                            any_flag = true;
                         }
                         'c' => {
-                            show_lines = false;
-                            show_words = false;
-                            bytes_mode = true;
+                            want_bytes = true;
+                            any_flag = true;
                         }
                         'm' => {
-                            show_lines = false;
-                            show_words = false;
-                            bytes_mode = false;
+                            want_chars = true;
+                            any_flag = true;
                         }
                         'L' => {
-                            show_lines = false;
-                            show_words = false;
-                            show_bytes = false;
-                            show_max_width = true;
+                            want_max_width = true;
+                            any_flag = true;
                         }
                         _ => crate::warn!("wc: warning: unsupported option '-{}'", ch),
                     }
@@ -91,97 +87,142 @@ impl Shell {
             }
         }
 
+        let (show_lines, show_words, show_bytes, show_max_width, bytes_mode) = if any_flag {
+            (
+                want_lines,
+                want_words,
+                want_bytes || want_chars,
+                want_max_width,
+                !want_chars,
+            )
+        } else {
+            (true, true, true, false, true)
+        };
+
+        // GNU `wc`: each numeric field is right-aligned to the width of the
+        // largest displayed count (min 1). A single input (stdin/one file) is
+        // therefore un-padded (`wc -l < f` → `3`), not a fixed width of 7.
+        let mut rows: Vec<(Vec<usize>, Option<String>)> = Vec::new();
+        let mut totals: Vec<usize> = Vec::new();
+
         if files.is_empty() {
-            match stdin {
-                Some(input) => {
-                    let l = input.lines().count();
-                    let w = input.split_whitespace().count();
-                    let bc = if bytes_mode {
-                        input.as_bytes().len()
-                    } else {
-                        input.chars().count()
-                    };
-                    let maxw = input.lines().map(|x| x.chars().count()).max().unwrap_or(0);
-                    let mut parts = Vec::new();
-                    if show_lines {
-                        parts.push(format!("{:>7}", l));
-                    }
-                    if show_words {
-                        parts.push(format!("{:>7}", w));
-                    }
-                    if show_bytes {
-                        parts.push(format!("{:>7}", bc));
-                    }
-                    if show_max_width {
-                        parts.push(format!("{:>7}", maxw));
-                    }
-                    return CommandOutput::success(parts.join("") + "\n");
-                }
+            let input = match stdin {
+                Some(s) => s,
                 None => return CommandOutput::error("wc: missing file operand\n".to_string(), 1),
-            }
-        }
-
-        let mut output = String::new();
-        let mut total_lines = 0usize;
-        let mut total_words = 0usize;
-        let mut total_bc = 0usize;
-        let mut total_maxw = 0usize;
-
-        for file in &files {
-            match self.vfs.read(file, &self.cwd) {
-                Ok(data) => {
-                    let content = String::from_utf8_lossy(&data);
-                    let l = content.lines().count();
-                    let w = content.split_whitespace().count();
-                    let bc = if bytes_mode {
-                        data.len()
-                    } else {
-                        content.chars().count()
-                    };
-                    let maxw = content.lines().map(|x| x.chars().count()).max().unwrap_or(0);
-                    let mut parts = Vec::new();
-                    if show_lines {
-                        parts.push(format!("{:>7}", l));
-                    }
-                    if show_words {
-                        parts.push(format!("{:>7}", w));
-                    }
-                    if show_bytes {
-                        parts.push(format!("{:>7}", bc));
-                    }
-                    if show_max_width {
-                        parts.push(format!("{:>7}", maxw));
-                    }
-                    parts.push(file.clone());
-                    output.push_str(&parts.join(" "));
-                    output.push('\n');
-                    total_lines += l;
-                    total_words += w;
-                    total_bc += bc;
-                    total_maxw = total_maxw.max(maxw);
-                }
-                Err(e) => {
-                    return CommandOutput::error(format!("wc: {}: {}\n", file, e), 1);
-                }
-            }
-        }
-
-        if files.len() > 1 {
-            let mut parts = Vec::new();
+            };
+            // Prefer the byte-accurate stdin (`cat bin | wc -c`).
+            let raw = self
+                .take_binary_in()
+                .unwrap_or_else(|| input.as_bytes().to_vec());
+            let l = input.lines().count();
+            let w = input.split_whitespace().count();
+            let bc = if bytes_mode {
+                raw.len()
+            } else {
+                input.chars().count()
+            };
+            let maxw = input.lines().map(|x| x.chars().count()).max().unwrap_or(0);
+            let mut vals = Vec::new();
             if show_lines {
-                parts.push(format!("{:>7}", total_lines));
+                vals.push(l);
             }
             if show_words {
-                parts.push(format!("{:>7}", total_words));
+                vals.push(w);
             }
             if show_bytes {
-                parts.push(format!("{:>7}", total_bc));
+                vals.push(bc);
             }
             if show_max_width {
-                parts.push(format!("{:>7}", total_maxw));
+                vals.push(maxw);
             }
-            parts.push("total".to_string());
-            output.push_str(&parts.join(" "));
+            rows.push((vals, None));
+        } else {
+            let mut t = [0usize; 4];
+            for file in &files {
+                match self.vfs.read(file, &self.cwd) {
+                    Ok(data) => {
+                        let content = String::from_utf8_lossy(&data);
+                        let l = content.lines().count();
+                        let w = content.split_whitespace().count();
+                        let bc = if bytes_mode {
+                            data.len()
+                        } else {
+                            content.chars().count()
+                        };
+                        let maxw = content
+                            .lines()
+                            .map(|x| x.chars().count())
+                            .max()
+                            .unwrap_or(0);
+                        t[0] += l;
+                        t[1] += w;
+                        t[2] += bc;
+                        t[3] = t[3].max(maxw);
+                        let mut vals = Vec::new();
+                        if show_lines {
+                            vals.push(l);
+                        }
+                        if show_words {
+                            vals.push(w);
+                        }
+                        if show_bytes {
+                            vals.push(bc);
+                        }
+                        if show_max_width {
+                            vals.push(maxw);
+                        }
+                        rows.push((vals, Some(file.clone())));
+                    }
+                    Err(e) => {
+                        return CommandOutput::error(format!("wc: {}: {}\n", file, e), 1);
+                    }
+                }
+            }
+            if show_lines {
+                totals.push(t[0]);
+            }
+            if show_words {
+                totals.push(t[1]);
+            }
+            if show_bytes {
+                totals.push(t[2]);
+            }
+            if show_max_width {
+                totals.push(t[3]);
+            }
+        }
+
+        let width = rows
+            .iter()
+            .flat_map(|(v, _)| v.iter())
+            .chain(totals.iter())
+            .map(|v| v.to_string().len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        let fmt_row = |vals: &[usize], name: Option<&str>| {
+            let mut s = vals
+                .iter()
+                .map(|v| format!("{:>w$}", v, w = width))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(n) = name {
+                if !s.is_empty() {
+                    s.push(' ');
+                }
+                s.push_str(n);
+            }
+            s
+        };
+
+        let mut output = String::new();
+        for (vals, name) in &rows {
+            output.push_str(&fmt_row(vals, name.as_deref()));
+            output.push('\n');
+        }
+        if files.len() > 1 {
+            output.push_str(&fmt_row(&totals, Some("total")));
             output.push('\n');
         }
 
@@ -199,7 +240,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_wc_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_wc_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)

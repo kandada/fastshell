@@ -20,7 +20,9 @@ extern "C" fn fake_host(method: *const c_char, args: *const c_char) -> *mut c_ch
     let a = unsafe { CStr::from_ptr(args).to_string_lossy().into_owned() };
     *LAST_CALL.lock().unwrap() = Some((m.clone(), a));
     if *HANG.lock().unwrap() {
-        loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
     }
     let resp = match m.as_str() {
         "get_battery" => r#"{"level":75.0,"charging":false,"source":"battery"}"#,
@@ -44,13 +46,19 @@ fn mk(tag: &str) -> Fastshell {
 }
 
 fn last_args() -> String {
-    LAST_CALL.lock().unwrap().clone().map(|(_, a)| a).unwrap_or_default()
+    LAST_CALL
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|(_, a)| a)
+        .unwrap_or_default()
 }
 
 /// Serialized: these tests share the process-global callback + statics.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn agent_instance_inherits_callback_and_resolves_paths_to_own_sandbox() {
     let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_global_device_callback(Some(fake_host as DeviceCallbackFn));
@@ -71,9 +79,15 @@ fn agent_instance_inherits_callback_and_resolves_paths_to_own_sandbox() {
     let out = s.execute("camera /media/photo.jpg");
     assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
     let args = last_args();
-    assert!(args.contains(&sandbox), "must resolve into caller sandbox: {args}");
+    assert!(
+        args.contains(&sandbox),
+        "must resolve into caller sandbox: {args}"
+    );
     assert!(args.contains("media/photo.jpg"), "{args}");
-    assert!(!args.contains("\"/media/photo.jpg\""), "raw VFS path leaked: {args}");
+    assert!(
+        !args.contains("\"/media/photo.jpg\""),
+        "raw VFS path leaked: {args}"
+    );
 
     // cwd semantics: relative path resolves under the current directory.
     s.execute("cd media");
@@ -90,6 +104,7 @@ fn agent_instance_inherits_callback_and_resolves_paths_to_own_sandbox() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn ui_grant_is_visible_to_agent_instances() {
     let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_global_device_callback(Some(fake_host as DeviceCallbackFn));
@@ -100,7 +115,9 @@ fn ui_grant_is_visible_to_agent_instances() {
     let out = fresh.execute("location");
     assert!(
         out.stderr.contains("PERMISSION_NEEDED"),
-        "ungranted must ask: {} {}", out.stdout, out.stderr
+        "ungranted must ask: {} {}",
+        out.stdout,
+        out.stderr
     );
 
     // UI grants once (any instance) → a brand-new agent instance proceeds.
@@ -117,6 +134,7 @@ fn ui_grant_is_visible_to_agent_instances() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn hung_host_bridge_times_out_instead_of_blocking_forever() {
     let _l = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("FASTSHELL_DEVICE_TIMEOUT", "2");

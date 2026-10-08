@@ -150,7 +150,10 @@ fn parse_touch_stamp(s: &str) -> Option<u64> {
         12 => (date_part[0..4].parse::<i32>().ok()?, &date_part[4..]),
         10 => {
             let yy = date_part[0..2].parse::<i32>().ok()?;
-            (if yy >= 69 { 1900 + yy } else { 2000 + yy }, &date_part[2..])
+            (
+                if yy >= 69 { 1900 + yy } else { 2000 + yy },
+                &date_part[2..],
+            )
         }
         8 => {
             let now_secs = std::time::SystemTime::now()

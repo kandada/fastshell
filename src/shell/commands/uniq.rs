@@ -100,7 +100,7 @@ impl Shell {
 
         let mut output = String::new();
         for file in &files {
-            let content = match self.vfs.read_to_string(file, &self.cwd) {
+            let content = match self.read_text_lossy(file) {
                 Ok(c) => c,
                 Err(e) => return CommandOutput::error(format!("uniq: {}: {}\n", file, e), 1),
             };
@@ -138,42 +138,43 @@ fn uniq_process(
     check_chars: Option<usize>,
 ) -> CommandOutput {
     let lines: Vec<&str> = input.lines().collect();
-    let lines: Vec<(&str, String)> = if skip_fields > 0 || skip_chars > 0 || check_chars.is_some() || ignore_case {
-        lines
-            .into_iter()
-            .map(|l| {
-                let cmp_part = if skip_fields > 0 {
-                    let parts: Vec<&str> = l.split_whitespace().collect();
-                    if parts.len() > skip_fields {
-                        parts[skip_fields..].join(" ")
+    let lines: Vec<(&str, String)> =
+        if skip_fields > 0 || skip_chars > 0 || check_chars.is_some() || ignore_case {
+            lines
+                .into_iter()
+                .map(|l| {
+                    let cmp_part = if skip_fields > 0 {
+                        let parts: Vec<&str> = l.split_whitespace().collect();
+                        if parts.len() > skip_fields {
+                            parts[skip_fields..].join(" ")
+                        } else {
+                            String::new()
+                        }
                     } else {
-                        String::new()
-                    }
-                } else {
-                    l.to_string()
-                };
-                // Skip leading chars.
-                let after_skip_chars = if skip_chars > 0 {
-                    cmp_part.chars().skip(skip_chars).collect::<String>()
-                } else {
-                    cmp_part
-                };
-                // Limit to first N chars.
-                let limited = match check_chars {
-                    Some(n) => after_skip_chars.chars().take(n).collect::<String>(),
-                    None => after_skip_chars,
-                };
-                let key = if ignore_case {
-                    limited.to_lowercase()
-                } else {
-                    limited
-                };
-                (l, key)
-            })
-            .collect()
-    } else {
-        lines.into_iter().map(|l| (l, l.to_string())).collect()
-    };
+                        l.to_string()
+                    };
+                    // Skip leading chars.
+                    let after_skip_chars = if skip_chars > 0 {
+                        cmp_part.chars().skip(skip_chars).collect::<String>()
+                    } else {
+                        cmp_part
+                    };
+                    // Limit to first N chars.
+                    let limited = match check_chars {
+                        Some(n) => after_skip_chars.chars().take(n).collect::<String>(),
+                        None => after_skip_chars,
+                    };
+                    let key = if ignore_case {
+                        limited.to_lowercase()
+                    } else {
+                        limited
+                    };
+                    (l, key)
+                })
+                .collect()
+        } else {
+            lines.into_iter().map(|l| (l, l.to_string())).collect()
+        };
 
     let mut output = String::new();
     let mut i = 0;
@@ -314,7 +315,11 @@ mod tests {
         // Skip the leading "1 "/"2 " so "a"/"a" are considered equal.
         let out = shell.cmd_uniq(&["-s", "2"], Some("1 a\n2 a\n3 b\n"));
         let lines: Vec<&str> = out.stdout.trim().lines().collect();
-        assert_eq!(lines, vec!["1 a", "3 b"], "skip-chars should group 1 a / 2 a");
+        assert_eq!(
+            lines,
+            vec!["1 a", "3 b"],
+            "skip-chars should group 1 a / 2 a"
+        );
     }
 
     #[test]
@@ -323,6 +328,10 @@ mod tests {
         // Compare only the first 2 chars: "abc" vs "abd" share "ab".
         let out = shell.cmd_uniq(&["-w", "2"], Some("abc\nabd\nxyz\n"));
         let lines: Vec<&str> = out.stdout.trim().lines().collect();
-        assert_eq!(lines, vec!["abc", "xyz"], "check-chars should group abc/abd");
+        assert_eq!(
+            lines,
+            vec!["abc", "xyz"],
+            "check-chars should group abc/abd"
+        );
     }
 }

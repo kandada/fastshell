@@ -16,7 +16,7 @@ app/src/main/jniLibs/arm64-v8a/libfastshell.so
 Drag libfastshell.a into Xcode → Build Phases → Link Binary With Libraries
 
 # macOS / Linux
-Link libfastshell.dylib / libfastshell-0.2.1.so dynamically
+Link libfastshell.dylib / libfastshell-0.3.4.so dynamically
 ```
 
 ### 2. Initialize

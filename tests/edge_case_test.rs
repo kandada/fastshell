@@ -19,7 +19,7 @@ fn setup() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 30_000,
-    ..Default::default()
+        ..Default::default()
     })
     .unwrap();
     sdk
@@ -369,7 +369,7 @@ fn edge_curl_permission_boundary() {
         allow_subprocess: false,
         network_ask_permission: true,
         command_timeout_ms: 5_000,
-    ..Default::default()
+        ..Default::default()
     })
     .unwrap();
 

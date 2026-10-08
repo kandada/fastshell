@@ -15,40 +15,121 @@
 //!   * The callback returns a malloc-allocated JSON string; this side frees it
 //!     with `libc::free`. `{"ok":false,"error":..}` signals failure; any other
 //!     JSON is treated as the (method-specific) success payload.
+//!
+//! # 经验固化：同步设备桥的反模式与既定规矩
+//!
+//! 这里的 `DeviceCallbackFn` 是**同步**的 `fn(method, args) -> *mut c_char`，它把
+//! 两件本应正交的事绑死了 —— 「设备工作在哪个线程跑」与「同步还是异步返回」。
+//! 历史上导致：剪贴板 / 定位等被宿主放到主线程执行 → 直接阻塞 UI（卡死）。
+//!
+//! 规矩（业界共识，Termux 拆进程+异步 socket、Flutter platform channel 异步消息）：
+//!   1. 主线程只做 UI；数据类能力（剪贴板/定位/传感器/IO/网络）一律后台。
+//!   2. 桥尽量异步（request/response + callback），别让 shell 命令同步阻塞。
+//!
+//! 现状：本 `call()` 已把宿主回调放到独立 worker 线程 + 超时（`timeout_secs`），
+//!   iOS 侧也已把剪贴板/定位迁出主线程。**彻底根治（异步桥）**：把
+//!   `DeviceCallbackFn` 改成 `fn(method, args, request_id)` + `host_send_result(id, json)`
+//!   回调，shell 设备命令改为可挂起/恢复 —— 这需要 shell 命令执行模型支持异步，
+//!   属较大重构（见 DeviceCallbackHandler.swift 头注释）。
 
 use super::plugin::*;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
 
+/// Legacy **synchronous** device callback: `fn(method, args_json) -> *mut c_char`.
 pub type DeviceCallbackFn = extern "C" fn(*const c_char, *const c_char) -> *mut c_char;
 
-/// Process-global device callback. Set once by the host (Android JNI) and
-/// re-used by every `Fastshell` instance created afterwards — including the
-/// private ones aacode-rs spins up per task. This is what makes device
-/// commands work through the agent's own fastshell backend.
+/// **Asynchronous** device callback (generic across hosts): the host receives
+/// `(method, args_json, request_id)` and MUST return promptly. When the device
+/// work completes it calls [`host_send_result`] (C ABI
+/// `fastshell_device_response`) with the same `request_id`. This keeps the
+/// host free to run the work on any thread/queue (or suspend) and is the
+/// preferred contract for new integrations (iOS/Android).
+pub type DeviceCallbackAsyncFn = extern "C" fn(*const c_char, *const c_char, u64);
+
+/// Process-global device callback. Set once by the host and re-used by every
+/// `Fastshell` instance created afterwards — including the private ones
+/// aacode-rs spins up per task. This is what makes device commands work
+/// through the agent's own fastshell backend.
 static DEVICE_CB: OnceLock<Mutex<Option<DeviceCallbackFn>>> = OnceLock::new();
+static DEVICE_CB_ASYNC: OnceLock<Mutex<Option<DeviceCallbackAsyncFn>>> = OnceLock::new();
 
 fn device_cb_slot() -> &'static Mutex<Option<DeviceCallbackFn>> {
     DEVICE_CB.get_or_init(|| Mutex::new(None))
 }
 
-/// Install (or clear) the global device callback.
+fn device_cb_async_slot() -> &'static Mutex<Option<DeviceCallbackAsyncFn>> {
+    DEVICE_CB_ASYNC.get_or_init(|| Mutex::new(None))
+}
+
+/// Pending async requests: `request_id -> oneshot sender` (std mpsc).
+fn pending_slot() -> &'static Mutex<HashMap<u64, mpsc::Sender<Option<String>>>> {
+    static PENDING: OnceLock<Mutex<HashMap<u64, mpsc::Sender<Option<String>>>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Install (or clear) the global **synchronous** device callback.
 pub fn set_global_device_callback(cb: Option<DeviceCallbackFn>) {
     if let Ok(mut g) = device_cb_slot().lock() {
         *g = cb;
     }
 }
 
+/// Install (or clear) the global **asynchronous** device callback. Takes
+/// precedence over the sync callback when both are set.
+pub fn set_global_device_callback_async(cb: Option<DeviceCallbackAsyncFn>) {
+    if let Ok(mut g) = device_cb_async_slot().lock() {
+        *g = cb;
+    }
+}
+
+/// Host-side responder. Called by the host (Swift/Kotlin/C) when an async
+/// device request completes. `json` is a UTF-8 C string that this side only
+/// *copies* (the host keeps ownership of its own allocation). Unknown or
+/// already-timed-out ids are ignored.
+pub fn host_send_result(request_id: u64, json: *const c_char) {
+    let value = if json.is_null() {
+        None
+    } else {
+        Some(
+            unsafe { CStr::from_ptr(json) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    let tx = pending_slot()
+        .lock()
+        .ok()
+        .and_then(|mut g| g.remove(&request_id));
+    if let Some(tx) = tx {
+        let _ = tx.send(value);
+    }
+}
+
 /// Build a fresh plugin bound to the global callback, if one is set.
+/// Prefers the async callback; falls back to the legacy sync one.
 pub fn global_device_plugin() -> Option<Box<dyn DevicePlugin>> {
+    if let Some(cb) = *device_cb_async_slot().lock().ok()? {
+        return Some(Box::new(CallbackDevicePlugin::with_async(cb)));
+    }
     let cb = (*device_cb_slot().lock().ok()?)?;
     Some(Box::new(CallbackDevicePlugin::new(cb)))
 }
 
+/// Which host callback this plugin drives.
+enum Backend {
+    Sync(DeviceCallbackFn),
+    Async(DeviceCallbackAsyncFn),
+}
+
 pub struct CallbackDevicePlugin {
-    cb: DeviceCallbackFn,
+    backend: Backend,
 }
 
 // The callback is a plain extern "C" fn pointer — safe to call from any thread
@@ -56,31 +137,75 @@ pub struct CallbackDevicePlugin {
 unsafe impl Send for CallbackDevicePlugin {}
 
 impl CallbackDevicePlugin {
+    /// Legacy sync-callback constructor.
     pub fn new(cb: DeviceCallbackFn) -> Self {
-        Self { cb }
+        Self {
+            backend: Backend::Sync(cb),
+        }
+    }
+
+    /// Async-callback constructor (preferred for new hosts).
+    pub fn with_async(cb: DeviceCallbackAsyncFn) -> Self {
+        Self {
+            backend: Backend::Async(cb),
+        }
     }
 
     /// Default upper bound for a single device call. Interactive flows
-    /// (photo picker, biometric prompt) have their own Kotlin-side timeouts;
+    /// (photo picker, biometric prompt) have their own host-side timeouts;
     /// this is the defensive net for a hung host bridge so an agent's shell
     /// command can never block forever. Override with FASTSHELL_DEVICE_TIMEOUT.
     fn timeout_secs() -> u64 {
         std::env::var("FASTSHELL_DEVICE_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(300)
+            .unwrap_or(25)
     }
 
     fn call(&self, method: &str, args: Value) -> Result<Value, String> {
         let m = CString::new(method).map_err(|e| e.to_string())?;
         let a = CString::new(args.to_string()).map_err(|e| e.to_string())?;
 
-        // Run the (potentially interactive/blocking) host callback on a
-        // worker thread with a deadline. On timeout the worker is abandoned —
-        // its eventual reply lands in a disconnected channel and is dropped
-        // safely (same pattern as the SDK command timeout).
-        let cb = self.cb;
-        let (tx, rx) = std::sync::mpsc::channel();
+        let s = match self.backend {
+            Backend::Sync(cb) => Self::call_sync(cb, method, m, a)?,
+            Backend::Async(cb) => Self::call_async(cb, method, m, a)?,
+        };
+
+        let v: Value = serde_json::from_str(&s).map_err(|e| {
+            format!(
+                "{method}: bad device response ({e}): {}",
+                s.chars().take(200).collect::<String>()
+            )
+        })?;
+        if v.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+            let err = v
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("device error")
+                .to_string();
+            // Do not double-prefix when the host already prefixed the method
+            // (e.g. host returns "open_url: could not open" → keep it as-is
+            // instead of "open_url: open_url: could not open").
+            let prefix = format!("{method}:");
+            return Err(if err.starts_with(&prefix) {
+                err
+            } else {
+                format!("{method}: {err}")
+            });
+        }
+        Ok(v)
+    }
+
+    /// Legacy path: run the blocking host callback on a worker thread with a
+    /// deadline. On timeout the worker is abandoned — its eventual reply lands
+    /// in a disconnected channel and is dropped safely.
+    fn call_sync(
+        cb: DeviceCallbackFn,
+        method: &str,
+        m: CString,
+        a: CString,
+    ) -> Result<String, String> {
+        let (tx, rx) = mpsc::channel();
         let spawn = std::thread::Builder::new()
             .name(format!("device-{method}"))
             .spawn(move || {
@@ -98,28 +223,48 @@ impl CallbackDevicePlugin {
             return Err(format!("{method}: failed to spawn device call thread"));
         }
 
-        let s = match rx.recv_timeout(std::time::Duration::from_secs(Self::timeout_secs())) {
-            Ok(Some(s)) => s,
-            Ok(None) => return Err(format!("{method}: device host returned null")),
+        match rx.recv_timeout(std::time::Duration::from_secs(Self::timeout_secs())) {
+            Ok(Some(s)) => Ok(s),
+            Ok(None) => Err(format!("{method}: device host returned null")),
+            Err(_) => Err(format!(
+                "{method}: device call timed out after {}s (host bridge unresponsive)",
+                Self::timeout_secs()
+            )),
+        }
+    }
+
+    /// Async path: register a one-shot request, invoke the host callback
+    /// (returns immediately), then wait for `host_send_result` on this thread
+    /// with the same deadline. The host is free to run the work on any
+    /// thread/queue; on timeout we drop the registry entry so it can't leak.
+    fn call_async(
+        cb: DeviceCallbackAsyncFn,
+        method: &str,
+        m: CString,
+        a: CString,
+    ) -> Result<String, String> {
+        let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut g = pending_slot().lock().map_err(|e| e.to_string())?;
+            g.insert(request_id, tx);
+        }
+        // Host callback returns promptly; result arrives via host_send_result.
+        cb(m.as_ptr(), a.as_ptr(), request_id);
+
+        match rx.recv_timeout(std::time::Duration::from_secs(Self::timeout_secs())) {
+            Ok(Some(s)) => Ok(s),
+            Ok(None) => Err(format!("{method}: device host returned null")),
             Err(_) => {
-                return Err(format!(
+                if let Ok(mut g) = pending_slot().lock() {
+                    g.remove(&request_id);
+                }
+                Err(format!(
                     "{method}: device call timed out after {}s (host bridge unresponsive)",
                     Self::timeout_secs()
                 ))
             }
-        };
-
-        let v: Value = serde_json::from_str(&s)
-            .map_err(|e| format!("{method}: bad device response ({e}): {}", s.chars().take(200).collect::<String>()))?;
-        if v.get("ok").and_then(|b| b.as_bool()) == Some(false) {
-            let err = v
-                .get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or("device error")
-                .to_string();
-            return Err(format!("{method}: {err}"));
         }
-        Ok(v)
     }
 
     fn call_unit(&self, method: &str, args: Value) -> Result<(), String> {
@@ -316,6 +461,10 @@ impl DevicePlugin for CallbackDevicePlugin {
         self.call_unit("open_url", json!({"url": url}))
     }
 
+    fn open_settings(&self, target: &str) -> Result<(), String> {
+        self.call_unit("open_settings", json!({"target": target}))
+    }
+
     fn authenticate_biometric(&self, reason: &str) -> Result<bool, String> {
         let v = self.call("authenticate_biometric", json!({"reason": reason}))?;
         Ok(v.get("authenticated")
@@ -337,7 +486,10 @@ impl DevicePlugin for CallbackDevicePlugin {
         let v = self.call("get_network_type", json!({}))?;
         Ok(NetworkType {
             kind: Self::str_field(&v, &["kind"]),
-            connected: v.get("connected").and_then(|x| x.as_bool()).unwrap_or(false),
+            connected: v
+                .get("connected")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
         })
     }
 
@@ -436,5 +588,46 @@ mod tests {
         let p = CallbackDevicePlugin::new(fake_cb);
         let e = p.take_photo("/x.jpg").unwrap_err();
         assert!(e.contains("no camera"));
+    }
+
+    // ── async callback path ────────────────────────────────────────────
+
+    /// Async host: returns immediately; responds later from another thread
+    /// via `host_send_result` (mirrors what iOS/Android hosts do).
+    extern "C" fn fake_async_cb(method: *const c_char, _args: *const c_char, request_id: u64) {
+        let m = unsafe { CStr::from_ptr(method).to_string_lossy().into_owned() };
+        std::thread::spawn(move || {
+            let resp = match m.as_str() {
+                "get_battery" => r#"{"level":77.0,"charging":false,"source":"battery"}"#,
+                "get_clipboard" => r#"{"ok":true,"text":"async-hello"}"#,
+                "take_photo" => r#"{"ok":false,"error":"async no camera"}"#,
+                _ => r#"{"ok":true}"#,
+            };
+            let c = CString::new(resp).unwrap();
+            host_send_result(request_id, c.as_ptr());
+        });
+    }
+
+    #[test]
+    fn async_battery_roundtrip() {
+        let p = CallbackDevicePlugin::with_async(fake_async_cb);
+        let b = p.get_battery().unwrap();
+        assert_eq!(b.level, 77.0);
+        assert!(!b.charging);
+    }
+
+    #[test]
+    fn async_clipboard_and_error() {
+        let p = CallbackDevicePlugin::with_async(fake_async_cb);
+        assert_eq!(p.get_clipboard().unwrap(), "async-hello");
+        let e = p.take_photo("/x.jpg").unwrap_err();
+        assert!(e.contains("async no camera"));
+    }
+
+    #[test]
+    fn async_response_unknown_id_is_noop() {
+        // Must not panic when the host responds for an id nobody waits on.
+        let c = CString::new(r#"{"ok":true}"#).unwrap();
+        host_send_result(999_999, c.as_ptr());
     }
 }

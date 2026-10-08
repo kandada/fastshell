@@ -41,8 +41,12 @@ impl Shell {
                 "-" | "-layout" | "-raw" => {}
                 // Unsupported output formats — tell the caller so it doesn't
                 // assume the output is actually XML/bbox-formatted.
-                "-xml" | "-bbox" | "-bbox-layout" | "-htmlmeta" | "-enc" | "-eol" | "-opw" | "-upw" | "-q" | "-v" => {
-                    crate::warn!("pdftotext: warning: option '{}' is not supported (plain text output)", args[i]);
+                "-xml" | "-bbox" | "-bbox-layout" | "-htmlmeta" | "-enc" | "-eol" | "-opw"
+                | "-upw" | "-q" | "-v" => {
+                    crate::warn!(
+                        "pdftotext: warning: option '{}' is not supported (plain text output)",
+                        args[i]
+                    );
                 }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => crate::warn!("pdftotext: warning: unsupported option '{}'", args[i]),
@@ -53,7 +57,9 @@ impl Shell {
         if files.is_empty() {
             if let Some(input) = stdin {
                 let data = input.as_bytes().to_vec();
-                return CommandOutput::success(normalize_cjk_spacing(&extract_pdf_text(&data, first_page, last_page)));
+                return CommandOutput::success(normalize_cjk_spacing(&extract_pdf_text(
+                    &data, first_page, last_page,
+                )));
             }
             return CommandOutput::error("pdftotext: missing file operand\n".to_string(), 1);
         }
@@ -62,12 +68,7 @@ impl Shell {
         for file in &files {
             let data = match self.vfs.read(file, &self.cwd) {
                 Ok(d) => d,
-                Err(e) => {
-                    return CommandOutput::error(
-                        format!("pdftotext: {}: {}\n", file, e),
-                        1,
-                    )
-                }
+                Err(e) => return CommandOutput::error(format!("pdftotext: {}: {}\n", file, e), 1),
             };
 
             match extract_pdf_text_fallback(&data, first_page, last_page) {
@@ -79,12 +80,7 @@ impl Shell {
                         output.push_str(&cleaned);
                     }
                 }
-                Err(e) => {
-                    return CommandOutput::error(
-                        format!("pdftotext: {}: {}\n", file, e),
-                        1,
-                    )
-                }
+                Err(e) => return CommandOutput::error(format!("pdftotext: {}: {}\n", file, e), 1),
             }
         }
 
@@ -93,7 +89,11 @@ impl Shell {
 }
 
 /// Extract text from PDF using pdf-extract crate, falling back to strings if that fails.
-fn extract_pdf_text_fallback(data: &[u8], first_page: Option<u32>, last_page: Option<u32>) -> Result<String, String> {
+fn extract_pdf_text_fallback(
+    data: &[u8],
+    first_page: Option<u32>,
+    last_page: Option<u32>,
+) -> Result<String, String> {
     match pdf_extract::extract_text_from_mem(data) {
         Ok(text) => {
             let pages = filter_pages(&text, first_page, last_page);
@@ -135,23 +135,33 @@ fn filter_pages(text: &str, first: Option<u32>, last: Option<u32>) -> String {
     if pages.len() <= 1 {
         let pages: Vec<&str> = text.split("\x0C").collect(); // form feed
         if pages.len() > 1 {
-            let result: Vec<&&str> = pages.iter()
+            let result: Vec<&&str> = pages
+                .iter()
                 .skip(start)
                 .take(end.map(|e| e - start + 1).unwrap_or(usize::MAX) as usize)
                 .filter(|p| !p.trim().is_empty())
                 .collect();
-            return result.iter().map(|s| s.trim()).collect::<Vec<_>>().join("\n\n");
+            return result
+                .iter()
+                .map(|s| s.trim())
+                .collect::<Vec<_>>()
+                .join("\n\n");
         }
         // Single page or unknown format
         return text.to_string();
     }
 
-    let result: Vec<&&str> = pages.iter()
+    let result: Vec<&&str> = pages
+        .iter()
         .skip(start)
         .take(end.map(|e| e - start + 1).unwrap_or(usize::MAX) as usize)
         .filter(|p| !p.trim().is_empty())
         .collect();
-    result.iter().map(|s| s.trim()).collect::<Vec<_>>().join("\n\n")
+    result
+        .iter()
+        .map(|s| s.trim())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Fallback PDF text extraction using printable ASCII strings with noise filtering.
@@ -181,9 +191,22 @@ fn extract_pdf_strings(data: &[u8]) -> String {
     }
 
     let noise_keywords = [
-        "endobj", "endstream", "stream", "xref", "trailer", "startxref",
-        "obj <</Type", "/Type /", "/Subtype", "/Filter", "/Length",
-        "/ID [", "/Info", "/Root", "/Size", "/Linearized",
+        "endobj",
+        "endstream",
+        "stream",
+        "xref",
+        "trailer",
+        "startxref",
+        "obj <</Type",
+        "/Type /",
+        "/Subtype",
+        "/Filter",
+        "/Length",
+        "/ID [",
+        "/Info",
+        "/Root",
+        "/Size",
+        "/Linearized",
     ];
 
     let mut output = String::new();
@@ -308,18 +331,25 @@ mod tests {
         let out = s.execute("pdftotext", &[file], None);
         assert_eq!(out.exit_code, 0);
         // Fallback to strings extraction should find readable text
-        assert!(out.stdout.contains("Hello World") || out.stdout.contains("test document")
-            || !out.stdout.contains("endobj"));
+        assert!(
+            out.stdout.contains("Hello World")
+                || out.stdout.contains("test document")
+                || !out.stdout.contains("endobj")
+        );
     }
 
     #[test]
     fn test_filter_pages_none() {
-        assert_eq!(super::filter_pages("page1\n\n\npage2", None, None), "page1\n\n\npage2");
+        assert_eq!(
+            super::filter_pages("page1\n\n\npage2", None, None),
+            "page1\n\n\npage2"
+        );
     }
 
     #[test]
     fn test_cjk_spacing_normalized() {
-        let input = "\n\n2 0 1 5 .0 7 -至 今\n\n谢 先 生\n\n男  | 生 日 ： 1 9 8 6 .1 0  | 广 州\n\n";
+        let input =
+            "\n\n2 0 1 5 .0 7 -至 今\n\n谢 先 生\n\n男  | 生 日 ： 1 9 8 6 .1 0  | 广 州\n\n";
         let output = super::normalize_cjk_spacing(input);
         assert_eq!(output, "2015.07-至今\n谢先生\n男|生日：1986.10|广州");
     }
@@ -354,6 +384,10 @@ mod tests {
         // -layout and the trailing `-` (stdout) must be accepted silently.
         let out = s.execute("pdftotext", &["-layout", file, "-"], None);
         assert_eq!(out.exit_code, 0);
-        assert!(!out.stderr.contains("unsupported"), "-layout should be accepted: {}", out.stderr);
+        assert!(
+            !out.stderr.contains("unsupported"),
+            "-layout should be accepted: {}",
+            out.stderr
+        );
     }
 }

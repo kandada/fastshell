@@ -1,6 +1,6 @@
 # fastshell API Reference
 
-Complete Rust SDK API reference for fastshell v0.2.2.
+Complete Rust SDK API reference for fastshell v0.3.4.
 
 ## Core Types
 
@@ -57,7 +57,7 @@ pub struct CommandResult {
 
 ```rust
 pub struct SdkInfo {
-    pub version: String,          // e.g. "0.2.2"
+    pub version: String,          // e.g. "0.3.4"
     pub platform: String,         // e.g. "macos", "linux", "android", "ios"
     pub python_available: bool,   // whether CPython engine is loaded
     pub sandbox_path: String,     // current VFS root

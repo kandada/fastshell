@@ -5,34 +5,53 @@ use crate::shell::{CommandOutput, Shell};
 use std::io::Cursor;
 
 const PIP_INSTALL_HELP: &str = "\
-Usage: pip-install [OPTIONS] [PACKAGE]...
-       pip install [PACKAGE]...
-       pip list
+Usage: pip install [PACKAGE]...
+       pip-install [PACKAGE]...
+       pip3 install [PACKAGE]...
+       python3 -m pip install [PACKAGE]...
+       pip list | pip freeze | pip show NAME | pip uninstall NAME
 
 Install pure-Python packages from PyPI into site-packages/.
 
 Only py3-none-any.whl (pure Python, no C extensions) are accepted.
 Packages with .so/.pyd files are rejected with an error.
 
+Networking uses the same HTTP stack as `curl` (with retries). Set
+FASTSHELL_PYPI_INDEX to use a mirror (e.g. https://pypi.tuna.tsinghua.edu.cn).
+
 Options:
   -l, --list   list installed packages
   -h, --help   display this help and exit
 ";
-
-const PYPI_JSON_URL: &str = "https://pypi.org/pypi/{}/json";
 
 impl Shell {
     pub fn cmd_pip_install(&self, args: &[&str]) -> CommandOutput {
         let mut packages = Vec::new();
         let mut list_mode = false;
 
-        for arg in args {
-            match *arg {
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
                 "-h" | "--help" => return CommandOutput::success(PIP_INSTALL_HELP.to_string()),
                 "-l" | "--list" | "list" => list_mode = true,
-                a if !a.starts_with('-') => packages.push(a.to_string()),
-                _ => {}
+                "-r" | "--requirement" => {
+                    if i + 1 < args.len() {
+                        if let Ok(content) = self.read_text_lossy(args[i + 1]) {
+                            for line in content.lines() {
+                                let l = line.trim();
+                                if !l.is_empty() && !l.starts_with('#') {
+                                    packages.push(l.to_string());
+                                }
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+                // `-U`/`--upgrade`/`-q`/`-y` etc. are accepted and ignored.
+                a if a.starts_with('-') => {}
+                a => packages.push(a.to_string()),
             }
+            i += 1;
         }
 
         if list_mode {
@@ -40,10 +59,7 @@ impl Shell {
         }
 
         if packages.is_empty() {
-            return CommandOutput::error(
-                "pip-install: missing package name(s)\n".to_string(),
-                1,
-            );
+            return CommandOutput::error("pip-install: missing package name(s)\n".to_string(), 1);
         }
 
         let cache_dir = std::env::var("FASTSHELL_WHEEL_CACHE")
@@ -53,13 +69,11 @@ impl Shell {
 
         let site_dir = "site-packages";
 
-        let agent = build_agent();
-
         let mut output = String::new();
         let mut failures = 0;
 
         for pkg in &packages {
-            match install_package(&agent, pkg, &cache_dir, site_dir, &self.vfs, &self.cwd) {
+            match install_package(pkg, &cache_dir, site_dir, &self.vfs, &self.cwd) {
                 Ok(msg) => {
                     output.push_str(&format!("installed {}\n", pkg));
                     if !msg.is_empty() {
@@ -77,6 +91,125 @@ impl Shell {
             CommandOutput::error(output, 1)
         } else {
             CommandOutput::success(output)
+        }
+    }
+
+    /// Unified `pip` entry — shared by the `pip` command, `pip3`, and
+    /// `python3 -m pip …`, so sub-commands behave identically everywhere.
+    pub fn cmd_pip(&mut self, args: &[&str]) -> CommandOutput {
+        match args.first().copied() {
+            Some("install") => self.cmd_pip_install(&args[1..]),
+            Some("list") | Some("freeze") => self.cmd_pip_install(&["--list"]),
+            Some("show") => match args.get(1) {
+                Some(n) => self.cmd_pip_show(n),
+                None => {
+                    CommandOutput::error("ERROR: pip show requires a package name.\n".into(), 1)
+                }
+            },
+            Some("uninstall") => match args.get(1) {
+                Some(n) => self.cmd_pip_uninstall(n),
+                None => CommandOutput::error(
+                    "ERROR: pip uninstall requires a package name.\n".into(),
+                    1,
+                ),
+            },
+            Some("-h") | Some("--help") | None => self.cmd_pip_install(&["-h"]),
+            _ => CommandOutput::error(
+                "pip: supported: install/list/freeze/show/uninstall.\n".to_string(),
+                1,
+            ),
+        }
+    }
+
+    /// `pip show NAME` — print metadata for an installed package.
+    pub fn cmd_pip_show(&self, name: &str) -> CommandOutput {
+        let site_dir = "site-packages";
+        let entries = match self.vfs.list_dir(site_dir, &self.cwd) {
+            Ok(e) => e,
+            Err(_) => {
+                return CommandOutput::error(
+                    format!("WARNING: Package(s) not found: {}\n", name),
+                    1,
+                )
+            }
+        };
+        let lower = name.to_lowercase();
+        let dist = entries.iter().find(|e| {
+            e.is_dir
+                && e.name.ends_with(".dist-info")
+                && e.name.to_lowercase().starts_with(&format!("{}-", lower))
+        });
+        match dist {
+            None => CommandOutput::error(format!("WARNING: Package(s) not found: {}\n", name), 1),
+            Some(d) => {
+                let md = self
+                    .vfs
+                    .read_to_string(&format!("{}/{}/METADATA", site_dir, d.name), &self.cwd)
+                    .unwrap_or_default();
+                let mut out = String::new();
+                for line in md.lines() {
+                    if line.starts_with("Name:")
+                        || line.starts_with("Version:")
+                        || line.starts_with("Summary:")
+                        || line.starts_with("Home-page:")
+                        || line.starts_with("Author:")
+                        || line.starts_with("License:")
+                    {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+                if out.is_empty() {
+                    out = format!("Name: {}\n", name);
+                }
+                CommandOutput::success(out + "\n")
+            }
+        }
+    }
+
+    /// `pip uninstall NAME` — remove an installed package (best effort).
+    pub fn cmd_pip_uninstall(&mut self, name: &str) -> CommandOutput {
+        let site_dir = "site-packages";
+        let entries = self.vfs.list_dir(site_dir, &self.cwd).unwrap_or_default();
+        let lower = name.to_lowercase();
+        let mut removed = false;
+
+        // Remove the versioned dist-info directory.
+        for e in &entries {
+            if e.is_dir
+                && e.name.ends_with(".dist-info")
+                && e.name.to_lowercase().starts_with(&format!("{}-", lower))
+            {
+                let _ = self
+                    .vfs
+                    .remove_dir_all(&format!("{}/{}", site_dir, e.name), &self.cwd);
+                removed = true;
+            }
+        }
+        // Remove the module directory / single-file module.
+        for e in &entries {
+            let dir_match = e.is_dir && e.name.to_lowercase() == lower;
+            let file_match = !e.is_dir && e.name.to_lowercase() == format!("{}.py", lower);
+            if dir_match {
+                let _ = self
+                    .vfs
+                    .remove_dir_all(&format!("{}/{}", site_dir, e.name), &self.cwd);
+                removed = true;
+            } else if file_match {
+                let _ = self
+                    .vfs
+                    .remove_file(&format!("{}/{}", site_dir, e.name), &self.cwd);
+                removed = true;
+            }
+        }
+
+        if removed {
+            CommandOutput::success(format!("Successfully uninstalled {}\n", name))
+        } else {
+            CommandOutput::error(
+                format!("WARNING: Skipping {} as it is not installed.\n", name),
+                1,
+            )
         }
     }
 
@@ -142,32 +275,43 @@ impl Shell {
     }
 }
 
-fn build_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(60))
-        .tls_config(build_tls())
-        .build()
+/// PyPI index base. Override for a mirror via `FASTSHELL_PYPI_INDEX`
+/// (e.g. `https://pypi.tuna.tsinghua.edu.cn`).
+fn pypi_base() -> String {
+    std::env::var("FASTSHELL_PYPI_INDEX")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://pypi.org".to_string())
 }
 
-fn build_tls() -> std::sync::Arc<rustls::ClientConfig> {
-    use rustls::crypto::CryptoProvider;
-    let provider = CryptoProvider {
-        cipher_suites: rustls::crypto::aws_lc_rs::default_provider().cipher_suites.to_vec(),
-        ..rustls::crypto::aws_lc_rs::default_provider()
-    };
-    let root_store =
-        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(provider.into())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    std::sync::Arc::new(config)
+/// HTTP GET through the SAME network stack as `curl` (shared `http_request_ex`),
+/// with a few retries to ride out transient route/DNS hiccups. This replaces the
+/// previous bespoke ureq+TLS client, which was the source of the device-only
+/// `ENETUNREACH` flakiness.
+fn pip_http_get(url: &str, what: &str) -> Result<Vec<u8>, String> {
+    use crate::shell::commands::curl::{http_request_ex, HttpConfig};
+    let mut last = String::new();
+    for attempt in 0..3u32 {
+        let cfg = HttpConfig {
+            method: "GET".to_string(),
+            url: url.to_string(),
+            follow_redirects: true,
+            request_timeout_secs: 60.0,
+            connect_timeout_secs: 15.0,
+            ..Default::default()
+        };
+        match http_request_ex(&cfg) {
+            Ok(r) => return Ok(r.body),
+            Err(e) => last = e.message.clone(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            300 * u64::from(attempt + 1),
+        ));
+    }
+    Err(format!("{what}: {last}"))
 }
 
 fn install_package(
-    agent: &ureq::Agent,
     pkg: &str,
     cache_dir: &std::path::Path,
     site_dir: &str,
@@ -178,7 +322,7 @@ fn install_package(
     let (pkg_name, version) = parse_pkg_spec(pkg);
 
     // 2. Query PyPI
-    let info = fetch_pypi_info(agent, pkg_name)?;
+    let info = fetch_pypi_info(pkg_name)?;
 
     // 3. Find the best matching wheel for the requested version (or latest)
     let wheel_file = find_best_wheel(&info, version).ok_or_else(|| {
@@ -206,14 +350,8 @@ fn install_package(
         .map_err(|e| e.to_string())?;
         data
     } else {
-        // 5. Download
-        let resp = agent
-            .get(wheel_url)
-            .call()
-            .map_err(|e| format!("download failed: {}", e))?;
-        let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut resp.into_reader(), &mut data)
-            .map_err(|e| format!("read failed: {}", e))?;
+        // 5. Download (same network stack as curl, with retries)
+        let data = pip_http_get(wheel_url, "download failed")?;
 
         // Save to cache
         if let Some(parent) = cached.parent() {
@@ -276,10 +414,7 @@ fn strip_dist_info_version(dist_info: &str) -> String {
     base.to_string()
 }
 
-fn find_best_wheel<'a>(
-    info: &'a [WheelFile],
-    version: Option<&str>,
-) -> Option<&'a WheelFile> {
+fn find_best_wheel<'a>(info: &'a [WheelFile], version: Option<&str>) -> Option<&'a WheelFile> {
     let candidates: Vec<&WheelFile> = info
         .iter()
         .filter(|f| {
@@ -300,15 +435,9 @@ fn find_best_wheel<'a>(
     }
 }
 
-fn fetch_pypi_info(agent: &ureq::Agent, pkg: &str) -> Result<Vec<WheelFile>, String> {
-    let url = PYPI_JSON_URL.replace("{}", pkg);
-    let resp = agent
-        .get(&url)
-        .call()
-        .map_err(|e| format!("PyPI query failed: {}", e))?;
-    let mut body = Vec::new();
-    std::io::Read::read_to_end(&mut resp.into_reader(), &mut body)
-        .map_err(|e| format!("read failed: {}", e))?;
+fn fetch_pypi_info(pkg: &str) -> Result<Vec<WheelFile>, String> {
+    let url = format!("{}/pypi/{}/json", pypi_base().trim_end_matches('/'), pkg);
+    let body = pip_http_get(&url, "PyPI query failed")?;
 
     let json: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| format!("PyPI JSON parse error: {}", e))?;
@@ -351,11 +480,12 @@ fn parse_version(v: &str) -> Vec<i64> {
 
 fn validate_pure_python_wheel(data: &[u8], pkg: &str) -> Result<(), String> {
     let cursor = Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("bad wheel file: {}", e))?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("bad wheel file: {}", e))?;
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| format!("read wheel: {}", e))?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("read wheel: {}", e))?;
         let name = entry.name();
         if name.ends_with(".so") || name.ends_with(".pyd") {
             return Err(format!(
@@ -375,8 +505,7 @@ fn extract_wheel(
     cwd: &str,
 ) -> Result<(), String> {
     let cursor = Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("bad wheel file: {}", e))?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("bad wheel file: {}", e))?;
 
     // Classify: single-file module (e.g. six.py) or directory package
     let (is_single_file, pkg_root) = classify_package(&mut archive)?;
@@ -406,7 +535,9 @@ fn classify_package<R: std::io::Read + std::io::Seek>(
     let mut has_dir_entry = false;
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| format!("read wheel: {}", e))?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("read wheel: {}", e))?;
         let name = entry.name().to_string();
 
         if name.contains(".dist-info/") || name.contains(".data/") {
@@ -414,10 +545,7 @@ fn classify_package<R: std::io::Read + std::io::Seek>(
         }
 
         let top = name.split('/').next().unwrap_or("");
-        if top.is_empty()
-            || top.ends_with(".dist-info")
-            || top.ends_with(".data")
-        {
+        if top.is_empty() || top.ends_with(".dist-info") || top.ends_with(".data") {
             continue;
         }
 
@@ -451,7 +579,9 @@ fn extract_single_file_wheel<R: std::io::Read + std::io::Seek>(
     let _ = vfs.create_dir_all(site_dir, cwd);
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("read wheel: {}", e))?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("read wheel: {}", e))?;
         let name = entry.name().to_string();
 
         if entry.is_dir() {
@@ -501,7 +631,9 @@ fn extract_directory_wheel<R: std::io::Read + std::io::Seek>(
     let pkg_prefix = format!("{}/", pkg_dir);
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("read wheel: {}", e))?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("read wheel: {}", e))?;
         let name = entry.name().to_string();
 
         if name.contains(".data/") {
@@ -624,7 +756,10 @@ mod tests {
         // six-like: single six.py + dist-info
         let data = make_test_wheel(&[
             ("six.py", b"def foo(): pass\n"),
-            ("six-1.17.0.dist-info/METADATA", b"Name: six\nVersion: 1.17.0\n"),
+            (
+                "six-1.17.0.dist-info/METADATA",
+                b"Name: six\nVersion: 1.17.0\n",
+            ),
         ]);
         let cursor = Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
@@ -661,7 +796,10 @@ mod tests {
 
         let data = make_test_wheel(&[
             ("six.py", b"def foo():\n    return 42\n"),
-            ("six-1.17.0.dist-info/METADATA", b"Name: six\nVersion: 1.17.0\n"),
+            (
+                "six-1.17.0.dist-info/METADATA",
+                b"Name: six\nVersion: 1.17.0\n",
+            ),
         ]);
         let cursor = Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
@@ -703,8 +841,15 @@ mod tests {
         ]);
         let mut cursor = Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
-        extract_directory_wheel(&mut archive, "requests", "site-packages/requests", "site-packages", &vfs, "/")
-            .unwrap();
+        extract_directory_wheel(
+            &mut archive,
+            "requests",
+            "site-packages/requests",
+            "site-packages",
+            &vfs,
+            "/",
+        )
+        .unwrap();
 
         let sub_entries = vfs.list_dir("site-packages/requests", "/").unwrap();
         assert!(sub_entries.iter().any(|e| e.name == "__init__.py"));
@@ -818,9 +963,13 @@ mod tests {
         let mut writer = zip::ZipWriter::new(cursor);
         let opts =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        writer.start_file("charset_normalizer/__init__.py", opts).unwrap();
+        writer
+            .start_file("charset_normalizer/__init__.py", opts)
+            .unwrap();
         std::io::Write::write_all(&mut writer, b"__version__ = '3.5.0'\n").unwrap();
-        writer.start_file("charset_normalizer/api.py", opts).unwrap();
+        writer
+            .start_file("charset_normalizer/api.py", opts)
+            .unwrap();
         std::io::Write::write_all(&mut writer, b"def from_bytes(x): pass\n").unwrap();
         writer
             .start_file("charset_normalizer-3.5.0.dist-info/METADATA", opts)
@@ -833,7 +982,9 @@ mod tests {
         let entries = vfs.list_dir("site-packages", "/").unwrap();
         // Must be charset_normalizer (underscore), NOT charset-normalizer (hyphen)
         assert!(
-            entries.iter().any(|e| e.name == "charset_normalizer" && e.is_dir),
+            entries
+                .iter()
+                .any(|e| e.name == "charset_normalizer" && e.is_dir),
             "module dir should use underscore name, got: {:?}",
             entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
         );
@@ -842,7 +993,9 @@ mod tests {
             "hyphenated dist name should NOT be used as dir"
         );
 
-        let sub = vfs.list_dir("site-packages/charset_normalizer", "/").unwrap();
+        let sub = vfs
+            .list_dir("site-packages/charset_normalizer", "/")
+            .unwrap();
         assert!(sub.iter().any(|e| e.name == "__init__.py"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -871,11 +1024,7 @@ mod tests {
             .unwrap();
         shell
             .vfs
-            .write_bytes(
-                "site-packages/colorama/__init__.py",
-                "/",
-                b"x=1",
-            )
+            .write_bytes("site-packages/colorama/__init__.py", "/", b"x=1")
             .unwrap();
 
         let out = shell.cmd_pip_list();
@@ -899,10 +1048,7 @@ mod tests {
         let shell = Shell::new(vfs);
 
         // Create a single-file module with its dist-info
-        shell
-            .vfs
-            .create_dir_all("site-packages", "/")
-            .unwrap();
+        shell.vfs.create_dir_all("site-packages", "/").unwrap();
         shell
             .vfs
             .write_bytes("site-packages/six.py", "/", b"x=1")
@@ -1003,7 +1149,7 @@ mod tests {
         let shell = Shell::new(vfs);
         let out = shell.cmd_pip_install(&["-h"]);
         assert_eq!(out.exit_code, 0);
-        assert!(out.stdout.contains("Usage: pip-install"));
+        assert!(out.stdout.contains("pip install"));
     }
 
     #[test]

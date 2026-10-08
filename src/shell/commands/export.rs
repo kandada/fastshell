@@ -34,6 +34,16 @@ impl Shell {
             return CommandOutput::success(String::new());
         }
 
+        if args[0] == "-f" {
+            // `export -f NAME` marks functions for export. fastshell has no real
+            // child processes; `sh -c` already sees in-process functions, so we
+            // just record the names (and never error).
+            for &name in &args[1..] {
+                self.exported_functions.insert(name.to_string());
+            }
+            return CommandOutput::success(String::new());
+        }
+
         // export KEY (no =) — mark existing var as exported
         // export KEY=val — handled by consume_assignments, but called here too
         for &arg in args {

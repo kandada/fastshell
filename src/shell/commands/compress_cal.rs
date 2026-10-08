@@ -48,6 +48,9 @@ impl Shell {
             }
         }
         if to_stdout {
+            if !output_bytes.is_empty() {
+                self.set_binary_out(output_bytes.clone());
+            }
             CommandOutput::success(String::from_utf8_lossy(&output_bytes).to_string())
         } else {
             CommandOutput::success(String::new())
@@ -67,6 +70,18 @@ impl Shell {
             }
         }
         if files.is_empty() {
+            if let Some(bytes) = self.take_binary_in() {
+                let mut out = Vec::new();
+                if bzip2::read::BzDecoder::new(&bytes[..])
+                    .read_to_end(&mut out)
+                    .is_ok()
+                {
+                    if !out.is_empty() {
+                        self.set_binary_out(out.clone());
+                    }
+                    return CommandOutput::success(String::from_utf8_lossy(&out).to_string());
+                }
+            }
             return CommandOutput::error("bunzip2: missing file operand\n".to_string(), 1);
         }
         let mut output_bytes = Vec::new();
@@ -94,6 +109,9 @@ impl Shell {
             }
         }
         if to_stdout {
+            if !output_bytes.is_empty() {
+                self.set_binary_out(output_bytes.clone());
+            }
             CommandOutput::success(String::from_utf8_lossy(&output_bytes).to_string())
         } else {
             CommandOutput::success(String::new())
@@ -101,6 +119,36 @@ impl Shell {
     }
 
     pub fn cmd_xz(&self, args: &[&str]) -> CommandOutput {
+        // `xz -d` / `--decompress` / `-dc` mean DECOMPRESS (previously they were
+        // ignored, so `xz -d f.xz` re-compressed into `f.xz.xz`).
+        let mut decompress = false;
+        for a in args {
+            if *a == "--decompress" || *a == "--uncompress" || *a == "-d" {
+                decompress = true;
+            } else if a.starts_with('-') && !a.starts_with("--") && a[1..].contains('d') {
+                decompress = true;
+            }
+        }
+        if decompress {
+            let cleaned: Vec<String> = args
+                .iter()
+                .filter_map(|a| {
+                    if *a == "--decompress" || *a == "--uncompress" || *a == "-d" {
+                        return None;
+                    }
+                    if a.starts_with('-') && !a.starts_with("--") {
+                        let chars: String = a[1..].chars().filter(|c| *c != 'd').collect();
+                        if chars.is_empty() {
+                            return None;
+                        }
+                        return Some(format!("-{}", chars));
+                    }
+                    Some(a.to_string())
+                })
+                .collect();
+            let refs: Vec<&str> = cleaned.iter().map(|s| s.as_str()).collect();
+            return self.cmd_unxz(&refs);
+        }
         let mut to_stdout = false;
         let mut keep = false;
         let mut files = Vec::new();
@@ -138,6 +186,9 @@ impl Shell {
             }
         }
         if to_stdout {
+            if !output_bytes.is_empty() {
+                self.set_binary_out(output_bytes.clone());
+            }
             CommandOutput::success(String::from_utf8_lossy(&output_bytes).to_string())
         } else {
             CommandOutput::success(String::new())
@@ -157,6 +208,18 @@ impl Shell {
             }
         }
         if files.is_empty() {
+            if let Some(bytes) = self.take_binary_in() {
+                let mut out = Vec::new();
+                if liblzma::read::XzDecoder::new(&bytes[..])
+                    .read_to_end(&mut out)
+                    .is_ok()
+                {
+                    if !out.is_empty() {
+                        self.set_binary_out(out.clone());
+                    }
+                    return CommandOutput::success(String::from_utf8_lossy(&out).to_string());
+                }
+            }
             return CommandOutput::error("unxz: missing file operand\n".to_string(), 1);
         }
         let mut output_bytes = Vec::new();
@@ -182,6 +245,9 @@ impl Shell {
             }
         }
         if to_stdout {
+            if !output_bytes.is_empty() {
+                self.set_binary_out(output_bytes.clone());
+            }
             CommandOutput::success(String::from_utf8_lossy(&output_bytes).to_string())
         } else {
             CommandOutput::success(String::new())
@@ -223,7 +289,7 @@ impl Shell {
             return CommandOutput::error("dos2unix: missing file operand\n".to_string(), 1);
         }
         for file in &files {
-            let content = match self.vfs.read_to_string(file, &self.cwd) {
+            let content = match self.read_text_lossy(file) {
                 Ok(c) => c,
                 Err(e) => return CommandOutput::error(format!("dos2unix: {}: {}\n", file, e), 1),
             };
@@ -245,7 +311,7 @@ impl Shell {
             return CommandOutput::error("unix2dos: missing file operand\n".to_string(), 1);
         }
         for file in &files {
-            let content = match self.vfs.read_to_string(file, &self.cwd) {
+            let content = match self.read_text_lossy(file) {
                 Ok(c) => c,
                 Err(e) => return CommandOutput::error(format!("unix2dos: {}: {}\n", file, e), 1),
             };
@@ -267,18 +333,37 @@ impl Shell {
         let mut year: i32 = cur_year;
 
         let mut i = 0;
+        let mut nums: Vec<i64> = Vec::new();
         while i < args.len() {
             if !args[i].starts_with('-') {
-                if let Ok(m) = args[i].parse::<u32>() {
-                    if m >= 1 && m <= 12 {
-                        month = m;
-                    } else if m > 12 {
-                        month = (m % 100) as u32;
-                        year = (m / 100) as i32;
-                    }
+                if let Ok(v) = args[i].parse::<i64>() {
+                    nums.push(v);
                 }
             }
             i += 1;
+        }
+        match nums.len() {
+            0 => {}
+            // `cal MONTH YEAR`
+            1 if (1..=12).contains(&nums[0]) => month = nums[0] as u32,
+            // `cal MMYY` (e.g. 0120) or `cal YEAR`
+            1 => {
+                let v = nums[0];
+                if v >= 100 && (1..=12).contains(&(v % 100)) {
+                    month = (v % 100) as u32;
+                    year = (v / 100) as i32;
+                } else {
+                    year = v as i32;
+                }
+            }
+            _ => {
+                month = nums[0] as u32;
+                year = nums[1] as i32;
+            }
+        }
+        // Never index out of range on a bad month.
+        if !(1..=12).contains(&month) {
+            month = cur_month as u32;
         }
 
         let days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];

@@ -66,7 +66,15 @@ impl Shell {
             }
         } else {
             for file in &files {
-                match self.vfs.read_to_string(file, &self.cwd) {
+                // `-` means read from stdin (GNU conv: one `-` per file slot).
+                if file == "-" {
+                    match stdin {
+                        Some(s) => columns.push(s.lines().map(|l| l.to_string()).collect()),
+                        None => columns.push(Vec::new()),
+                    }
+                    continue;
+                }
+                match self.read_text_lossy(file) {
                     Ok(content) => {
                         columns.push(content.lines().map(|l| l.to_string()).collect());
                     }
@@ -140,14 +148,56 @@ impl Shell {
             vfs_root.join(self.cwd.trim_start_matches('/'))
         };
 
-        let child = match std::process::Command::new(cmd)
-            .args(&cmd_args)
-            .current_dir(&cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+        // Only spawn when external execution is allowed; otherwise fall straight
+        // to the in-process path (avoids Android seccomp → SIGSYS).
+        let spawn_result = if self.allow_subprocess {
+            std::process::Command::new(cmd)
+                .args(&cmd_args)
+                .current_dir(&cwd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "external commands are disabled",
+            ))
+        };
+        let child = match spawn_result {
             Ok(c) => c,
+            // Not a real binary → a fastshell builtin (`sleep`, `wget`, `battery`,
+            // …). Run it in-process, but arm a watchdog that sets the shell
+            // cancel flag after `duration` so long-running builtins actually
+            // abort (they poll `cancel`). Restore the previous flag afterwards.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                use std::sync::Arc;
+                let cancel = self.cancel.clone();
+                let prev = cancel.load(Ordering::SeqCst);
+                cancel.store(false, Ordering::SeqCst);
+                let done = Arc::new(AtomicBool::new(false));
+                let wd_cancel = cancel.clone();
+                let wd_done = done.clone();
+                std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + duration;
+                    while std::time::Instant::now() < deadline {
+                        if wd_done.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    if !wd_done.load(Ordering::SeqCst) {
+                        wd_cancel.store(true, Ordering::SeqCst);
+                    }
+                });
+                let out = self.execute(cmd, &cmd_args, None);
+                done.store(true, Ordering::SeqCst);
+                cancel.store(prev, Ordering::SeqCst);
+                if out.exit_code == 143 && out.stderr.contains("cancelled") {
+                    return CommandOutput::error("timeout: command timed out\n".to_string(), 124);
+                }
+                return out;
+            }
             Err(e) => return CommandOutput::error(format!("timeout: failed to spawn: {}\n", e), 1),
         };
 

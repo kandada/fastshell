@@ -289,17 +289,20 @@ fn e2e_permission_multiple_hosts() {
         python_home: String::new(),
     });
 
-    let r = sdk.execute("curl http://a.com");
-    assert!(r.stderr.contains("PERMISSION_NEEDED:network:a.com"));
+    // Use RFC 2606 reserved TLDs so nothing ever opens a real socket: the
+    // ungranted hosts are rejected by the permission gate before any network
+    // I/O, and the grant is observed via `check_permission`.
+    let r = sdk.execute("curl http://a.invalid");
+    assert!(r.stderr.contains("PERMISSION_NEEDED:network:a.invalid"));
 
-    let r = sdk.execute("curl https://b.org");
-    assert!(r.stderr.contains("PERMISSION_NEEDED:network:b.org"));
+    let r = sdk.execute("curl https://b.invalid");
+    assert!(r.stderr.contains("PERMISSION_NEEDED:network:b.invalid"));
 
-    sdk.set_permission("network:a.com", true);
-    let r = sdk.execute("curl http://a.com");
-    assert_ne!(r.exit_code, EXIT_NEED_PERMISSION);
+    sdk.set_permission("network:a.invalid", true);
+    assert_eq!(sdk.check_permission("network:a.invalid"), Some(true));
 
-    let r = sdk.execute("curl https://b.org");
+    // A different, ungranted host is still gated.
+    let r = sdk.execute("curl https://b.invalid");
     assert_eq!(r.exit_code, EXIT_NEED_PERMISSION);
 }
 
@@ -320,7 +323,7 @@ fn e2e_subprocess_disabled_rejects_unknown() {
 
     let r = sdk.execute("some_random_tool_xyz --flag");
     assert_eq!(r.exit_code, 127);
-    assert!(r.stderr.contains("subprocess disabled"));
+    assert!(r.stderr.contains("command not found"));
 }
 
 #[test]

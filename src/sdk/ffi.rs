@@ -2,9 +2,36 @@
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
 use crate::sdk::Fastshell;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, OnceLock};
 
 static SDK_INSTANCE: OnceLock<Mutex<Fastshell>> = OnceLock::new();
+
+/// Extract the runtime + cancel handles under a *short* lock.
+///
+/// The returned handles let the caller run a command **without** holding the
+/// global `SDK_INSTANCE` mutex for its whole duration. This is what keeps a
+/// long `git status`/`run_shell` from blocking `cancel_execution`,
+/// `set_permission` and every other FFI call (previously all serialized behind
+/// the execute lock — a hung command could not even be cancelled).
+fn sdk_handles() -> Option<(
+    Arc<Mutex<crate::bridge::Runtime>>,
+    Arc<AtomicBool>,
+    Arc<std::sync::atomic::AtomicU64>,
+    u64,
+)> {
+    let sdk = get_sdk();
+    let guard = sdk.lock().unwrap_or_else(|e| e.into_inner());
+    if !guard.is_initialized() {
+        return None;
+    }
+    Some((
+        guard.runtime_ref(),
+        guard.cancel_handle(),
+        guard.deadline_handle(),
+        guard.command_timeout_ms(),
+    ))
+}
 
 /// Returns a reference to the shared SDK instance if it has already been
 /// initialized (e.g. by the host app via fastshell_init()). Returns None
@@ -22,7 +49,10 @@ fn get_sdk() -> &'static Mutex<Fastshell> {
 }
 
 // Used by the Android jni_direct module below; dead on other targets.
-#[cfg_attr(not(all(target_os = "android", feature = "jni_direct")), allow(dead_code))]
+#[cfg_attr(
+    not(all(target_os = "android", feature = "jni_direct")),
+    allow(dead_code)
+)]
 pub(crate) fn get_sdk_internal() -> &'static Mutex<Fastshell> {
     SDK_INSTANCE.get_or_init(|| Mutex::new(Fastshell::new()))
 }
@@ -32,7 +62,8 @@ fn result_to_json(result: &crate::sdk::types::CommandResult) -> String {
         "stdout": result.stdout,
         "stderr": result.stderr,
         "exit_code": result.exit_code,
-    }).to_string()
+    })
+    .to_string()
 }
 
 fn error_to_json(msg: &str, code: i32) -> String {
@@ -40,7 +71,8 @@ fn error_to_json(msg: &str, code: i32) -> String {
         "stdout": "",
         "stderr": msg,
         "exit_code": code,
-    }).to_string()
+    })
+    .to_string()
 }
 
 #[no_mangle]
@@ -60,9 +92,9 @@ pub extern "C" fn fastshell_free_string(ptr: *mut std::os::raw::c_char) {
 #[cfg(all(target_os = "android", feature = "jni_direct"))]
 pub mod android {
     use super::*;
-    use jni::JNIEnv;
     use jni::objects::{JClass, JObject, JString};
     use jni::sys::jstring;
+    use jni::JNIEnv;
     use std::sync::OnceLock;
 
     #[no_mangle]
@@ -111,8 +143,15 @@ pub mod android {
             }
         };
 
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute(&command);
+        // Run WITHOUT holding the global SDK lock (see `sdk_handles`).
+        let result = match sdk_handles() {
+            Some((rt, cancel, deadline, timeout)) => {
+                crate::sdk::execute_with_runtime(rt, cancel, deadline, timeout, &command)
+            }
+            None => crate::sdk::types::CommandResult::error(
+                "SDK not initialized. Call init() first.".to_string(),
+            ),
+        };
         let json = result_to_json(&result);
         env.new_string(json).unwrap().into_raw()
     }
@@ -122,8 +161,10 @@ pub mod android {
         env: JNIEnv<'local>,
         _class: JClass<'local>,
     ) -> jstring {
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = sdk.get_cwd();
+        let cwd = match sdk_handles() {
+            Some((rt, _, _, _)) => crate::sdk::get_cwd_with_runtime(rt),
+            None => "/".to_string(),
+        };
         env.new_string(cwd).unwrap().into_raw()
     }
 
@@ -216,8 +257,12 @@ pub mod android {
                 return env.new_string(json).unwrap().into_raw();
             }
         };
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute_python(&code);
+        let result = match sdk_handles() {
+            Some((rt, _, _, _)) => crate::sdk::execute_python_with_runtime(rt, &code),
+            None => crate::sdk::types::CommandResult::error(
+                "SDK not initialized. Call init() first.".to_string(),
+            ),
+        };
         let json = result_to_json(&result);
         env.new_string(json).unwrap().into_raw()
     }
@@ -235,8 +280,12 @@ pub mod android {
                 return env.new_string(json).unwrap().into_raw();
             }
         };
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute_python_script(&script_path);
+        let result = match sdk_handles() {
+            Some((rt, _, _, _)) => crate::sdk::execute_python_script_with_runtime(rt, &script_path),
+            None => crate::sdk::types::CommandResult::error(
+                "SDK not initialized. Call init() first.".to_string(),
+            ),
+        };
         let json = result_to_json(&result);
         env.new_string(json).unwrap().into_raw()
     }
@@ -245,47 +294,87 @@ pub mod android {
 #[cfg(target_os = "ios")]
 pub mod ios {
     use super::*;
+    use std::os::raw::c_char;
 
-    #[no_mangle]
-    pub extern "C" fn fastshell_ios_init(
-        sandbox_path: *const std::os::raw::c_char,
-    ) -> *const std::os::raw::c_char {
-        let sandbox_path = unsafe {
-            std::ffi::CStr::from_ptr(sandbox_path)
-                .to_string_lossy()
-                .to_string()
-        };
+    /// NUL-safe conversion of a result JSON into a C string. `CString::new`
+    /// fails on an embedded NUL; a panic there would abort the whole app
+    /// (Rust 1.81+ `extern "C"` unwind = abort).
+    fn to_c(s: String) -> *const c_char {
+        match std::ffi::CString::new(s) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ffi::CString::new(
+                r#"{"stdout":"","stderr":"output contained NUL","exit_code":1}"#,
+            )
+            .expect("static JSON has no NUL")
+            .into_raw(),
+        }
+    }
 
-        let mut sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let config = crate::sdk::types::Config {
-            sandbox_path: sandbox_path.clone(),
-            python_enabled: true,
-            python_home: format!("{}/python", sandbox_path),
-            allow_subprocess: false,
-            network_ask_permission: false,
-            command_timeout_ms: 300_000,
-            ..crate::sdk::types::Config::default()
-        };
-
-        match sdk.init(config) {
-            Ok(()) => std::ffi::CString::new(error_to_json("", 0)).unwrap().into_raw(),
-            Err(e) => std::ffi::CString::new(error_to_json(&e, 1)).unwrap().into_raw(),
+    /// Run an FFI body, converting a panic into an error JSON instead of
+    /// letting it unwind across `extern "C"` (which aborts the process).
+    fn guard(f: impl FnOnce() -> String) -> *const c_char {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(s) => to_c(s),
+            Err(_) => to_c(error_to_json("fastshell: internal panic", 1)),
         }
     }
 
     #[no_mangle]
-    pub extern "C" fn fastshell_ios_execute(
-        command: *const std::os::raw::c_char,
-    ) -> *const std::os::raw::c_char {
-        let command = unsafe {
-            std::ffi::CStr::from_ptr(command)
-                .to_string_lossy()
-                .to_string()
-        };
+    pub extern "C" fn fastshell_ios_init(
+        sandbox_path: *const std::os::raw::c_char,
+    ) -> *const c_char {
+        guard(|| {
+            if sandbox_path.is_null() {
+                return error_to_json("null sandbox_path", 1);
+            }
+            let sandbox_path = unsafe {
+                std::ffi::CStr::from_ptr(sandbox_path)
+                    .to_string_lossy()
+                    .to_string()
+            };
 
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute(&command);
-        std::ffi::CString::new(result_to_json(&result)).unwrap().into_raw()
+            let mut sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
+            let config = crate::sdk::types::Config {
+                sandbox_path: sandbox_path.clone(),
+                python_enabled: true,
+                python_home: format!("{}/python", sandbox_path),
+                allow_subprocess: false,
+                network_ask_permission: false,
+                command_timeout_ms: 300_000,
+                ..crate::sdk::types::Config::default()
+            };
+
+            match sdk.init(config) {
+                Ok(()) => error_to_json("", 0),
+                Err(e) => error_to_json(&e, 1),
+            }
+        })
+    }
+
+    #[no_mangle]
+    pub extern "C" fn fastshell_ios_execute(command: *const std::os::raw::c_char) -> *const c_char {
+        guard(|| {
+            if command.is_null() {
+                return error_to_json("null command", 1);
+            }
+            let command = unsafe {
+                std::ffi::CStr::from_ptr(command)
+                    .to_string_lossy()
+                    .to_string()
+            };
+
+            // Run WITHOUT holding the global SDK lock (see `sdk_handles`), so a
+            // long command can never block cancel/permission/other FFI calls.
+            let result = match sdk_handles() {
+                Some((rt, cancel, deadline, timeout)) => {
+                    crate::sdk::execute_with_runtime(rt, cancel, deadline, timeout, &command)
+                }
+                None => crate::sdk::types::CommandResult::error(
+                    "SDK not initialized. Call init() first.".to_string(),
+                ),
+            };
+            result_to_json(&result)
+        })
     }
 
     #[no_mangle]
@@ -293,19 +382,26 @@ pub mod ios {
         resource: *const std::os::raw::c_char,
         allowed: u8,
     ) {
-        let resource = unsafe {
-            std::ffi::CStr::from_ptr(resource)
-                .to_string_lossy()
-                .to_string()
-        };
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        sdk.set_permission(&resource, allowed != 0);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if resource.is_null() {
+                return;
+            }
+            let resource = unsafe {
+                std::ffi::CStr::from_ptr(resource)
+                    .to_string_lossy()
+                    .to_string()
+            };
+            let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
+            sdk.set_permission(&resource, allowed != 0);
+        }));
     }
 
     #[no_mangle]
     pub extern "C" fn fastshell_ios_cancel_execution() {
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        sdk.cancel_execution();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
+            sdk.cancel_execution();
+        }));
     }
 }
 
@@ -353,28 +449,53 @@ pub mod capi {
         }
     }
 
+    /// Run an FFI body, converting a panic into an error JSON instead of
+    /// letting it unwind across `extern "C"` (which aborts the process).
+    fn guard(f: impl FnOnce() -> String) -> *mut c_char {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(s) => into_c_string(s),
+            Err(_) => into_c_string(error_to_json("fastshell: internal panic", 1)),
+        }
+    }
+
     #[no_mangle]
     pub extern "C" fn fastshell_init(sandbox_path: *const c_char) -> *mut c_char {
-        let sandbox_path = match cstr_to_string(sandbox_path) {
-            Some(s) => s,
-            None => return into_c_string(error_to_json("Invalid path argument", 1)),
-        };
+        guard(|| {
+            let sandbox_path = match cstr_to_string(sandbox_path) {
+                Some(s) => s,
+                None => return error_to_json("Invalid path argument", 1),
+            };
 
-        let mut sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let config = crate::sdk::types::Config {
-            sandbox_path: sandbox_path.clone(),
-            python_enabled: std::env::var("FASTSHELL_DISABLE_PYTHON").is_err(),
-            python_home: format!("{}/python", sandbox_path),
-            allow_subprocess: false,
-            command_timeout_ms: 300_000,
-            ..crate::sdk::types::Config::default()
-        };
+            let mut sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
+            let config = crate::sdk::types::Config {
+                sandbox_path: sandbox_path.clone(),
+                python_enabled: std::env::var("FASTSHELL_DISABLE_PYTHON").is_err(),
+                python_home: format!("{}/python", sandbox_path),
+                allow_subprocess: false,
+                command_timeout_ms: 300_000,
+                ..crate::sdk::types::Config::default()
+            };
 
-        let json = match sdk.init(config) {
-            Ok(()) => error_to_json("", 0),
-            Err(e) => error_to_json(&e, 1),
-        };
-        into_c_string(json)
+            match sdk.init(config) {
+                Ok(()) => error_to_json("", 0),
+                Err(e) => error_to_json(&e, 1),
+            }
+        })
+    }
+
+    /// Rebuild the global SDK instance's device plugin from the registered
+    /// callbacks (async preferred). Shared by both sync/async registration.
+    fn install_global_device_plugin() {
+        let plugin = crate::sdk::device_callback::global_device_plugin();
+        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
+        match plugin {
+            Some(p) => sdk.register_plugin(p),
+            None => {
+                if let Ok(mut p) = sdk.plugin_ref.lock() {
+                    *p = None;
+                }
+            }
+        }
     }
 
     /// Registers (or clears with NULL) the host device-capability callback.
@@ -388,57 +509,85 @@ pub mod capi {
     ) {
         // Store globally so per-task fastshell instances (aacode-rs) inherit it.
         crate::sdk::device_callback::set_global_device_callback(cb);
-        // Also install into the current global SDK instance if already init'd.
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        match cb {
-            Some(f) => sdk.register_plugin(Box::new(
-                crate::sdk::device_callback::CallbackDevicePlugin::new(f),
-            )),
-            None => {
-                if let Ok(mut p) = sdk.plugin_ref.lock() {
-                    *p = None;
-                }
-            }
-        }
+        install_global_device_plugin();
+    }
+
+    /// Registers (or clears with NULL) the **asynchronous** device callback
+    /// (`fn(method, args_json, request_id)`). Preferred over the sync variant
+    /// when both are set: the host returns immediately and later calls
+    /// `fastshell_device_response(request_id, json)` with the result. This is
+    /// the generic contract for every host (iOS / Android / desktop).
+    #[no_mangle]
+    pub extern "C" fn fastshell_register_device_callback_async(
+        cb: Option<crate::sdk::device_callback::DeviceCallbackAsyncFn>,
+    ) {
+        crate::sdk::device_callback::set_global_device_callback_async(cb);
+        install_global_device_plugin();
+    }
+
+    /// Host → fastshell result delivery for an async device request.
+    /// `request_id` is the value passed to the async callback; `json` is a
+    /// UTF-8 C string that this side copies (the host owns its allocation).
+    #[no_mangle]
+    pub extern "C" fn fastshell_device_response(request_id: u64, json: *const c_char) {
+        crate::sdk::device_callback::host_send_result(request_id, json);
     }
 
     #[no_mangle]
     pub extern "C" fn fastshell_execute(command: *const c_char) -> *mut c_char {
-        let command = match cstr_to_string(command) {
-            Some(s) => s,
-            None => return into_c_string(error_to_json("Invalid command argument", 1)),
-        };
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute(&command);
-        into_c_string(result_to_json(&result))
+        guard(|| {
+            let command = match cstr_to_string(command) {
+                Some(s) => s,
+                None => return error_to_json("Invalid command argument", 1),
+            };
+            // Run WITHOUT holding the global SDK lock (see `sdk_handles`).
+            match sdk_handles() {
+                Some((rt, cancel, deadline, timeout)) => result_to_json(
+                    &crate::sdk::execute_with_runtime(rt, cancel, deadline, timeout, &command),
+                ),
+                None => error_to_json("SDK not initialized. Call init() first.", 1),
+            }
+        })
     }
 
     #[no_mangle]
     pub extern "C" fn fastshell_execute_python(code: *const c_char) -> *mut c_char {
-        let code = match cstr_to_string(code) {
-            Some(s) => s,
-            None => return into_c_string(error_to_json("Invalid code argument", 1)),
-        };
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute_python(&code);
-        into_c_string(result_to_json(&result))
+        guard(|| {
+            let code = match cstr_to_string(code) {
+                Some(s) => s,
+                None => return error_to_json("Invalid code argument", 1),
+            };
+            match sdk_handles() {
+                Some((rt, _, _, _)) => {
+                    result_to_json(&crate::sdk::execute_python_with_runtime(rt, &code))
+                }
+                None => error_to_json("SDK not initialized. Call init() first.", 1),
+            }
+        })
     }
 
     #[no_mangle]
     pub extern "C" fn fastshell_execute_python_script(script_path: *const c_char) -> *mut c_char {
-        let script_path = match cstr_to_string(script_path) {
-            Some(s) => s,
-            None => return into_c_string(error_to_json("Invalid script path", 1)),
-        };
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute_python_script(&script_path);
-        into_c_string(result_to_json(&result))
+        guard(|| {
+            let script_path = match cstr_to_string(script_path) {
+                Some(s) => s,
+                None => return error_to_json("Invalid script path", 1),
+            };
+            match sdk_handles() {
+                Some((rt, _, _, _)) => result_to_json(
+                    &crate::sdk::execute_python_script_with_runtime(rt, &script_path),
+                ),
+                None => error_to_json("SDK not initialized. Call init() first.", 1),
+            }
+        })
     }
 
     #[no_mangle]
     pub extern "C" fn fastshell_get_cwd() -> *mut c_char {
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        into_c_string(sdk.get_cwd())
+        guard(|| match sdk_handles() {
+            Some((rt, _, _, _)) => crate::sdk::get_cwd_with_runtime(rt),
+            None => "/".to_string(),
+        })
     }
 
     #[no_mangle]
@@ -465,17 +614,25 @@ pub mod capi {
         dir: *const c_char,
         command: *const c_char,
     ) -> *mut c_char {
-        let dir = match cstr_to_string(dir) {
-            Some(s) => s,
-            None => return into_c_string(error_to_json("Invalid dir argument", 1)),
-        };
-        let command = match cstr_to_string(command) {
-            Some(s) => s,
-            None => return into_c_string(error_to_json("Invalid command argument", 1)),
-        };
-        let sdk = get_sdk().lock().unwrap_or_else(|e| e.into_inner());
-        let result = sdk.execute_in(&dir, &command);
-        into_c_string(result_to_json(&result))
+        guard(|| {
+            let dir = match cstr_to_string(dir) {
+                Some(s) => s,
+                None => return error_to_json("Invalid dir argument", 1),
+            };
+            let command = match cstr_to_string(command) {
+                Some(s) => s,
+                None => return error_to_json("Invalid command argument", 1),
+            };
+            // Run WITHOUT holding the global SDK lock (see `sdk_handles`).
+            match sdk_handles() {
+                Some((rt, cancel, deadline, timeout)) => {
+                    result_to_json(&crate::sdk::execute_in_with_runtime(
+                        rt, cancel, deadline, timeout, &dir, &command,
+                    ))
+                }
+                None => error_to_json("SDK not initialized. Call init() first.", 1),
+            }
+        })
     }
 
     /// Starts the agent server in a background Python thread.
@@ -551,7 +708,10 @@ pub mod capi {
             serde_json::from_str(&s).unwrap_or_else(|_| panic!("not JSON: {s}"))
         }
 
-        fn call_str(f: extern "C" fn(*const c_char) -> *mut c_char, arg: &str) -> serde_json::Value {
+        fn call_str(
+            f: extern "C" fn(*const c_char) -> *mut c_char,
+            arg: &str,
+        ) -> serde_json::Value {
             let c = CString::new(arg).unwrap();
             take_json(f(c.as_ptr()))
         }
@@ -580,7 +740,9 @@ pub mod capi {
 
             // get_cwd
             let cwd_ptr = fastshell_get_cwd();
-            let cwd = unsafe { CStr::from_ptr(cwd_ptr) }.to_string_lossy().to_string();
+            let cwd = unsafe { CStr::from_ptr(cwd_ptr) }
+                .to_string_lossy()
+                .to_string();
             fastshell_free_string(cwd_ptr);
             assert!(!cwd.is_empty());
 
@@ -653,7 +815,8 @@ pub mod capi {
             ],
             "builtin_commands": 200,
             "jni_utf8_fixed": true,
-        }).to_string();
+        })
+        .to_string();
         into_c_string(json)
     }
 }

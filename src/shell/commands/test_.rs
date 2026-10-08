@@ -32,8 +32,44 @@ fn evaluate_test(args: &[&str], shell: &Shell) -> Option<bool> {
         return Some(false);
     }
 
+    // `( expr )` grouping, when the whole expression is wrapped.
+    if args[0] == "(" {
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, a) in args.iter().enumerate() {
+            match *a {
+                "(" => depth += 1,
+                ")" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if end == Some(args.len() - 1) {
+            return evaluate_test(&args[1..args.len() - 1], shell);
+        }
+    }
+
     if args[0] == "!" {
         return evaluate_test(&args[1..], shell).map(|v| !v);
+    }
+
+    // `-o` (OR) has lower precedence than `-a` (AND); both short-circuit.
+    if let Some(i) = find_top_level(args, "-o") {
+        if evaluate_test(&args[..i], shell) == Some(true) {
+            return Some(true);
+        }
+        return evaluate_test(&args[i + 1..], shell);
+    }
+    if let Some(i) = find_top_level(args, "-a") {
+        if evaluate_test(&args[..i], shell) == Some(false) {
+            return Some(false);
+        }
+        return evaluate_test(&args[i + 1..], shell);
     }
 
     match args.len() {
@@ -44,7 +80,8 @@ fn evaluate_test(args: &[&str], shell: &Shell) -> Option<bool> {
             "-d" => Some(shell.vfs.is_dir(args[1], &shell.cwd)),
             "-f" => Some(shell.vfs.is_file(args[1], &shell.cwd)),
             "-e" => Some(shell.vfs.exists(args[1], &shell.cwd)),
-            "-L" | "-h" => match shell.vfs.resolve(args[1], &shell.cwd) {
+            // `-L`/`-h`: inspect the link ITSELF (must not follow it).
+            "-L" | "-h" => match shell.vfs.resolve_no_follow(args[1], &shell.cwd) {
                 Ok(p) => Some(
                     std::fs::symlink_metadata(&p)
                         .map(|m| m.file_type().is_symlink())
@@ -125,9 +162,7 @@ fn evaluate_test(args: &[&str], shell: &Shell) -> Option<bool> {
                         .and_then(|m| m.modified().ok())
                 };
                 match (mt(args[0]), mt(args[2])) {
-                    (Some(a), Some(b)) => {
-                        Some(if args[1] == "-nt" { a > b } else { a < b })
-                    }
+                    (Some(a), Some(b)) => Some(if args[1] == "-nt" { a > b } else { a < b }),
                     _ => None,
                 }
             }
@@ -135,6 +170,20 @@ fn evaluate_test(args: &[&str], shell: &Shell) -> Option<bool> {
         },
         _ => None,
     }
+}
+
+/// Index of the first top-level `op` token (ignoring tokens inside `( )`).
+fn find_top_level(args: &[&str], op: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, a) in args.iter().enumerate() {
+        match *a {
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ if depth == 0 && *a == op => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]

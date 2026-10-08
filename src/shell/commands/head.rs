@@ -3,15 +3,32 @@
 
 use crate::shell::{CommandOutput, Shell};
 
+const HEAD_HELP_TEXT: &str = "\
+Usage: head [OPTION]... [FILE]...
+Print the first 10 lines of each FILE to standard output.
+
+  -n N        print the first N lines
+  -c N        print the first N bytes
+  -N          shorthand for -n N (e.g. -2)
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_head(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(HEAD_HELP_TEXT.to_string());
+        }
         let mut lines_count: Option<i64> = None;
         let mut char_count: Option<i64> = None;
         let mut files = Vec::new();
+        let mut quiet = false;
+        let mut verbose = false;
 
         let mut i = 0;
         while i < args.len() {
             match args[i] {
+                "-q" | "--quiet" | "--silent" => quiet = true,
+                "-v" | "--verbose" => verbose = true,
                 "-n" => {
                     if i + 1 < args.len() {
                         lines_count = Some(args[i + 1].parse().unwrap_or(10));
@@ -37,25 +54,39 @@ impl Shell {
                 {
                     lines_count = Some(arg[1..].parse().unwrap_or(10));
                 }
+                // `head -N` shorthand for `-n N`.
+                arg if arg.len() > 1
+                    && arg.starts_with('-')
+                    && arg.as_bytes()[1].is_ascii_digit() =>
+                {
+                    let digits: String = arg[1..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
+                    lines_count = Some(digits.parse().unwrap_or(10));
+                }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
             }
             i += 1;
         }
 
-        let render = |content: &str| -> String {
+        // Byte-accurate slice of `content` for the current options (`-c` counts
+        // bytes; line mode renders text). Used for binary_out so `head -c8 f |
+        // xxd` preserves raw bytes.
+        let render_slice = |content: &[u8]| -> Vec<u8> {
             if let Some(count) = char_count {
-                if count >= 0 {
-                    content.chars().take(count as usize).collect()
+                let total = content.len() as i64;
+                let take = if count >= 0 {
+                    (count as usize).min(content.len())
                 } else {
-                    // -c -N: all but the last N chars
-                    let total = content.chars().count() as i64;
-                    let take = (total + count).max(0) as usize;
-                    content.chars().take(take).collect()
-                }
+                    (total + count).max(0) as usize
+                };
+                content[..take].to_vec()
             } else {
+                let text = String::from_utf8_lossy(content);
                 let n = lines_count.unwrap_or(10);
-                let lines: Vec<&str> = content.lines().collect();
+                let lines: Vec<&str> = text.lines().collect();
                 let take = if n >= 0 {
                     (n as usize).min(lines.len())
                 } else {
@@ -67,28 +98,46 @@ impl Shell {
                     out.push_str(line);
                     out.push('\n');
                 }
-                out
+                out.into_bytes()
             }
+        };
+        let render = |content: &[u8]| -> String {
+            String::from_utf8_lossy(&render_slice(content)).into_owned()
         };
 
         if files.is_empty() {
+            if let Some(bytes) = self.take_binary_in() {
+                let sliced = render_slice(&bytes);
+                if !sliced.is_empty() {
+                    self.set_binary_out(sliced.clone());
+                }
+                return CommandOutput::success(String::from_utf8_lossy(&sliced).into_owned());
+            }
             match stdin {
-                Some(input) => return CommandOutput::success(render(input)),
+                Some(input) => return CommandOutput::success(render(input.as_bytes())),
                 None => return CommandOutput::error("head: missing file operand\n".to_string(), 1),
             }
         }
 
         let mut output = String::new();
+        let mut binary: Vec<u8> = Vec::new();
+        let show_headers = !quiet && (files.len() > 1 || verbose);
         for file in &files {
-            if files.len() > 1 {
+            if show_headers {
                 output.push_str(&format!("==> {} <==\n", file));
             }
-            match self.vfs.read_to_string(file, &self.cwd) {
-                Ok(content) => output.push_str(&render(&content)),
+            match self.read_bytes(file) {
+                Ok(content) => {
+                    binary.extend_from_slice(&render_slice(&content));
+                    output.push_str(&render(&content));
+                }
                 Err(e) => {
                     return CommandOutput::error(format!("head: {}: {}\n", file, e), 1);
                 }
             }
+        }
+        if !binary.is_empty() {
+            self.set_binary_out(binary);
         }
         CommandOutput::success(output)
     }

@@ -13,6 +13,10 @@ impl Shell {
             match *arg {
                 "-s" | "--symbolic" => symbolic = true,
                 "-f" | "--force" => force = true,
+                "-sf" | "-fs" => {
+                    symbolic = true;
+                    force = true;
+                }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
             }
@@ -23,10 +27,17 @@ impl Shell {
         }
 
         let target = &files[files.len() - 1];
+        // Follow the symlink only to decide whether the destination is a dir;
+        // the LINK PATH itself must NOT be resolved. Previously `-f` removed the
+        // file a destination symlink pointed to (destructive self-loop bug).
         let target_path = match self.vfs.resolve(target, &self.cwd) {
             Ok(p) => p,
             Err(e) => return CommandOutput::error(format!("ln: {}: {}\n", target, e), 1),
         };
+        let target_link = self
+            .vfs
+            .resolve_no_follow(target, &self.cwd)
+            .unwrap_or_else(|_| target_path.clone());
 
         let is_target_dir = target_path.is_dir();
 
@@ -40,17 +51,35 @@ impl Shell {
                 let name = source_path.file_name().unwrap_or_default();
                 target_path.join(name)
             } else {
-                target_path.clone()
+                target_link.clone()
             };
 
-            if force && link_path.exists() {
-                let _ = std::fs::remove_file(&link_path);
+            if force {
+                // Remove the existing destination ENTRY (including a dangling
+                // symlink) — never the file it points to.
+                if let Ok(md) = std::fs::symlink_metadata(&link_path) {
+                    let _ = if md.is_dir() && !md.file_type().is_symlink() {
+                        std::fs::remove_dir(&link_path)
+                    } else {
+                        std::fs::remove_file(&link_path)
+                    };
+                }
             }
 
             let result = if symbolic {
-                std::os::unix::fs::symlink(&source_path, &link_path)
+                // Store the target exactly as given (relative stays relative),
+                // matching `ln -s target link` (bash does not canonicalize).
+                std::os::unix::fs::symlink(source, &link_path)
             } else {
-                std::fs::hard_link(&source_path, &link_path)
+                match std::fs::hard_link(&source_path, &link_path) {
+                    Ok(()) => Ok(()),
+                    Err(_) => {
+                        // Hard links may be unsupported on some (mobile) file
+                        // systems; fall back to a copy so `ln src dst` still
+                        // produces a usable file.
+                        std::fs::copy(&source_path, &link_path).map(|_| ())
+                    }
+                }
             };
 
             if let Err(e) = result {
@@ -79,17 +108,21 @@ impl Shell {
 
         let mut output = String::new();
         for file in &files {
-            let resolved = match self.vfs.resolve(file, &self.cwd) {
-                Ok(p) => p,
-                Err(e) => {
-                    output.push_str(&format!("readlink: {}: {}\n", file, e));
-                    continue;
-                }
+            // Do NOT canonicalize: `readlink` must inspect the link itself, not
+            // its target. Build the host path from the sandbox root + cwd.
+            let root = self.vfs.root();
+            let resolved = if file.starts_with('/') {
+                root.join(file.trim_start_matches('/'))
+            } else {
+                root.join(self.cwd.trim_start_matches('/')).join(file)
             };
 
             if canonicalize {
-                match std::fs::canonicalize(&resolved) {
-                    Ok(p) => output.push_str(&format!("{}\n", p.display())),
+                // Follow the link chain with VFS semantics (a link target like
+                // `/t.txt` is VFS-absolute, not a host path) and report the
+                // result as a VFS path — never the host location.
+                match self.vfs.resolve(file, &self.cwd) {
+                    Ok(p) => output.push_str(&format!("{}\n", self.vfs.to_vpath(&p))),
                     Err(e) => output.push_str(&format!("readlink: {}: {}\n", file, e)),
                 }
             } else {
@@ -159,46 +192,74 @@ impl Shell {
     pub fn cmd_mktemp(&self, args: &[&str]) -> CommandOutput {
         let mut directory = false;
         let mut template = String::new();
-
         for arg in args {
             match *arg {
                 "-d" | "--directory" => directory = true,
+                "-t" | "--tmpdir" => {} // default (/tmp) already
                 arg if !arg.starts_with('-') && template.is_empty() => template = arg.to_string(),
                 _ => {}
             }
         }
-
         if template.is_empty() {
-            template = "/tmp/tmp.XXXXXXXXXX".to_string();
+            template = "tmp.XXXXXXXXXX".to_string();
         }
-
-        let resolved = match self.vfs.resolve(&template, &self.cwd) {
-            Ok(p) => p,
-            Err(e) => return CommandOutput::error(format!("mktemp: {}: {}\n", template, e), 1),
+        // A bare name (or `-t NAME`) goes under /tmp; otherwise use as given.
+        let template = if template.contains('/') {
+            template
+        } else {
+            format!("/tmp/{template}")
         };
-
-        let _parent = resolved.parent().unwrap_or(&resolved);
+        let base = match template.rsplit_once('/') {
+            Some((d, _)) if !d.is_empty() => d.to_string(),
+            _ => "/".to_string(),
+        };
+        // Create the base directory through the VFS (sandbox-aware). This is the
+        // step that used to fail on device when `/tmp` (or TMPDIR) was missing.
+        if self.vfs.create_dir_all(&base, &self.cwd).is_err() {
+            return CommandOutput::error(
+                format!("mktemp: cannot create directory '{}'\n", base),
+                1,
+            );
+        }
+        let bname = template
+            .rsplit('/')
+            .next()
+            .unwrap_or("tmp.XXXXXXXXXX")
+            .to_string();
         let mut rng = simple_rng();
-
         for _ in 0..100 {
-            let mut name = resolved.clone();
-            let basename = resolved.file_name().unwrap_or_default().to_string_lossy();
-            let new_name = basename.replace('X', &format!("{:x}", rng.next() % 16));
-            name.set_file_name(&new_name);
-
-            if !name.exists() {
-                let result = if directory {
-                    std::fs::create_dir(&name)
+            let mut name = String::with_capacity(bname.len());
+            for ch in bname.chars() {
+                if ch == 'X' {
+                    // A fresh digit per placeholder (`str::replace` reused one).
+                    name.push_str(&format!("{:x}", rng.next() % 16));
                 } else {
-                    std::fs::File::create(&name).map(|_| {})
-                };
-                match result {
-                    Ok(_) => return CommandOutput::success(format!("{}\n", name.display())),
-                    Err(e) => return CommandOutput::error(format!("mktemp: {}\n", e), 1),
+                    name.push(ch);
                 }
             }
+            let logical = if base == "/" {
+                format!("/{name}")
+            } else {
+                format!("{base}/{name}")
+            };
+            let host = match self.vfs.resolve(&logical, &self.cwd) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if host.exists() {
+                continue;
+            }
+            let ok = if directory {
+                self.vfs.create_dir_all(&logical, &self.cwd).is_ok()
+            } else {
+                self.vfs.write_bytes(&logical, &self.cwd, b"").is_ok()
+            };
+            if ok {
+                // Report the VFS path, not the host location.
+                let _ = host;
+                return CommandOutput::success(format!("{logical}\n"));
+            }
         }
-
         CommandOutput::error("mktemp: failed to create temporary file\n".to_string(), 1)
     }
 
@@ -229,7 +290,7 @@ impl Shell {
         } else {
             let mut all = String::new();
             for file in &files {
-                match self.vfs.read_to_string(file, &self.cwd) {
+                match self.read_text_lossy(file) {
                     Ok(c) => {
                         if files.len() > 1 && !all.is_empty() {
                             all.push_str(&separator);
@@ -242,10 +303,28 @@ impl Shell {
             all
         };
 
-        let parts: Vec<&str> = content.split(&separator).collect();
+        // Split on the separator, ignoring a single trailing separator so a
+        // trailing newline does not become a leading blank line after reversal
+        // (`printf 'a\nb\n' | tac` → `b\na\n`, not `\nb\na`).
+        let had_trailing = content.ends_with(&separator);
+        let trimmed = if had_trailing {
+            &content[..content.len() - separator.len()]
+        } else {
+            content.as_str()
+        };
+        let parts: Vec<&str> = if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            trimmed.split(&separator).collect()
+        };
         let mut output = String::new();
-        for part in parts.iter().rev() {
+        for (idx, part) in parts.iter().rev().enumerate() {
+            if idx > 0 {
+                output.push_str(&separator);
+            }
             output.push_str(part);
+        }
+        if had_trailing && !parts.is_empty() {
             output.push_str(&separator);
         }
 
@@ -275,7 +354,7 @@ impl Shell {
         } else {
             let mut all = String::new();
             for file in &files {
-                match self.vfs.read_to_string(file, &self.cwd) {
+                match self.read_text_lossy(file) {
                     Ok(c) => all.push_str(&c),
                     Err(e) => return CommandOutput::error(format!("nl: {}: {}\n", file, e), 1),
                 }

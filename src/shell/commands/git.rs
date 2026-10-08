@@ -47,7 +47,9 @@ Available commands:
 /// `.git/index` lock contention and interleaved ref updates.
 #[cfg(feature = "git")]
 static REPO_LOCKS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+    std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+    >,
 > = std::sync::OnceLock::new();
 
 #[cfg(feature = "git")]
@@ -69,20 +71,57 @@ impl Shell {
             return CommandOutput::success(GIT_HELP_TEXT.to_string());
         }
 
+        if args.iter().any(|a| *a == "--version" || *a == "version") {
+            return CommandOutput::success("git version 2.45.0 (fastshell libgit2)\n".to_string());
+        }
+
         // Android: OpenSSL's compiled-in CA paths (/usr/local/ssl) don't
         // exist on-device, so certificate verification always failed. The
         // host app exports SSL_CERT_FILE pointing at a PEM bundle built from
         // the system CA store — hand it to libgit2 explicitly (once).
         init_ssl_certs();
 
+        // Leading global options before the subcommand:
+        //   -c key=val   one-shot config override (honored for user.name/email)
+        //   -C dir, --git-dir=…, --work-tree=…, --no-pager   accepted/ignored
+        let mut overrides: Vec<(String, String)> = Vec::new();
+        let mut gi = 0;
+        while gi < args.len() {
+            let a = args[gi];
+            if a == "-c" && gi + 1 < args.len() {
+                if let Some((k, v)) = args[gi + 1].split_once('=') {
+                    overrides.push((k.to_string(), v.to_string()));
+                }
+                gi += 2;
+            } else if matches!(a, "-C" | "--git-dir" | "--work-tree" | "--namespace")
+                && gi + 1 < args.len()
+            {
+                gi += 2;
+            } else if a.starts_with("--git-dir=")
+                || a.starts_with("--work-tree=")
+                || a.starts_with("--namespace=")
+                || matches!(a, "--no-pager" | "--paginate" | "-P")
+            {
+                gi += 1;
+            } else {
+                break;
+            }
+        }
+        let args = &args[gi..];
+        if args.is_empty() {
+            return CommandOutput::success(GIT_HELP_TEXT.to_string());
+        }
+
         let subcommand = args[0];
         let rest = &args[1..];
+
+        GIT_C_OVERRIDES.with(|o| *o.borrow_mut() = overrides);
 
         // Serialize all git operations on the same repository (process-wide).
         let lock = repo_lock(&self.git_repo_path());
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        match subcommand {
+        let out = match subcommand {
             "clone" => self.git_clone(rest),
             "status" => self.git_status(rest),
             "add" => self.git_add(rest),
@@ -110,7 +149,9 @@ impl Shell {
                 format!("git: '{}' is not a supported command\n", subcommand),
                 1,
             ),
-        }
+        };
+        GIT_C_OVERRIDES.with(|o| o.borrow_mut().clear());
+        out
     }
 
     fn git_repo_path(&self) -> std::path::PathBuf {
@@ -152,6 +193,16 @@ impl Shell {
             if local.exists() {
                 url_owned = local.to_string_lossy().to_string();
                 &url_owned
+            } else if url
+                .split('/')
+                .next()
+                .map(|h| h.contains('.') && !h.is_empty())
+                .unwrap_or(false)
+                && !url.contains(' ')
+            {
+                // `github.com/user/repo` (no scheme) → assume HTTPS.
+                url_owned = format!("https://{}", url);
+                &url_owned
             } else {
                 url
             }
@@ -178,11 +229,19 @@ impl Shell {
             Err(e) => return e,
         };
 
-        let porcelain = args.iter().any(|a| *a == "--porcelain" || *a == "--short" || *a == "-s");
+        let porcelain = args
+            .iter()
+            .any(|a| *a == "--porcelain" || *a == "--short" || *a == "-s");
         let want_branch = args.iter().any(|a| *a == "-b" || *a == "--branch");
 
         let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true).recurse_untracked_dirs(true);
+        // `-uno` / `--untracked-files=no` skips the (expensive) full working-tree
+        // untracked scan — used by the app's home-page badge on large repos.
+        let untracked = !args
+            .iter()
+            .any(|a| *a == "-uno" || *a == "--untracked-files=no");
+        opts.include_untracked(untracked)
+            .recurse_untracked_dirs(untracked);
         let statuses = match repo.statuses(Some(&mut opts)) {
             Ok(s) => s,
             Err(e) => return CommandOutput::error(format!("git status: {}\n", e), 1),
@@ -301,22 +360,46 @@ impl Shell {
         let mut stage_tracked = false;
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-m" | "--message" => {
-                    if i + 1 < args.len() {
-                        message = args[i + 1].to_string();
-                        i += 1;
+            let arg = args[i];
+            if let Some(long) = arg.strip_prefix("--") {
+                match long {
+                    "message" => {
+                        if i + 1 < args.len() {
+                            message = args[i + 1].to_string();
+                            i += 1;
+                        }
+                    }
+                    "all" => stage_tracked = true,
+                    _ => {
+                        if let Some(v) = long.strip_prefix("message=") {
+                            message = v.to_string();
+                        }
                     }
                 }
-                "-a" | "--all" => stage_tracked = true,
-                "-am" | "-ma" => {
-                    stage_tracked = true;
-                    if i + 1 < args.len() {
-                        message = args[i + 1].to_string();
-                        i += 1;
+            } else if arg.starts_with('-') && arg.len() > 1 {
+                // Short option cluster (`-am`, `-qm "msg"`, `-mmsg`, …): `-a`
+                // stages tracked changes and `-m` consumes the rest of the
+                // cluster (or the next arg) as the commit message. Unknown
+                // flags (`-q`, `-v`, `-n`, …) are ignored.
+                let chars: Vec<char> = arg[1..].chars().collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        'm' => {
+                            let remainder: String = chars[j + 1..].iter().collect();
+                            if !remainder.is_empty() {
+                                message = remainder;
+                            } else if i + 1 < args.len() {
+                                message = args[i + 1].to_string();
+                                i += 1;
+                            }
+                            break;
+                        }
+                        'a' => stage_tracked = true,
+                        _ => {}
                     }
+                    j += 1;
                 }
-                _ => {}
             }
             i += 1;
         }
@@ -392,7 +475,11 @@ impl Shell {
             Err(e) => return e,
         };
 
-        let positional: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let positional: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
         let remote_name = positional.first().copied().unwrap_or("origin");
         let branch_arg = positional.get(1).copied().unwrap_or("HEAD");
         let branch = if branch_arg == "HEAD" {
@@ -455,7 +542,11 @@ impl Shell {
             Err(e) => return e,
         };
 
-        let positional: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        let positional: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .copied()
+            .collect();
         let remote_name = positional.first().copied().unwrap_or("origin");
         let branch_arg = positional.get(1).copied().unwrap_or("HEAD");
         let branch = if branch_arg == "HEAD" {
@@ -574,8 +665,19 @@ impl Shell {
 
     // ───────────────────────────── init ──────────────────────────────
 
-    fn git_init(&self, _args: &[&str]) -> CommandOutput {
-        let path = self.git_repo_path();
+    fn git_init(&self, args: &[&str]) -> CommandOutput {
+        // `git init [DIR]` — initialize the given directory (else the cwd repo).
+        let operand = args.iter().find(|a| !a.starts_with('-')).copied();
+        let path = match operand {
+            Some(p) if !p.is_empty() => match self.vfs.resolve(p, &self.cwd) {
+                Ok(abs) => {
+                    let _ = std::fs::create_dir_all(&abs);
+                    abs
+                }
+                Err(e) => return CommandOutput::error(format!("git init: {}: {}\n", p, e), 1),
+            },
+            _ => self.git_repo_path(),
+        };
         match git2::Repository::init(&path) {
             Ok(_) => CommandOutput::success(format!(
                 "Initialized empty Git repository in {}\n",
@@ -756,9 +858,7 @@ impl Shell {
         } else if let Some(rev) = rev_arg {
             let obj = match repo.revparse_single(&rev) {
                 Ok(o) => o,
-                Err(e) => {
-                    return CommandOutput::error(format!("git diff: {}: {}\n", rev, e), 128)
-                }
+                Err(e) => return CommandOutput::error(format!("git diff: {}: {}\n", rev, e), 128),
             };
             let tree = match obj.peel_to_tree() {
                 Ok(t) => t,
@@ -849,10 +949,7 @@ impl Shell {
                 return CommandOutput::error(format!("git checkout: {}\n", e), 1);
             }
             // Same tree as HEAD — no working tree changes needed.
-            return CommandOutput::success(format!(
-                "Switched to a new branch '{}'\n",
-                branch_name
-            ));
+            return CommandOutput::success(format!("Switched to a new branch '{}'\n", branch_name));
         }
 
         // Switch to an existing branch (or resolvable revision): update the
@@ -1043,7 +1140,10 @@ impl Shell {
 
         // Path-mode reset: unstage the given paths (index ← HEAD).
         if !paths.is_empty() && mode.is_none() {
-            let head_obj = repo.head().ok().and_then(|h| h.peel(git2::ObjectType::Commit).ok());
+            let head_obj = repo
+                .head()
+                .ok()
+                .and_then(|h| h.peel(git2::ObjectType::Commit).ok());
             return match repo.reset_default(head_obj.as_ref(), &paths) {
                 Ok(_) => CommandOutput::success(String::new()),
                 Err(e) => CommandOutput::error(format!("git reset: {}\n", e), 1),
@@ -1080,7 +1180,9 @@ impl Shell {
         let sub = args.first().copied().unwrap_or("push");
         match sub {
             "push" | "save" | "-u" => {
-                let include_untracked = args.iter().any(|a| *a == "-u" || *a == "--include-untracked");
+                let include_untracked = args
+                    .iter()
+                    .any(|a| *a == "-u" || *a == "--include-untracked");
                 let sig = signature_or_default(&repo);
                 let mut flags = git2::StashFlags::DEFAULT;
                 if include_untracked {
@@ -1123,10 +1225,7 @@ impl Shell {
                 });
                 CommandOutput::success(output)
             }
-            _ => CommandOutput::error(
-                format!("git stash: unsupported subcommand '{}'\n", sub),
-                1,
-            ),
+            _ => CommandOutput::error(format!("git stash: unsupported subcommand '{}'\n", sub), 1),
         }
     }
 
@@ -1172,13 +1271,10 @@ impl Shell {
                     }
                 };
                 match repo.find_remote(name) {
-                    Ok(r) => {
-                        CommandOutput::success(format!("{}\n", r.url().unwrap_or_default()))
+                    Ok(r) => CommandOutput::success(format!("{}\n", r.url().unwrap_or_default())),
+                    Err(_) => {
+                        CommandOutput::error(format!("error: No such remote '{}'\n", name), 2)
                     }
-                    Err(_) => CommandOutput::error(
-                        format!("error: No such remote '{}'\n", name),
-                        2,
-                    ),
                 }
             }
             Some("add") => {
@@ -1261,9 +1357,7 @@ impl Shell {
 
         let obj = match repo.revparse_single(branch) {
             Ok(o) => o,
-            Err(e) => {
-                return CommandOutput::error(format!("git merge: {}: {}\n", branch, e), 128)
-            }
+            Err(e) => return CommandOutput::error(format!("git merge: {}: {}\n", branch, e), 128),
         };
         let annotated = match repo.find_annotated_commit(obj.id()) {
             Ok(a) => a,
@@ -1523,7 +1617,10 @@ impl Shell {
 
         if staged {
             // Unstage: index entry ← HEAD (same as `git reset -- <paths>`).
-            let head_obj = repo.head().ok().and_then(|h| h.peel(git2::ObjectType::Commit).ok());
+            let head_obj = repo
+                .head()
+                .ok()
+                .and_then(|h| h.peel(git2::ObjectType::Commit).ok());
             return match repo.reset_default(head_obj.as_ref(), &paths) {
                 Ok(_) => CommandOutput::success(String::new()),
                 Err(e) => CommandOutput::error(format!("git restore --staged: {}\n", e), 1),
@@ -1646,7 +1743,9 @@ fn head_branch_name(repo: &git2::Repository) -> String {
 fn upstream_info(repo: &git2::Repository) -> Option<(String, usize, usize)> {
     let head = repo.head().ok()?;
     let branch_name = head.shorthand()?;
-    let branch = repo.find_branch(branch_name, git2::BranchType::Local).ok()?;
+    let branch = repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .ok()?;
     let upstream = branch.upstream().ok()?;
     let upstream_name = upstream.name().ok()??.to_string();
     let local_oid = head.target()?;
@@ -1688,10 +1787,38 @@ fn porcelain_codes(status: git2::Status) -> (char, char) {
     (x, y)
 }
 
+#[cfg(feature = "git")]
+thread_local! {
+    /// One-shot `git -c key=val` overrides for the current command.
+    static GIT_C_OVERRIDES: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// repo.signature() with a sandbox-safe fallback (mobile devices usually have
 /// no global git config).
 #[cfg(feature = "git")]
 fn signature_or_default(repo: &git2::Repository) -> git2::Signature<'static> {
+    // Honor `git -c user.name=… -c user.email=…` one-shot overrides.
+    let (name_ov, email_ov) = GIT_C_OVERRIDES.with(|o| {
+        let o = o.borrow();
+        let find = |k: &str| {
+            o.iter()
+                .rev()
+                .find(|(kk, _)| kk == k)
+                .map(|(_, v)| v.clone())
+        };
+        (find("user.name"), find("user.email"))
+    });
+    if name_ov.is_some() || email_ov.is_some() {
+        let base = repo.signature().ok();
+        let name = name_ov
+            .or_else(|| base.as_ref().and_then(|s| s.name().map(String::from)))
+            .unwrap_or_else(|| "aacode".to_string());
+        let email = email_ov
+            .or_else(|| base.as_ref().and_then(|s| s.email().map(String::from)))
+            .unwrap_or_else(|| "aacode@local".to_string());
+        return git2::Signature::now(&name, &email).expect("static signature is always valid");
+    }
     repo.signature()
         .or_else(|_| git2::Signature::now("aacode", "aacode@local"))
         .expect("static signature is always valid")
@@ -1705,8 +1832,17 @@ fn auth_hint(e: &git2::Error) -> String {
     let lower = msg.to_lowercase();
     if lower.contains("auth") || msg.contains("403") || msg.contains("401") {
         format!("Authentication failed: {}", msg)
+    } else if lower.contains("unsupported url protocol") || lower.contains("protocol") {
+        format!(
+            "{} — HTTPS clone is not available in this build; download an archive instead \
+             (e.g. `curl -L <repo>/archive/refs/heads/main.tar.gz -o repo.tgz` then `tar xzf`)",
+            msg
+        )
     } else if lower.contains("certificate") || lower.contains("ssl") {
-        let diag = SSL_INIT_MSG.get().map(|s| s.as_str()).unwrap_or("ssl not initialized");
+        let diag = SSL_INIT_MSG
+            .get()
+            .map(|s| s.as_str())
+            .unwrap_or("ssl not initialized");
         format!("{} [{}]", msg, diag)
     } else {
         msg
@@ -1722,21 +1858,19 @@ static SSL_INIT_MSG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 fn init_ssl_certs() {
     use std::sync::Once;
     static SSL_CERT_INIT: Once = Once::new();
-    SSL_CERT_INIT.call_once(|| {
-        match std::env::var("SSL_CERT_FILE") {
-            Ok(path) if std::path::Path::new(&path).exists() => {
-                let r = unsafe { git2::opts::set_ssl_cert_file(&path) };
-                let _ = SSL_INIT_MSG.set(match r {
-                    Ok(_) => format!("ssl_cert_file={} ok", path),
-                    Err(e) => format!("ssl_cert_file={} err={}", path, e),
-                });
-            }
-            Ok(path) => {
-                let _ = SSL_INIT_MSG.set(format!("ssl_cert_file={} missing", path));
-            }
-            Err(_) => {
-                let _ = SSL_INIT_MSG.set("no SSL_CERT_FILE env".to_string());
-            }
+    SSL_CERT_INIT.call_once(|| match std::env::var("SSL_CERT_FILE") {
+        Ok(path) if std::path::Path::new(&path).exists() => {
+            let r = unsafe { git2::opts::set_ssl_cert_file(&path) };
+            let _ = SSL_INIT_MSG.set(match r {
+                Ok(_) => format!("ssl_cert_file={} ok", path),
+                Err(e) => format!("ssl_cert_file={} err={}", path, e),
+            });
+        }
+        Ok(path) => {
+            let _ = SSL_INIT_MSG.set(format!("ssl_cert_file={} missing", path));
+        }
+        Err(_) => {
+            let _ = SSL_INIT_MSG.set("no SSL_CERT_FILE env".to_string());
         }
     });
 }
@@ -1755,8 +1889,7 @@ fn remote_callbacks<'a>() -> git2::RemoteCallbacks<'a> {
                 .ok()
                 .or_else(|| username_from_url.map(|s| s.to_string()))
                 .unwrap_or_else(|| "git".to_string());
-            if let Ok(token) =
-                std::env::var("GIT_TOKEN").or_else(|_| std::env::var("GIT_PASSWORD"))
+            if let Ok(token) = std::env::var("GIT_TOKEN").or_else(|_| std::env::var("GIT_PASSWORD"))
             {
                 if !token.is_empty() {
                     return git2::Cred::userpass_plaintext(&user, &token);
@@ -1907,7 +2040,11 @@ fn iso_time(secs: i64, offset_minutes: i32) -> String {
 fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     let days = secs.div_euclid(86400);
     let tod = secs.rem_euclid(86400);
-    let (h, m, s) = ((tod / 3600) as u32, ((tod % 3600) / 60) as u32, (tod % 60) as u32);
+    let (h, m, s) = (
+        (tod / 3600) as u32,
+        ((tod % 3600) / 60) as u32,
+        (tod % 60) as u32,
+    );
 
     let mut year: i64 = 1970;
     let mut remaining = days;

@@ -29,7 +29,14 @@ pub fn check_syntax(code: &str, filename_hint: &str) -> Result<(), String> {
 
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(filename_hint).unwrap_or_default();
-    let ret = Parser::new(&allocator, code, source_type).parse();
+    // oxc's parser signals unrecoverable input via `ret.panicked`, but guard
+    // against an actual unwind too: a syntax error must never abort the running
+    // command (previously it could look like the parser "panicked" and skip
+    // ahead). Always return a clean `Err`.
+    let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Parser::new(&allocator, code, source_type).parse()
+    }))
+    .map_err(|_| "jscheck: syntax error (parser aborted)\n".to_string())?;
 
     if ret.diagnostics.is_empty() && !ret.panicked {
         return Ok(());
@@ -41,7 +48,7 @@ pub fn check_syntax(code: &str, filename_hint: &str) -> Result<(), String> {
         out.push('\n');
     }
     if ret.panicked {
-        out.push_str("jscheck: parser panicked (unrecoverable syntax error)\n");
+        out.push_str("jscheck: syntax error (parser stopped early)\n");
     }
     Err(out)
 }

@@ -21,6 +21,8 @@ impl Shell {
             return CommandOutput::success(XARGS_HELP_TEXT.to_string());
         }
         let mut max_args: Option<usize> = None;
+        let mut max_lines: Option<usize> = None;
+        let mut max_chars: Option<usize> = None;
         let mut replace_str: Option<String> = None;
         let mut null_delimited = false;
         let mut parallel: Option<usize> = None;
@@ -66,8 +68,25 @@ impl Shell {
                 }
                 "-r" | "--no-run-if-empty" => {}
                 "-p" | "--interactive" | "--verbose" => {}
-                "-d" | "--delimiter" | "-L" | "--max-lines" | "-s" | "--max-chars"
-                | "-E" | "--eof" => {
+                "-L" | "--max-lines" => {
+                    if i + 1 < args.len() {
+                        max_lines = args[i + 1].parse::<usize>().ok();
+                        i += 1;
+                    }
+                }
+                a if a.starts_with("-L") && a.len() > 2 => {
+                    max_lines = a[2..].parse::<usize>().ok();
+                }
+                "-s" | "--max-chars" => {
+                    if i + 1 < args.len() {
+                        max_chars = args[i + 1].parse::<usize>().ok();
+                        i += 1;
+                    }
+                }
+                a if a.starts_with("-s") && a.len() > 2 => {
+                    max_chars = a[2..].parse::<usize>().ok();
+                }
+                "-d" | "--delimiter" | "-E" | "--eof" => {
                     if i + 1 < args.len() {
                         i += 1;
                     }
@@ -87,7 +106,8 @@ impl Shell {
         }
 
         if target_cmd.is_empty() {
-            return CommandOutput::error("xargs: missing command\n".to_string(), 1);
+            // GNU xargs defaults to `echo`.
+            target_cmd.push("echo".to_string());
         }
 
         let input = match stdin {
@@ -115,7 +135,12 @@ impl Shell {
             if input.is_empty() {
                 Vec::new()
             } else {
-                input.split('\0').map(|s| s.to_string()).collect()
+                let mut v: Vec<String> = input.split('\0').map(|s| s.to_string()).collect();
+                // A single trailing NUL is a terminator, not an empty record.
+                if v.last().map(|s| s.is_empty()).unwrap_or(false) {
+                    v.pop();
+                }
+                v
             }
         } else if replace_str.is_some() {
             input
@@ -124,21 +149,65 @@ impl Shell {
                 .filter(|s| !s.is_empty())
                 .collect()
         } else {
-            input.split_whitespace().map(|s| s.to_string()).collect()
+            // Default: split on any whitespace, honoring quotes and backslashes
+            // (GNU xargs semantics), so `'a b'` stays one argument.
+            xargs_split(&input)
         };
 
         if input_items.is_empty() {
             return CommandOutput::success(String::new());
         }
 
+        // Mobile (allow_subprocess=false): the parallel paths spawn external
+        // processes (SIGSYS on Android). Fall back to the sequential in-process
+        // path — same functionality, no spawn.
+        if !self.allow_subprocess {
+            parallel = None;
+        }
+
         if let Some(ref rep) = replace_str {
             return exec_xargs_replace(self, &target_cmd, rep, &input_items, parallel, verbose);
         }
 
-        let n_per = max_args.unwrap_or(input_items.len());
-        let chunks: Vec<&[String]> = input_items.chunks(n_per).collect();
+        // Group items into per-invocation chunks: `-L` groups input LINES,
+        // otherwise `-n` groups N items; `-s` further bounds the command length.
+        let mut chunks: Vec<Vec<String>> = if let Some(l) = max_lines {
+            let per_line: Vec<Vec<String>> = input
+                .lines()
+                .map(xargs_split)
+                .filter(|v| !v.is_empty())
+                .collect();
+            per_line
+                .chunks(l.max(1))
+                .map(|g| g.iter().flatten().cloned().collect())
+                .collect()
+        } else {
+            let n_per = max_args.unwrap_or(input_items.len()).max(1);
+            input_items.chunks(n_per).map(|c| c.to_vec()).collect()
+        };
+        if let Some(limit) = max_chars {
+            let base: usize = target_cmd.iter().map(|s| s.len() + 1).sum();
+            let mut limited: Vec<Vec<String>> = Vec::new();
+            for ch in chunks {
+                let mut cur: Vec<String> = Vec::new();
+                let mut len = base;
+                for item in ch {
+                    if !cur.is_empty() && len + item.len() + 1 > limit {
+                        limited.push(std::mem::take(&mut cur));
+                        len = base;
+                    }
+                    len += item.len() + 1;
+                    cur.push(item);
+                }
+                if !cur.is_empty() {
+                    limited.push(cur);
+                }
+            }
+            chunks = limited;
+        }
+        let refs: Vec<&[String]> = chunks.iter().map(|c| c.as_slice()).collect();
 
-        exec_xargs_chunks(self, &target_cmd, &chunks, parallel, verbose)
+        exec_xargs_chunks(self, &target_cmd, &refs, parallel, verbose)
     }
 }
 
@@ -416,6 +485,68 @@ fn run_parallel_chunks(
     }
 }
 
+/// GNU-xargs-style input splitting: whitespace (space/tab/newline) separates
+/// arguments, but single/double quotes group, and backslash escapes the next
+/// char. `''` yields an empty argument.
+fn xargs_split(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut has = false;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_sq {
+            if c == '\'' {
+                in_sq = false;
+            } else {
+                current.push(c);
+            }
+        } else if in_dq {
+            if c == '"' {
+                in_dq = false;
+            } else if c == '\\' {
+                if let Some(n) = chars.next() {
+                    current.push(n);
+                }
+            } else {
+                current.push(c);
+            }
+        } else {
+            match c {
+                '\'' => {
+                    in_sq = true;
+                    has = true;
+                }
+                '"' => {
+                    in_dq = true;
+                    has = true;
+                }
+                '\\' => {
+                    if let Some(n) = chars.next() {
+                        current.push(n);
+                        has = true;
+                    }
+                }
+                ' ' | '\t' | '\n' | '\r' => {
+                    if has {
+                        words.push(std::mem::take(&mut current));
+                        has = false;
+                    }
+                }
+                _ => {
+                    current.push(c);
+                    has = true;
+                }
+            }
+        }
+    }
+    if has {
+        words.push(current);
+    }
+    words
+}
+
 #[cfg(test)]
 mod tests {
     use crate::shell::Shell;
@@ -482,10 +613,12 @@ mod tests {
     }
 
     #[test]
-    fn test_xargs_missing_command() {
+    fn test_xargs_default_echo() {
+        // GNU xargs defaults to `echo` when no command is given.
         let mut shell = mk_shell();
         let out = shell.cmd_xargs(&[], Some("input"));
-        assert_ne!(out.exit_code, 0);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("input"), "stdout={:?}", out.stdout);
     }
 
     #[test]

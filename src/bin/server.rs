@@ -68,7 +68,8 @@ fn handle_command(sdk: &mut Fastshell, input: &str) -> String {
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.exit_code,
-            }).to_string()
+            })
+            .to_string()
         }
         "python" => {
             let code = v["code"].as_str().unwrap_or("");
@@ -78,7 +79,8 @@ fn handle_command(sdk: &mut Fastshell, input: &str) -> String {
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.exit_code,
-            }).to_string()
+            })
+            .to_string()
         }
         "python_script" => {
             let path = v["path"].as_str().unwrap_or("");
@@ -88,11 +90,10 @@ fn handle_command(sdk: &mut Fastshell, input: &str) -> String {
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.exit_code,
-            }).to_string()
+            })
+            .to_string()
         }
-        "cwd" => {
-            serde_json::json!({"ok": true, "cwd": sdk.get_cwd()}).to_string()
-        }
+        "cwd" => serde_json::json!({"ok": true, "cwd": sdk.get_cwd()}).to_string(),
         "cancel" => {
             sdk.cancel_execution();
             ok_json()

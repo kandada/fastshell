@@ -49,7 +49,11 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
         "${FASTSHELL_ROOT}/fastshell/vendor/libffi/aarch64-linux-android/libffi.a")
 endif()
 
-add_library(fastshell_jni SHARED src/jni_glue.c)
+add_library(fastshell_jni SHARED
+    src/jni_glue.c
+    src/jni_browser_bridge.c   # offscreen WebView bridge for aacode browser tools
+    src/jni_surface_bridge.c   # native-accessibility (ax_*) surface bridge
+)
 
 target_include_directories(fastshell_jni PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

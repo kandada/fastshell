@@ -64,6 +64,59 @@ enum SortKeyValue {
     Str(String),
 }
 
+/// Parse a GNU `-k` spec `F[.C][OPTS][,F[.C][OPTS]]` into
+/// `(start_field, end_field, modifiers)`. Only the field numbers and the
+/// modifier letters are used; `.C` character positions are accepted but
+/// ignored (we sort on whole fields).
+fn parse_key_spec(spec: &str) -> (usize, Option<usize>, String) {
+    let mut start = 0usize;
+    let mut end: Option<usize> = None;
+    let mut mods = String::new();
+    for (idx, part) in spec.splitn(2, ',').enumerate() {
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let field = digits.parse::<usize>().unwrap_or(0);
+        let after = &part[digits.len()..];
+        // Drop an optional `.C` character position.
+        let after = if let Some(rest) = after.strip_prefix('.') {
+            let _c: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            &rest[_c.len()..]
+        } else {
+            after
+        };
+        mods.push_str(after);
+        if idx == 0 {
+            start = field;
+        } else {
+            end = Some(field);
+        }
+    }
+    (start, end, mods)
+}
+
+/// Apply per-key modifier letters to the global sort flags (GNU semantics for
+/// the common single-key case, which is what the pragmatism here supports).
+fn apply_key_modifiers(
+    mods: &str,
+    numeric: &mut bool,
+    reverse: &mut bool,
+    human: &mut bool,
+    version: &mut bool,
+    month: &mut bool,
+    fold_case: &mut bool,
+) {
+    for c in mods.chars() {
+        match c {
+            'n' | 'g' => *numeric = true,
+            'r' => *reverse = true,
+            'h' => *human = true,
+            'V' => *version = true,
+            'M' => *month = true,
+            'f' => *fold_case = true,
+            _ => {}
+        }
+    }
+}
+
 fn extract_sort_key(
     line: &str,
     key_start: usize,
@@ -158,8 +211,8 @@ impl Shell {
         let mut stable_flag = false;
         let mut random = false;
         let mut output_file: Option<String> = None;
-        let mut key_start: usize = 0;
-        let mut key_end: Option<usize> = None;
+        // `-k` may be repeated; keys are compared left-to-right.
+        let mut keys: Vec<(usize, Option<usize>)> = Vec::new();
         let mut delimiter: Option<char> = None;
 
         let mut i = 0;
@@ -193,10 +246,17 @@ impl Shell {
                     }
                     a if a.starts_with("--output=") => output_file = Some(a[9..].to_string()),
                     a if a.starts_with("--key=") => {
-                        let spec = &a[6..];
-                        let parts: Vec<&str> = spec.splitn(2, ',').collect();
-                        key_start = parts[0].parse().unwrap_or(0);
-                        key_end = parts.get(1).and_then(|s| s.parse().ok());
+                        let (s, e, mods) = parse_key_spec(&a[6..]);
+                        apply_key_modifiers(
+                            &mods,
+                            &mut numeric,
+                            &mut reverse,
+                            &mut human,
+                            &mut version,
+                            &mut month,
+                            &mut fold_case,
+                        );
+                        keys.push((s, e));
                     }
                     _ => crate::warn!("sort: warning: unsupported option '{}'", arg),
                 }
@@ -229,9 +289,17 @@ impl Shell {
                                     String::new()
                                 }
                             };
-                            let parts: Vec<&str> = spec.splitn(2, ',').collect();
-                            key_start = parts[0].parse().unwrap_or(0);
-                            key_end = parts.get(1).and_then(|s| s.parse().ok());
+                            let (s, e, mods) = parse_key_spec(&spec);
+                            apply_key_modifiers(
+                                &mods,
+                                &mut numeric,
+                                &mut reverse,
+                                &mut human,
+                                &mut version,
+                                &mut month,
+                                &mut fold_case,
+                            );
+                            keys.push((s, e));
                             j = chars.len();
                             continue;
                         }
@@ -291,7 +359,7 @@ impl Shell {
             }
         } else {
             for file in &files {
-                match self.vfs.read_to_string(file, &self.cwd) {
+                match self.read_text_lossy(file) {
                     Ok(content) => {
                         for line in content.lines() {
                             all_lines.push(line.to_string());
@@ -302,22 +370,29 @@ impl Shell {
             }
         }
 
-        if key_start > 0 {
-            let mut indexed: Vec<(SortKeyValue, String)> = all_lines
+        if !keys.is_empty() {
+            let mut indexed: Vec<(Vec<SortKeyValue>, String)> = all_lines
                 .into_iter()
                 .map(|line| {
-                    let key = extract_sort_key(
-                        &line, key_start, key_end, delimiter, fold_case, numeric, human,
-                        version, month, &line,
-                    );
-                    (key, line)
+                    let ks: Vec<SortKeyValue> = keys
+                        .iter()
+                        .map(|(s, e)| {
+                            extract_sort_key(
+                                &line, *s, *e, delimiter, fold_case, numeric, human, version,
+                                month, &line,
+                            )
+                        })
+                        .collect();
+                    (ks, line)
                 })
                 .collect();
 
             indexed.sort_by(|a, b| {
-                let cmp = compare_keys(&a.0, &b.0);
-                if cmp != Ordering::Equal {
-                    return cmp;
+                for (ka, kb) in a.0.iter().zip(b.0.iter()) {
+                    let cmp = compare_keys(ka, kb);
+                    if cmp != Ordering::Equal {
+                        return cmp;
+                    }
                 }
                 if !stable_flag {
                     compare_strings(&a.1, &b.1, fold_case)
@@ -424,7 +499,7 @@ impl Shell {
             }
         }
 
-        if reverse && key_start > 0 {
+        if reverse && !keys.is_empty() {
             all_lines.reverse();
         }
 
@@ -533,10 +608,12 @@ fn compare_versions(a: &str, b: &str) -> Ordering {
 fn month_number(s: &str) -> Option<u8> {
     let lower = s.trim().to_lowercase();
     let months = [
-        "jan", "feb", "mar", "apr", "may", "jun",
-        "jul", "aug", "sep", "oct", "nov", "dec",
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
     ];
-    months.iter().position(|m| lower.starts_with(m)).map(|i| (i + 1) as u8)
+    months
+        .iter()
+        .position(|m| lower.starts_with(m))
+        .map(|i| (i + 1) as u8)
 }
 
 fn compare_strings(a: &str, b: &str, fold_case: bool) -> Ordering {
@@ -554,7 +631,11 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)
@@ -573,7 +654,11 @@ mod tests {
         let shell = mk_shell();
         let out = shell.cmd_sort(&["-V"], Some("v1.10\nv1.9\nv1.2\n"));
         let lines: Vec<&str> = out.stdout.lines().collect();
-        assert_eq!(lines, vec!["v1.2", "v1.9", "v1.10"], "version sort should order numerically");
+        assert_eq!(
+            lines,
+            vec!["v1.2", "v1.9", "v1.10"],
+            "version sort should order numerically"
+        );
     }
 
     #[test]
@@ -581,6 +666,10 @@ mod tests {
         let shell = mk_shell();
         let out = shell.cmd_sort(&["-M"], Some("Mar\nJan\nFeb\n"));
         let lines: Vec<&str> = out.stdout.lines().collect();
-        assert_eq!(lines, vec!["Jan", "Feb", "Mar"], "month sort should order by calendar");
+        assert_eq!(
+            lines,
+            vec!["Jan", "Feb", "Mar"],
+            "month sort should order by calendar"
+        );
     }
 }

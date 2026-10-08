@@ -46,6 +46,22 @@ impl Shell {
             }
         } else {
             for file in &files {
+                // A directory is not readable as a file.
+                if self
+                    .vfs
+                    .resolve(file, &self.cwd)
+                    .map(|p| p.is_dir())
+                    .unwrap_or(false)
+                {
+                    if mime {
+                        output.push_str("inode/directory\n");
+                    } else if brief {
+                        output.push_str("directory\n");
+                    } else {
+                        output.push_str(&format!("{}: directory\n", file));
+                    }
+                    continue;
+                }
                 match self.vfs.read(file, &self.cwd) {
                     Ok(data) => {
                         let ftype = detect_type(&data, mime);
@@ -67,6 +83,7 @@ impl Shell {
 
     pub fn cmd_column(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut delimiter = ' ';
+        let mut output_sep = "  ".to_string();
         let mut files = Vec::new();
 
         let mut i = 0;
@@ -82,6 +99,15 @@ impl Shell {
                 arg if arg.starts_with("-s") && arg.len() > 2 => {
                     delimiter = arg[2..].chars().next().unwrap_or(' ');
                 }
+                "-o" => {
+                    if i + 1 < args.len() {
+                        output_sep = args[i + 1].to_string();
+                        i += 1;
+                    }
+                }
+                arg if arg.starts_with("-o") && arg.len() > 2 => {
+                    output_sep = arg[2..].to_string();
+                }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
             }
@@ -96,7 +122,7 @@ impl Shell {
         } else {
             let mut content = String::new();
             for file in &files {
-                match self.vfs.read_to_string(file, &self.cwd) {
+                match self.read_text_lossy(file) {
                     Ok(c) => content.push_str(&c),
                     Err(e) => return CommandOutput::error(format!("column: {}: {}\n", file, e), 1),
                 }
@@ -126,12 +152,12 @@ impl Shell {
             let mut parts = Vec::new();
             for (j, col) in row.iter().enumerate() {
                 if j < widths.len() - 1 {
-                    parts.push(format!("{:<width$}", col, width = widths[j] + 2));
+                    parts.push(format!("{:<width$}", col, width = widths[j]));
                 } else {
                     parts.push(col.to_string());
                 }
             }
-            output.push_str(&parts.join(""));
+            output.push_str(&parts.join(&output_sep));
             output.push('\n');
         }
 
@@ -219,15 +245,20 @@ impl Shell {
 
         // Apply format if given.
         if let Some(ref fmt) = format {
-            values = values
-                .iter()
-                .map(|v| seq_format(v, fmt))
-                .collect();
+            values = values.iter().map(|v| seq_format(v, fmt)).collect();
         }
 
-        // Equal width: left-pad with the width of the widest value.
+        // Equal width: left-pad with '0' to the width of the widest value OR the
+        // widest *input operand* string (GNU accounts for leading zeros, e.g.
+        // `seq -w 01 02` → `01\n02`, `seq -w 1 10` → `01\n02…10`).
         if equal_width {
-            let width = values.iter().map(|v| v.chars().count()).max().unwrap_or(0);
+            let out_width = values.iter().map(|v| v.chars().count()).max().unwrap_or(0);
+            let in_width = nums
+                .iter()
+                .map(|s| s.trim_start_matches(['+', '-']).chars().count())
+                .max()
+                .unwrap_or(0);
+            let width = out_width.max(in_width);
             values = values
                 .iter()
                 .map(|v| {
@@ -242,6 +273,8 @@ impl Shell {
                 .collect();
         }
 
+        // GNU seq prints the separator BETWEEN values (no trailing separator):
+        // `seq -s, 1 3` → `1,2,3`.
         let sep = separator.unwrap_or_else(|| "\n".to_string());
         let mut output = values.join(&sep);
         output.push('\n');
@@ -260,31 +293,94 @@ fn format_seq_value(val: f64) -> String {
 /// Apply a `seq -f` printf-style format to a value string. Supports the
 /// common `%g`/`%e`/`%f` conversions plus a literal prefix/suffix.
 fn seq_format(value: &str, fmt: &str) -> String {
-    if fmt.contains('%') {
-        // Try to parse the numeric value back for float formatting.
-        if let Ok(f) = value.parse::<f64>() {
-            // Minimal printf: replace %g/%e/%f/%d with the value.
-            let mut out = fmt.to_string();
-            for (spec, rendered) in [
-                ("%g", format!("{}", f)),
-                ("%f", format!("{}", f)),
-                ("%e", format!("{:e}", f)),
-                ("%d", format!("{}", f as i64)),
-            ] {
-                out = out.replace(spec, &rendered);
+    let Ok(f) = value.parse::<f64>() else {
+        return format!("{fmt}{value}");
+    };
+    let Some(pct) = fmt.find('%') else {
+        // No format spec: `seq -f 'prefix'` prints literal + value (GNU quirk).
+        return format!("{fmt}{value}");
+    };
+    let chars: Vec<char> = fmt.chars().collect();
+    // char index of '%'
+    let mut j = fmt[..pct].chars().count() + 1;
+    if j < chars.len() && chars[j] == '%' {
+        return format!("{fmt}{value}");
+    }
+    let mut zero = false;
+    let mut left = false;
+    while j < chars.len() && matches!(chars[j], '-' | '0' | '+' | ' ' | '#') {
+        if chars[j] == '-' {
+            left = true;
+        }
+        if chars[j] == '0' {
+            zero = true;
+        }
+        j += 1;
+    }
+    let mut width = 0usize;
+    while j < chars.len() && chars[j].is_ascii_digit() {
+        width = width * 10 + chars[j].to_digit(10).unwrap() as usize;
+        j += 1;
+    }
+    let mut prec: Option<usize> = None;
+    if j < chars.len() && chars[j] == '.' {
+        j += 1;
+        let mut p = 0usize;
+        while j < chars.len() && chars[j].is_ascii_digit() {
+            p = p * 10 + chars[j].to_digit(10).unwrap() as usize;
+            j += 1;
+        }
+        prec = Some(p);
+    }
+    if j >= chars.len() {
+        return format!("{fmt}{value}");
+    }
+    let conv = chars[j];
+    let body = match conv {
+        'g' | 'G' => {
+            let p = prec.unwrap_or(6);
+            let mut t = format!("{:.*}", p, f);
+            if t.contains('.') {
+                t = t.trim_end_matches('0').trim_end_matches('.').to_string();
             }
-            if out != *fmt {
-                return out;
+            t
+        }
+        'f' | 'F' => format!("{:.*}", prec.unwrap_or(6), f),
+        'e' | 'E' => {
+            let t = format!("{:.*e}", prec.unwrap_or(6), f);
+            if conv == 'E' {
+                t.to_uppercase()
+            } else {
+                t
             }
         }
+        'd' | 'i' => format!("{}", f as i64),
+        _ => return format!("{fmt}{value}"),
+    };
+    let mut rendered = body;
+    let len = rendered.chars().count();
+    if width > len {
+        let pad = width - len;
+        let pc = if zero && !left { '0' } else { ' ' };
+        let ps: String = std::iter::repeat(pc).take(pad).collect();
+        rendered = if left {
+            format!("{rendered}{ps}")
+        } else {
+            format!("{ps}{rendered}")
+        };
     }
-    // No format spec: `seq -f 'prefix'` prints the literal + value (GNU quirk).
-    format!("{}{}", fmt, value)
+    let prefix: String = chars[..fmt[..pct].chars().count()].iter().collect();
+    let suffix: String = chars[j + 1..].iter().collect();
+    format!("{prefix}{rendered}{suffix}")
 }
 
 fn detect_type(data: &[u8], mime: bool) -> String {
     if data.is_empty() {
-        return if mime { "inode/x-empty; charset=binary".to_string() } else { "empty".to_string() };
+        return if mime {
+            "inode/x-empty; charset=binary".to_string()
+        } else {
+            "empty".to_string()
+        };
     }
 
     // Check magic bytes first (binary formats always take precedence)
@@ -306,23 +402,43 @@ fn detect_type(data: &[u8], mime: bool) -> String {
         .count();
     if text_chars as f64 / data.len() as f64 > 0.95 {
         if data.starts_with(b"{") || data.starts_with(b"[") {
-            return if mime { "application/json; charset=utf-8".to_string() } else { "JSON text".to_string() };
+            return if mime {
+                "application/json; charset=utf-8".to_string()
+            } else {
+                "JSON text".to_string()
+            };
         }
         if data.starts_with(b"<") {
             if data.starts_with(b"<?xml")
                 || data.starts_with(b"<!DOCTYPE")
                 || data.starts_with(b"<html")
             {
-                return if mime { "text/html; charset=utf-8".to_string() } else { "HTML/XML text".to_string() };
+                return if mime {
+                    "text/html; charset=utf-8".to_string()
+                } else {
+                    "HTML/XML text".to_string()
+                };
             }
         }
         if data.iter().any(|&b| b == b';') && data.starts_with(b"#") {
-            return if mime { "text/x-script; charset=utf-8".to_string() } else { "script text".to_string() };
+            return if mime {
+                "text/x-script; charset=utf-8".to_string()
+            } else {
+                "script text".to_string()
+            };
         }
-        return if mime { "text/plain; charset=utf-8".to_string() } else { "ASCII text".to_string() };
+        return if mime {
+            "text/plain; charset=utf-8".to_string()
+        } else {
+            "ASCII text".to_string()
+        };
     }
 
-    if mime { ftype_to_mime("data") } else { "data".to_string() }
+    if mime {
+        ftype_to_mime("data")
+    } else {
+        "data".to_string()
+    }
 }
 
 fn match_magic(data: &[u8]) -> String {
@@ -467,11 +583,14 @@ fn ftype_to_mime(ftype: &str) -> String {
     } else if ftype == "Zip archive" {
         "application/zip; charset=binary".to_string()
     } else if ftype == "Microsoft Word 2007+" {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=binary".to_string()
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=binary"
+            .to_string()
     } else if ftype == "Microsoft Excel 2007+" {
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; charset=binary".to_string()
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; charset=binary"
+            .to_string()
     } else if ftype == "Microsoft PowerPoint 2007+" {
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation; charset=binary".to_string()
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation; charset=binary"
+            .to_string()
     } else if ftype == "OpenDocument Text" {
         "application/vnd.oasis.opendocument.text; charset=binary".to_string()
     } else if ftype == "EPUB document" {
@@ -604,28 +723,38 @@ mod tests {
 
     #[test]
     fn test_seq_basic() {
-        let mut s = crate::shell::Shell::new(crate::vfs::Vfs::new(
-            std::env::temp_dir().join(format!("seq_test_{}", std::process::id())),
-        ).unwrap());
+        let mut s = crate::shell::Shell::new(
+            crate::vfs::Vfs::new(
+                std::env::temp_dir().join(format!("seq_test_{}", std::process::id())),
+            )
+            .unwrap(),
+        );
         let out = s.execute("seq", &["3"], None);
         assert_eq!(out.stdout, "1\n2\n3\n");
     }
 
     #[test]
     fn test_seq_equal_width() {
-        let mut s = crate::shell::Shell::new(crate::vfs::Vfs::new(
-            std::env::temp_dir().join(format!("seq_w_test_{}", std::process::id())),
-        ).unwrap());
+        let mut s = crate::shell::Shell::new(
+            crate::vfs::Vfs::new(
+                std::env::temp_dir().join(format!("seq_w_test_{}", std::process::id())),
+            )
+            .unwrap(),
+        );
         let out = s.execute("seq", &["-w", "8", "10"], None);
         assert_eq!(out.stdout, "08\n09\n10\n");
     }
 
     #[test]
     fn test_seq_separator() {
-        let mut s = crate::shell::Shell::new(crate::vfs::Vfs::new(
-            std::env::temp_dir().join(format!("seq_s_test_{}", std::process::id())),
-        ).unwrap());
+        let mut s = crate::shell::Shell::new(
+            crate::vfs::Vfs::new(
+                std::env::temp_dir().join(format!("seq_s_test_{}", std::process::id())),
+            )
+            .unwrap(),
+        );
         let out = s.execute("seq", &["-s", ",", "1", "3"], None);
+        // GNU seq prints the separator between values (no trailing).
         assert_eq!(out.stdout, "1,2,3\n");
     }
 }

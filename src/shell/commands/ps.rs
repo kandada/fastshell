@@ -217,11 +217,13 @@ impl Shell {
 
         match crate::shell::list_processes() {
             Ok(mut procs) => {
-                procs.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
+                procs.sort_by(|a, b| {
+                    b.cpu_pct
+                        .partial_cmp(&a.cpu_pct)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 let mut output = String::new();
-                output.push_str(&format!(
-                    "PID       %CPU   RSS      COMMAND\n"
-                ));
+                output.push_str(&format!("PID       %CPU   RSS      COMMAND\n"));
                 for p in procs.iter().take(count) {
                     output.push_str(&format!(
                         "{:<10} {:>5.1} {:>7}  {}\n",
@@ -248,7 +250,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_ps_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_ps_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)
@@ -298,7 +301,15 @@ mod tests {
     fn test_top_snapshot() {
         let mut s = mk_shell();
         let out = s.execute("top", &["-b", "-n", "1"], None);
-        assert_eq!(out.exit_code, 0, "top should return a snapshot: {}", out.stderr);
-        assert!(out.stdout.contains("PID"), "top output should have a header: {}", out.stdout);
+        assert_eq!(
+            out.exit_code, 0,
+            "top should return a snapshot: {}",
+            out.stderr
+        );
+        assert!(
+            out.stdout.contains("PID"),
+            "top output should have a header: {}",
+            out.stdout
+        );
     }
 }

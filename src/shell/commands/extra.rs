@@ -5,35 +5,53 @@ use crate::shell::{CommandOutput, Shell};
 
 impl Shell {
     pub fn cmd_renice(&self, args: &[&str]) -> CommandOutput {
-        let mut priority = 10i32;
-        let mut pids = Vec::new();
-
+        // GNU renice: `renice [-n] priority [-p] pid...`. The FIRST non-flag
+        // operand is the priority; the rest are pids.
+        let mut priority: i32 = 0;
+        let mut have_priority = false;
+        let mut pids: Vec<u32> = Vec::new();
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
-                "-n" => {
-                    if i + 1 < args.len() {
-                        priority = args[i + 1].parse().unwrap_or(10);
-                        i += 1;
-                    }
+            let a = args[i];
+            if a == "-n" {
+                if i + 1 < args.len() {
+                    priority = args[i + 1].parse().unwrap_or(0);
+                    have_priority = true;
+                    i += 1;
                 }
-                arg if arg.starts_with("-n") && arg.len() > 2 => {
-                    priority = arg[2..].parse().unwrap_or(10);
+            } else if let Some(v) = a.strip_prefix("-n") {
+                if !v.is_empty() {
+                    priority = v.parse().unwrap_or(0);
+                    have_priority = true;
                 }
-                arg if !arg.starts_with('-') => {
-                    if let Ok(p) = arg.parse::<u32>() {
-                        pids.push(p);
-                    }
+            } else if a == "-p" || a == "-g" || a == "-u" {
+                // operand-kind flag: ignored (all treated as pids)
+            } else if a.starts_with('-') {
+                // other flags ignored
+            } else if let Ok(n) = a.parse::<i64>() {
+                if !have_priority {
+                    priority = n as i32;
+                    have_priority = true;
+                } else {
+                    pids.push(n.max(0) as u32);
                 }
-                _ => {}
             }
             i += 1;
         }
         if pids.is_empty() {
             return CommandOutput::error("renice: missing pid\n".to_string(), 1);
         }
-        #[cfg(unix)]
+        let self_pid = std::process::id();
         for &pid in &pids {
+            // Refuse to change this process's own priority — that starves the
+            // host app (ANR). `renice 5 -p $$` must not touch us.
+            if pid == self_pid {
+                return CommandOutput::error(
+                    "renice: refusing to change this process's priority\n".to_string(),
+                    1,
+                );
+            }
+            #[cfg(unix)]
             unsafe {
                 libc::setpriority(libc::PRIO_PROCESS, pid, priority);
             }
@@ -58,6 +76,14 @@ impl Shell {
             vfs_root.join(self.cwd.trim_start_matches('/'))
         };
         let out_path = cwd.join("nohup.out");
+        // Only spawn when allowed (mobile → in-process via the executor's
+        // `nohup CMD` handling; spawning here could SIGSYS).
+        if !self.allow_subprocess {
+            return CommandOutput::error(
+                format!("nohup: cannot run '{cmd}' (external commands are disabled)\n"),
+                127,
+            );
+        }
         let out_file = match std::fs::File::create(&out_path) {
             Ok(f) => f,
             Err(_) => {
@@ -95,15 +121,20 @@ impl Shell {
             Ok(p) => p,
             Err(e) => return CommandOutput::error(format!("chroot: {}: {}\n", newroot, e), 1),
         };
-        #[cfg(unix)]
-        {
-            let path_c = std::ffi::CString::new(resolved.to_string_lossy().as_bytes()).unwrap();
-            unsafe {
-                libc::chroot(path_c.as_ptr());
-                libc::chdir(b"/\0".as_ptr() as *const _);
-            }
+        // Never call the privileged chroot(2): on Android the app seccomp policy
+        // kills the process (SIGSYS), and the unconditional chdir("/") would
+        // change the whole process cwd. Approximate by running the command with
+        // the target directory as its working directory.
+        if !self.allow_subprocess {
+            return CommandOutput::error(
+                format!("chroot: cannot run '{cmd}' (external commands are disabled)\n"),
+                127,
+            );
         }
-        let output = std::process::Command::new(cmd).args(&cmd_args).output();
+        let output = std::process::Command::new(cmd)
+            .args(&cmd_args)
+            .current_dir(&resolved)
+            .output();
         match output {
             Ok(o) => CommandOutput {
                 stdout: String::from_utf8_lossy(&o.stdout).to_string(),
@@ -129,7 +160,12 @@ impl Shell {
                 Ok(p) => p,
                 Err(e) => return CommandOutput::error(format!("mkfifo: {}: {}\n", file, e), 1),
             };
-            let path_c = std::ffi::CString::new(resolved.to_string_lossy().as_bytes()).unwrap();
+            let path_c = match std::ffi::CString::new(resolved.to_string_lossy().as_bytes()) {
+                Ok(c) => c,
+                Err(_) => {
+                    return CommandOutput::error("invalid path (contains NUL)\n".to_string(), 1)
+                }
+            };
             if unsafe { libc::mkfifo(path_c.as_ptr(), 0o666) } != 0 {
                 return CommandOutput::error(
                     format!("mkfifo: {}: {}\n", file, std::io::Error::last_os_error()),
@@ -317,20 +353,12 @@ impl Shell {
         if files.len() < 2 {
             return CommandOutput::error("mknod: missing operand\n".to_string(), 1);
         }
-        #[cfg(unix)]
-        {
-            let resolved = match self.vfs.resolve(files[0], &self.cwd) {
-                Ok(p) => p,
-                Err(e) => return CommandOutput::error(format!("mknod: {}: {}\n", files[0], e), 1),
-            };
-            let path_c = std::ffi::CString::new(resolved.to_string_lossy().as_bytes()).unwrap();
-            let mode: libc::mode_t =
-                u32::from_str_radix(files[1], 8).unwrap_or(0o666) as libc::mode_t | libc::S_IFREG;
-            unsafe {
-                libc::mknod(path_c.as_ptr(), mode, 0);
-            }
-        }
-        CommandOutput::success(String::new())
+        // mknod(2) is a privileged syscall; Android's app seccomp policy kills
+        // the process (SIGSYS). Refuse instead of crashing.
+        CommandOutput::error(
+            "mknod: operation not permitted in the sandbox\n".to_string(),
+            1,
+        )
     }
 
     pub fn cmd_mount(&self, args: &[&str]) -> CommandOutput {
@@ -343,22 +371,6 @@ impl Shell {
 }
 
 fn run_system_cmd(shell: &Shell, cmd: &str, args: &[&str]) -> CommandOutput {
-    let vfs_root = shell.vfs.root().to_path_buf();
-    let cwd = if shell.cwd == "/" {
-        vfs_root.clone()
-    } else {
-        vfs_root.join(shell.cwd.trim_start_matches('/'))
-    };
-    match std::process::Command::new(cmd)
-        .args(args)
-        .current_dir(&cwd)
-        .output()
-    {
-        Ok(o) => CommandOutput {
-            stdout: String::from_utf8_lossy(&o.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&o.stderr).to_string(),
-            exit_code: o.status.code().unwrap_or(-1),
-        },
-        Err(e) => CommandOutput::error(format!("{}: {}\n", cmd, e), 1),
-    }
+    // Honor `allow_subprocess`: on mobile this never spawns (avoids SIGSYS).
+    shell.run_external(cmd, args)
 }

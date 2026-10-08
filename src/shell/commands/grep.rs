@@ -72,6 +72,7 @@ impl Shell {
                         i += 1;
                     }
                 }
+                "--no-filename" => flags.push("--no-filename".to_string()),
                 "--fixed-strings" => flags.push("-F".to_string()),
                 "--ignore-case" | "-S" | "--smart-case" => flags.push("-i".to_string()),
                 "--files-with-matches" => {
@@ -128,10 +129,18 @@ impl Shell {
     }
 
     pub fn cmd_grep(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
-        if args.contains(&"-h") || args.contains(&"--help") {
+        // GNU grep: `--help` shows help only as an OPTION — never after `--`
+        // (where it is a pattern), e.g. `grep -- "--help" file`.
+        let help_requested = match args.iter().position(|a| *a == "--") {
+            Some(sep) => args[..sep].contains(&"--help"),
+            None => args.contains(&"--help"),
+        };
+        if help_requested {
             return CommandOutput::success(GREP_HELP_TEXT.to_string());
         }
+        let mut past_sep = false;
         let mut pattern: Option<String> = None;
+        let mut extended = false;
         let mut files = Vec::new();
         let mut ignore_case = false;
         let mut invert = false;
@@ -148,10 +157,21 @@ impl Shell {
         let mut line_regexp = false;
         let mut max_count: Option<usize> = None;
         let mut files_without_match = false;
+        let mut no_filename = false;
 
         let mut i = 0;
         while i < args.len() {
             let arg = args[i];
+            // After `--`, every token is an operand (pattern then files).
+            if past_sep {
+                if pattern.is_none() {
+                    pattern = Some(arg.to_string());
+                } else {
+                    files.push(arg.to_string());
+                }
+                i += 1;
+                continue;
+            }
             match arg {
                 "-i" => ignore_case = true,
                 "-v" => invert = true,
@@ -165,6 +185,8 @@ impl Shell {
                 "-q" | "--quiet" | "--silent" => quiet = true,
                 "-x" | "--line-regexp" => line_regexp = true,
                 "-L" | "--files-without-match" => files_without_match = true,
+                "-h" | "--no-filename" => no_filename = true,
+                "-H" | "--with-filename" => no_filename = false,
                 "-m" | "--max-count" => {
                     if i + 1 < args.len() {
                         max_count = args[i + 1].parse().ok();
@@ -173,7 +195,9 @@ impl Shell {
                 }
                 // -E / -P: the regex engine is extended by default; accept -E
                 // silently. -P (PCRE) is not available, but tolerate it.
-                "-E" | "--extended-regexp" | "-P" | "--perl-regexp" => {}
+                "-E" | "--extended-regexp" | "-P" | "--perl-regexp" => {
+                    extended = true;
+                }
                 "-A" | "--after-context" => {
                     if i + 1 < args.len() {
                         after_context = args[i + 1].parse().unwrap_or(0);
@@ -193,7 +217,22 @@ impl Shell {
                         i += 1;
                     }
                 }
-                "--" => {}, // end of options
+                "--" => past_sep = true, // end of options
+                // Attached value forms must come BEFORE the generic combined-flag
+                // arm below, otherwise `-A1` is mis-parsed as flags A + 1.
+                a if a.starts_with("-A") && a.len() > 2 => {
+                    after_context = a[2..].parse().unwrap_or(0);
+                }
+                a if a.starts_with("-B") && a.len() > 2 => {
+                    before_context = a[2..].parse().unwrap_or(0);
+                }
+                a if a.starts_with("-C") && a.len() > 2 => {
+                    after_context = a[2..].parse().unwrap_or(0);
+                    before_context = a[2..].parse().unwrap_or(0);
+                }
+                a if a.starts_with("-m") && a.len() > 2 => {
+                    max_count = a[2..].parse().ok();
+                }
                 a if a.starts_with('-') && a.len() > 2 => {
                     // Support combined short flags: -ril, -rn, -vc, -ic, etc.
                     for ch in a.chars().skip(1) {
@@ -210,24 +249,16 @@ impl Shell {
                             'q' => quiet = true,
                             'x' => line_regexp = true,
                             'L' => files_without_match = true,
-                            'E' => {}
+                            'h' => no_filename = true,
+                            'E' => {
+                                extended = true;
+                            }
+                            'P' => {
+                                extended = true;
+                            } // perl-regexp: accepted, treated as extended
                             _ => crate::warn!("grep: warning: unsupported option '-{}'", ch),
                         }
                     }
-                }
-                // Attached value forms: -A2, -B2, -C2
-                a if a.starts_with("-A") && a.len() > 2 => {
-                    after_context = a[2..].parse().unwrap_or(0);
-                }
-                a if a.starts_with("-B") && a.len() > 2 => {
-                    before_context = a[2..].parse().unwrap_or(0);
-                }
-                a if a.starts_with("-C") && a.len() > 2 => {
-                    after_context = a[2..].parse().unwrap_or(0);
-                    before_context = a[2..].parse().unwrap_or(0);
-                }
-                a if a.starts_with("-m") && a.len() > 2 => {
-                    max_count = a[2..].parse().ok();
                 }
                 _ if arg.starts_with('-') => {
                     crate::warn!("grep: warning: unsupported option '{}'", arg);
@@ -244,17 +275,21 @@ impl Shell {
         };
 
         // Build pattern, optionally wrapping in word boundaries / line anchors.
-        let effective_pattern = if line_regexp {
-            format!(
-                r"^(?:{})$",
-                if fixed_strings { regex::escape(&pattern) } else { pattern.clone() }
-            )
-        } else if word_regexp {
-            format!(r"\b{}\b", if fixed_strings { regex::escape(&pattern) } else { pattern.clone() })
-        } else if fixed_strings {
+        // Basic mode is POSIX BRE (GNU default): `+ ? | ( ) { }` are LITERAL
+        // unless backslash-escaped. `-E`/`-P` switch to extended (ERE).
+        let base = if fixed_strings {
             regex::escape(&pattern)
+        } else if extended {
+            pattern.clone()
         } else {
-            pattern.to_string()
+            bre_to_regex(&pattern)
+        };
+        let effective_pattern = if line_regexp {
+            format!(r"^(?:{})$", base)
+        } else if word_regexp {
+            format!(r"\b{}\b", base)
+        } else {
+            base
         };
 
         let regex = match build_regex(&effective_pattern, ignore_case) {
@@ -268,19 +303,30 @@ impl Shell {
             Some(re) => {
                 if only_matching {
                     Box::new(move |line: &str| {
-                        let found: Vec<String> = re.find_iter(line)
-                            .map(|m| m.as_str().to_string())
-                            .collect();
-                        if found.is_empty() { None } else { Some(found) }
+                        let found: Vec<String> =
+                            re.find_iter(line).map(|m| m.as_str().to_string()).collect();
+                        if found.is_empty() {
+                            None
+                        } else {
+                            Some(found)
+                        }
                     })
                 } else {
                     Box::new(move |line: &str| {
-                        if re.is_match(line) { Some(vec![line.to_string()]) } else { None }
+                        if re.is_match(line) {
+                            Some(vec![line.to_string()])
+                        } else {
+                            None
+                        }
                     })
                 }
             }
             None => {
-                let p = if word_regexp { pattern.clone() } else { pattern.clone() };
+                let p = if word_regexp {
+                    pattern.clone()
+                } else {
+                    pattern.clone()
+                };
                 if ignore_case {
                     let pl = p.to_lowercase();
                     if only_matching {
@@ -348,14 +394,22 @@ impl Shell {
                 None => return CommandOutput::error("grep: missing file operand\n".to_string(), 2),
             };
             let count = grep_lines(
-                &input, &matcher, invert, count_only, show_line_number,
-                files_with_matches, only_matching, quiet,
-                before_context, after_context, max_count, None, &mut output,
+                &input,
+                &matcher,
+                invert,
+                count_only,
+                show_line_number,
+                files_with_matches,
+                only_matching,
+                quiet,
+                before_context,
+                after_context,
+                max_count,
+                None,
+                &mut output,
             );
             total_matches = count;
-            if count_only {
-                output.push_str(&format!("{}\n", count));
-            }
+            // NB: `grep_lines` already emits the count line when `count_only`.
         } else {
             let multi_file = all_files.len() > 1;
             for file in &all_files {
@@ -366,13 +420,22 @@ impl Shell {
                         exit_code: 143,
                     };
                 }
-                match self.vfs.read_to_string(file, &self.cwd) {
+                match self.read_text_lossy(file) {
                     Ok(content) => {
                         let count = grep_lines(
-                            &content, &matcher, invert, count_only, show_line_number,
-                            files_with_matches || files_without_match, only_matching, quiet,
-                            before_context, after_context, max_count,
-                            Some((file, multi_file)), &mut output,
+                            &content,
+                            &matcher,
+                            invert,
+                            count_only,
+                            show_line_number,
+                            files_with_matches || files_without_match,
+                            only_matching,
+                            quiet,
+                            before_context,
+                            after_context,
+                            max_count,
+                            Some((file, multi_file && !no_filename)),
+                            &mut output,
                         );
                         if count > 0 {
                             if files_with_matches {
@@ -408,7 +471,11 @@ impl Shell {
         let exit_code = if file_errors > 0 {
             2
         } else if files_without_match {
-            if output.is_empty() { 1 } else { 0 }
+            if output.is_empty() {
+                1
+            } else {
+                0
+            }
         } else if total_matches == 0 {
             1
         } else {
@@ -447,6 +514,32 @@ impl Shell {
             }
         }
     }
+}
+
+/// Translate a POSIX BRE pattern to the Rust regex (ERE) dialect: unescaped
+/// `+ ? | ( ) { }` become literals, and `\+ \? \| \( \) \{ \}` become
+/// the corresponding metacharacters.
+fn bre_to_regex(pat: &str) -> String {
+    let mut out = String::new();
+    let mut chars = pat.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n @ ('+' | '?' | '|' | '(' | ')' | '{' | '}')) => out.push(n),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            }
+        } else if matches!(c, '+' | '?' | '|' | '(' | ')' | '{' | '}') {
+            out.push('\\');
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn build_regex(pattern: &str, ignore_case: bool) -> Result<Regex, regex::Error> {
@@ -510,7 +603,11 @@ fn grep_lines(
         .iter()
         .map(|l| {
             let has = matcher(l).is_some();
-            if invert { !has } else { has }
+            if invert {
+                !has
+            } else {
+                has
+            }
         })
         .collect();
     let mut count = matched.iter().filter(|&&m| m).count();
@@ -519,7 +616,11 @@ fn grep_lines(
     }
 
     if count_only {
-        let prefix = if multi { format!("{}:", fname) } else { String::new() };
+        let prefix = if multi {
+            format!("{}:", fname)
+        } else {
+            String::new()
+        };
         output.push_str(&format!("{}{}\n", prefix, count));
         return count;
     }
@@ -626,11 +727,8 @@ mod tests {
     fn mk_shell() -> Shell {
         use std::fs;
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "fastshell_grep_test_{}_{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_grep_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)
@@ -639,7 +737,8 @@ mod tests {
     #[test]
     fn test_grep_help() {
         let mut shell = mk_shell();
-        let out = shell.execute("grep", &["-h"], None);
+        // `--help` shows help; `-h` means `--no-filename` (GNU grep).
+        let out = shell.execute("grep", &["--help"], None);
         assert_eq!(out.exit_code, 0);
         assert!(!out.stdout.is_empty());
     }
@@ -673,7 +772,11 @@ mod tests {
         let mut shell = mk_shell();
         let out = shell.execute("grep", &["-q", "foo"], Some("foobar\nbaz\n"));
         assert_eq!(out.exit_code, 0, "grep -q with match should exit 0");
-        assert!(out.stdout.is_empty(), "grep -q should not print matches: {}", out.stdout);
+        assert!(
+            out.stdout.is_empty(),
+            "grep -q should not print matches: {}",
+            out.stdout
+        );
     }
 
     #[test]
@@ -689,7 +792,11 @@ mod tests {
         let out = shell.execute("grep", &["-E", "^foo[0-9]+$"], Some("foo123\nbar\n"));
         assert_eq!(out.exit_code, 0);
         assert!(out.stdout.contains("foo123"));
-        assert!(!out.stderr.contains("unsupported"), "-E should not warn: {}", out.stderr);
+        assert!(
+            !out.stderr.contains("unsupported"),
+            "-E should not warn: {}",
+            out.stderr
+        );
     }
 
     #[test]
@@ -697,16 +804,30 @@ mod tests {
         let mut shell = mk_shell();
         let out = shell.execute("grep", &["-A", "1", "foo"], Some("a\nfoo\nb\nc\n"));
         assert_eq!(out.exit_code, 0);
-        assert!(out.stdout.contains("foo"), "match line should be present: {}", out.stdout);
-        assert!(out.stdout.contains("\nb\n"), "after-context line should follow");
-        assert!(!out.stdout.contains("\nc\n"), "line outside context should be absent");
+        assert!(
+            out.stdout.contains("foo"),
+            "match line should be present: {}",
+            out.stdout
+        );
+        assert!(
+            out.stdout.contains("\nb\n"),
+            "after-context line should follow"
+        );
+        assert!(
+            !out.stdout.contains("\nc\n"),
+            "line outside context should be absent"
+        );
     }
 
     #[test]
     fn test_grep_context_before() {
         let mut shell = mk_shell();
         let out = shell.execute("grep", &["-B", "1", "foo"], Some("a\nfoo\nb\n"));
-        assert!(out.stdout.contains("a"), "before-context line should be present: {}", out.stdout);
+        assert!(
+            out.stdout.contains("a"),
+            "before-context line should be present: {}",
+            out.stdout
+        );
         assert!(out.stdout.contains("foo"));
     }
 
@@ -724,6 +845,10 @@ mod tests {
         let mut shell = mk_shell();
         // Two matches far apart → groups separated by `--`.
         let out = shell.execute("grep", &["-A", "1", "x"], Some("x\n1\n2\n3\n4\nx\n5\n"));
-        assert!(out.stdout.contains("--"), "separate context groups should be split by --: {}", out.stdout);
+        assert!(
+            out.stdout.contains("--"),
+            "separate context groups should be split by --: {}",
+            out.stdout
+        );
     }
 }

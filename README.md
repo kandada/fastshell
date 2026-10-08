@@ -33,7 +33,7 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 
 ```toml
 [dependencies]
-fastshell = "0.3.3"
+fastshell = "0.3.4"
 ```
 
 ## Quick Start
@@ -293,6 +293,36 @@ for vendor-specific instructions.
 | macOS / Linux | `allow_subprocess = true` | Unknown commands forwarded to system shell |
 
 Built-in commands (`ls`, `grep`, `curl`, `git`, etc.) work everywhere regardless of this setting.
+
+## LGPL-free builds (malachite shims) — read this if you depend on fastshell from crates.io
+
+RustPython depends on the **LGPL-3.0-only** `malachite-*` crates. This repository
+replaces them with **clean-room Apache-2.0 shims** via a workspace-local
+`[patch.crates-io]`:
+
+```toml
+[patch.crates-io]
+malachite-base   = { path = "fastshell/num_bigint/malachite-base" }
+malachite-bigint = { path = "fastshell/num_bigint/malachite-bigint" }
+malachite-q      = { path = "fastshell/num_bigint/malachite-q" }
+```
+
+**This patch is local only — it is not published and is not inherited by
+dependencies.** Consequences:
+
+- Building **inside this repository** (or as the mobile app does): you get the
+  Apache shims — **LGPL-free**.
+- `cargo add fastshell` from **crates.io**: cargo cannot see the patch, so the
+  real upstream **LGPL** `malachite` is used.
+
+To stay LGPL-free while using the crates.io crate, add the same
+`[patch.crates-io]` (pointing at the shim sources in this repo) to **your own
+workspace root**, or depend on `fastshell` via path/git from this repository.
+
+Two vendored, manifest-only forks (`fastshell/vendor/pymath`,
+`fastshell/vendor/rustpython-stdlib`) pin `malachite-bigint` to a single `0.9.x`
+so downstream builds don't break when upstream publishes a new `0.x`. See
+[`docs/lgpl-malachite.md`](docs/lgpl-malachite.md) for the full details.
 
 ## Build from Source
 

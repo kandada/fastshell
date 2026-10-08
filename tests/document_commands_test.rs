@@ -1,8 +1,8 @@
 // Copyright (c) 2025 xiefujin <490021684@qq.com>
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
-use fastshell::Fastshell;
 use fastshell::Config;
+use fastshell::Fastshell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod common;
@@ -54,7 +54,11 @@ fn file_brief_mode() {
     let sdk = setup();
     write_str(&sdk, "a.txt", "hello world\nmore text\n");
     let out = execute(&sdk, "file -b a.txt");
-    assert!(!out.contains("a.txt:"), "brief should suppress filename: {}", out);
+    assert!(
+        !out.contains("a.txt:"),
+        "brief should suppress filename: {}",
+        out
+    );
     assert!(out.contains("ASCII text"), "got: {}", out);
 }
 
@@ -130,7 +134,11 @@ fn strings_custom_minlen() {
     let sdk = setup();
     write_str(&sdk, "test.txt", "abcdef\nhi\n");
     let out = execute(&sdk, "strings -n 2 test.txt");
-    assert!(out.contains("hi"), "minlen 2 should include 2-char strings: {}", out);
+    assert!(
+        out.contains("hi"),
+        "minlen 2 should include 2-char strings: {}",
+        out
+    );
 }
 
 #[test]
@@ -176,9 +184,17 @@ fn pdftotext_missing_file_errors() {
 #[test]
 fn pdftotext_extracts_text_fallback() {
     let sdk = setup();
-    write_str(&sdk, "doc.pdf", "%PDF-1.4\nHello World\nThis is readable text.\n%%EOF\n");
+    write_str(
+        &sdk,
+        "doc.pdf",
+        "%PDF-1.4\nHello World\nThis is readable text.\n%%EOF\n",
+    );
     let out = execute(&sdk, "pdftotext doc.pdf");
-    assert!(out.contains("Hello World") || out.contains("readable text"), "got: {}", out);
+    assert!(
+        out.contains("Hello World") || out.contains("readable text"),
+        "got: {}",
+        out
+    );
 }
 
 #[test]
@@ -210,7 +226,11 @@ fn doctotext_non_docx_errors() {
     let sdk = setup();
     write_str(&sdk, "test.docx", "just plain text");
     let code = exit_code(&sdk, "doctotext test.docx");
-    assert_ne!(code, 0, "should error on non-zip file, got exit code {}", code);
+    assert_ne!(
+        code, 0,
+        "should error on non-zip file, got exit code {}",
+        code
+    );
 }
 
 // ========== epubtext command tests ==========
@@ -243,7 +263,11 @@ fn epubtext_non_epub_errors() {
 fn pip_install_help_flag() {
     let sdk = setup();
     let out = execute(&sdk, "pip-install -h");
-    assert!(out.contains("Usage: pip-install"), "got: {}", out);
+    assert!(
+        out.contains("Usage:") && out.contains("pip-install"),
+        "got: {}",
+        out
+    );
 }
 
 #[test]
@@ -260,6 +284,11 @@ fn which_recognizes_new_commands() {
     let sdk = setup();
     for cmd in &["pdftotext", "pip-install", "doctotext", "epubtext"] {
         let out = execute(&sdk, &format!("which {}", cmd));
-        assert!(out.contains("built-in fastshell command"), "which {}: {}", cmd, out);
+        assert!(
+            out.contains("built-in fastshell command"),
+            "which {}: {}",
+            cmd,
+            out
+        );
     }
 }

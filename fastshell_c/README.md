@@ -106,7 +106,7 @@ handle→ctx registry (`g_agent_tasks`) releases the GlobalRef on `free`.
 android {
     externalNativeBuild {
         cmake {
-            path = file("../../RustroverProjects/fastshell_local/fastshell_c/CMakeLists.txt")
+            path = file("/Volumes/lenovops9/fastshell_local/fastshell_c/CMakeLists.txt")
             version = "3.22.1"
         }
     }

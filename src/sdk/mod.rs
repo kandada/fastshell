@@ -47,6 +47,181 @@ where
     }
 }
 
+/// Run `command` against an already-extracted runtime handle.
+///
+/// Crucially this does **not** touch the global SDK mutex (`SDK_INSTANCE`), so
+/// a long-running command can never block `cancel_execution`, `set_permission`
+/// or another command's FFI entry point. Hosts extract the handles under a
+/// short lock (see `Fastshell::runtime_ref` / `cancel_handle`) and call this.
+/// Arm the shared execution-deadline slot for a command of `timeout_ms`
+/// (`0` = no deadline). Network / blocking builtins read this slot to bound
+/// their own waits so a timed-out command releases the runtime promptly.
+fn arm_deadline(deadline: &Arc<std::sync::atomic::AtomicU64>, timeout_ms: u64) {
+    deadline.store(
+        crate::shell::exec_deadline_after(timeout_ms),
+        Ordering::SeqCst,
+    );
+}
+
+pub fn execute_with_runtime(
+    runtime: Arc<Mutex<Runtime>>,
+    cancel: Arc<AtomicBool>,
+    deadline: Arc<std::sync::atomic::AtomicU64>,
+    timeout_ms: u64,
+    command: &str,
+) -> CommandResult {
+    arm_deadline(&deadline, timeout_ms);
+    if timeout_ms == 0 {
+        let mut rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+        let output = rt.execute_top(command);
+        return CommandResult::from_code(output.stdout, output.stderr, output.exit_code);
+    }
+
+    cancel.store(false, Ordering::SeqCst);
+    let rt = runtime;
+    let cancel_for_thread = cancel.clone();
+    let cmd = command.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("fastshell-exec".to_string())
+        .spawn(move || {
+            // Poll try_lock so we can still respond to cancel requests even
+            // when a previous orphan thread is still holding the lock.
+            let mut runtime = loop {
+                if cancel_for_thread.load(Ordering::SeqCst) {
+                    let _ = tx.send(crate::shell::CommandOutput::error(
+                        "cancelled".to_string(),
+                        143,
+                    ));
+                    return;
+                }
+                match rt.try_lock() {
+                    Ok(r) => break r,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                }
+            };
+            if cancel_for_thread.load(Ordering::SeqCst) {
+                drop(runtime);
+                let _ = tx.send(crate::shell::CommandOutput::error(
+                    "cancelled".to_string(),
+                    143,
+                ));
+                return;
+            }
+            let output = guarded_execute(|| runtime.execute_top(&cmd), &cmd);
+            let _ = tx.send(output);
+        })
+        .expect("fastshell-exec thread spawn failed");
+
+    match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+        Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            cancel.store(true, Ordering::SeqCst);
+            CommandResult {
+                stdout: String::new(),
+                stderr: "command timed out\n".to_string(),
+                exit_code: 124,
+            }
+        }
+        Err(_) => CommandResult::error(format!("internal error: worker thread disconnected (shell panicked or was dropped) while running: {command}")),
+    }
+}
+
+/// [`execute_with_runtime`] variant that runs `command` with `dir` as the
+/// working directory and restores the previous cwd afterwards.
+pub fn execute_in_with_runtime(
+    runtime: Arc<Mutex<Runtime>>,
+    cancel: Arc<AtomicBool>,
+    deadline: Arc<std::sync::atomic::AtomicU64>,
+    timeout_ms: u64,
+    dir: &str,
+    command: &str,
+) -> CommandResult {
+    arm_deadline(&deadline, timeout_ms);
+    if timeout_ms == 0 {
+        let mut rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+        let output = rt.execute_with_cwd(dir, command);
+        return CommandResult::from_code(output.stdout, output.stderr, output.exit_code);
+    }
+
+    cancel.store(false, Ordering::SeqCst);
+    let rt = runtime;
+    let cancel_for_thread = cancel.clone();
+    let cmd = command.to_string();
+    let dir = dir.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("fastshell-exec-cwd".to_string())
+        .spawn(move || {
+            let mut runtime = loop {
+                if cancel_for_thread.load(Ordering::SeqCst) {
+                    let _ = tx.send(crate::shell::CommandOutput::error(
+                        "cancelled".to_string(),
+                        143,
+                    ));
+                    return;
+                }
+                match rt.try_lock() {
+                    Ok(r) => break r,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                }
+            };
+            if cancel_for_thread.load(Ordering::SeqCst) {
+                drop(runtime);
+                let _ = tx.send(crate::shell::CommandOutput::error(
+                    "cancelled".to_string(),
+                    143,
+                ));
+                return;
+            }
+            let output = guarded_execute(|| runtime.execute_with_cwd(&dir, &cmd), &cmd);
+            let _ = tx.send(output);
+        })
+        .expect("fastshell-exec-cwd thread spawn failed");
+
+    match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+        Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            cancel.store(true, Ordering::SeqCst);
+            CommandResult {
+                stdout: String::new(),
+                stderr: "command timed out\n".to_string(),
+                exit_code: 124,
+            }
+        }
+        Err(_) => CommandResult::error(format!("internal error: worker thread disconnected (shell panicked or was dropped) while running: {command}")),
+    }
+}
+
+/// Run Python `code` against an extracted runtime handle (no global SDK lock).
+pub fn execute_python_with_runtime(runtime: Arc<Mutex<Runtime>>, code: &str) -> CommandResult {
+    let mut rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+    let output = rt.execute_python_code(code);
+    CommandResult::from_code(output.stdout, output.stderr, output.exit_code)
+}
+
+/// Run a Python `script_path` against an extracted runtime handle.
+pub fn execute_python_script_with_runtime(
+    runtime: Arc<Mutex<Runtime>>,
+    script_path: &str,
+) -> CommandResult {
+    let mut rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+    let output = rt.execute_python_script(script_path);
+    CommandResult::from_code(output.stdout, output.stderr, output.exit_code)
+}
+
+/// Read the current working directory from an extracted runtime handle.
+pub fn get_cwd_with_runtime(runtime: Arc<Mutex<Runtime>>) -> String {
+    let rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+    rt.cwd().to_string()
+}
+
 pub struct Fastshell {
     runtime: Arc<Mutex<Runtime>>,
     config: Config,
@@ -54,6 +229,7 @@ pub struct Fastshell {
     env_vars: std::collections::HashMap<String, String>,
     permissions: Arc<Mutex<HashMap<String, bool>>>,
     cancel_flag: Arc<AtomicBool>,
+    deadline_flag: Arc<std::sync::atomic::AtomicU64>,
     plugin_ref: Arc<Mutex<Option<Box<dyn DevicePlugin>>>>,
 }
 
@@ -62,6 +238,7 @@ impl Fastshell {
         let permissions = Arc::new(Mutex::new(HashMap::new()));
         let plugin = Arc::new(Mutex::new(None));
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let deadline_flag = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let vfs = Vfs::new(std::env::temp_dir().join("fastshell")).unwrap_or_else(|_| {
             // Fallback: use /tmp/fastshell if temp dir creation fails
             Vfs::new(std::path::PathBuf::from("/tmp/fastshell"))
@@ -70,6 +247,7 @@ impl Fastshell {
         // (c) 2025 xiefujin <490021684@qq.com>
         let mut shell = Shell::with_plugin(vfs, true, false, permissions.clone(), plugin.clone());
         shell.set_cancel_flag(cancel_flag.clone());
+        shell.set_exec_deadline_flag(deadline_flag.clone());
         Fastshell {
             runtime: Arc::new(Mutex::new(Runtime::new(shell, None))),
             config: Config::default(),
@@ -77,6 +255,7 @@ impl Fastshell {
             env_vars: std::collections::HashMap::new(),
             permissions,
             cancel_flag,
+            deadline_flag,
             plugin_ref: plugin,
         }
     }
@@ -111,7 +290,11 @@ impl Fastshell {
         let permissions = Arc::new(Mutex::new(HashMap::new()));
         // Inherit the host's device capabilities (camera/mic/location/…) if a
         // global callback was registered, so agent-spawned instances work too.
-        let inherited = self.plugin_ref.lock().unwrap().take()
+        let inherited = self
+            .plugin_ref
+            .lock()
+            .unwrap()
+            .take()
             .or_else(crate::sdk::device_callback::global_device_plugin);
         let plugin = Arc::new(Mutex::new(inherited));
         let mut shell = Shell::with_plugin(
@@ -124,6 +307,7 @@ impl Fastshell {
         // Share the SDK cancel flag with the shell engine so cooperative
         // cancellation works end-to-end (SDK → Runtime → Shell → builtins).
         shell.set_cancel_flag(self.cancel_flag.clone());
+        shell.set_exec_deadline_flag(self.deadline_flag.clone());
 
         let python: Option<Box<dyn PythonEngine>> = if config.python_enabled {
             Some(python::detect_python_engine(&sandbox_path))
@@ -150,81 +334,40 @@ impl Fastshell {
         if !self.initialized {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
+        // Delegate to the handle-based free function so hosts (the C ABI) can
+        // run a command WITHOUT holding the global SDK mutex for its whole
+        // duration — a long command must not block cancel/permission/other
+        // FFI calls. See `execute_with_runtime`.
+        execute_with_runtime(
+            self.runtime.clone(),
+            self.cancel_flag.clone(),
+            self.deadline_flag.clone(),
+            self.config.command_timeout_ms,
+            command,
+        )
+    }
 
-        // (c) 2025 xiefujin <490021684@qq.com>
-        let timeout_ms = self.config.command_timeout_ms;
+    /// The configured per-command timeout (ms; 0 = run inline, no timeout).
+    pub fn command_timeout_ms(&self) -> u64 {
+        self.config.command_timeout_ms
+    }
 
-        if timeout_ms == 0 {
-            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-            let output = rt.execute(command);
-            return CommandResult::from_code(output.stdout, output.stderr, output.exit_code);
-        }
-
-        self.cancel_flag.store(false, Ordering::SeqCst);
-        let rt = self.runtime.clone();
-        let cancel = self.cancel_flag.clone();
-        let cmd = command.to_string();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("fastshell-exec".to_string())
-            .spawn(move || {
-            // Poll try_lock so we can still respond to cancel requests even
-            // when a previous orphan thread is still holding the lock.
-            let mut runtime = loop {
-                if cancel.load(Ordering::SeqCst) {
-                    let _ = tx.send(crate::shell::CommandOutput::error(
-                        "cancelled".to_string(),
-                        143,
-                    ));
-                    return;
-                }
-                match rt.try_lock() {
-                    Ok(r) => break r,
-                    Err(std::sync::TryLockError::WouldBlock) => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
-                }
-            };
-            if cancel.load(Ordering::SeqCst) {
-                drop(runtime);
-                let _ = tx.send(crate::shell::CommandOutput::error(
-                    "cancelled".to_string(),
-                    143,
-                ));
-                return;
-            }
-            let output = guarded_execute(|| runtime.execute(&cmd), &cmd);
-            let _ = tx.send(output);
-        }).expect("fastshell-exec thread spawn failed");
-
-        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-            Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                self.cancel_flag.store(true, Ordering::SeqCst);
-                CommandResult {
-                    stdout: String::new(),
-                    stderr: "command timed out\n".to_string(),
-                    exit_code: 124,
-                }
-            }
-            Err(_) => CommandResult::error(format!("internal error: worker thread disconnected (shell panicked or was dropped) while running: {command}")),
-        }
+    /// A clone of the permission map, so a host can update/read permissions
+    /// without holding the global SDK mutex.
+    pub fn permissions_handle(&self) -> Arc<Mutex<HashMap<String, bool>>> {
+        self.permissions.clone()
     }
 
     /// Execute a command with a per-call timeout override (milliseconds).
     /// When `per_call_timeout_ms` is `Some`, it overrides
     /// `self.config.command_timeout_ms` for this single invocation.
-    pub fn execute_with_timeout(
-        &self,
-        command: &str,
-        per_call_timeout_ms: u64,
-    ) -> CommandResult {
+    pub fn execute_with_timeout(&self, command: &str, per_call_timeout_ms: u64) -> CommandResult {
         if !self.initialized {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
 
         self.cancel_flag.store(false, Ordering::SeqCst);
+        arm_deadline(&self.deadline_flag, per_call_timeout_ms);
         let rt = self.runtime.clone();
         let cancel = self.cancel_flag.clone();
         let cmd = command.to_string();
@@ -232,33 +375,34 @@ impl Fastshell {
         std::thread::Builder::new()
             .name("fastshell-exec-tw".to_string())
             .spawn(move || {
-            let mut runtime = loop {
+                let mut runtime = loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        let _ = tx.send(crate::shell::CommandOutput::error(
+                            "cancelled".to_string(),
+                            143,
+                        ));
+                        return;
+                    }
+                    match rt.try_lock() {
+                        Ok(r) => break r,
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                    }
+                };
                 if cancel.load(Ordering::SeqCst) {
+                    drop(runtime);
                     let _ = tx.send(crate::shell::CommandOutput::error(
                         "cancelled".to_string(),
                         143,
                     ));
                     return;
                 }
-                match rt.try_lock() {
-                    Ok(r) => break r,
-                    Err(std::sync::TryLockError::WouldBlock) => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
-                }
-            };
-            if cancel.load(Ordering::SeqCst) {
-                drop(runtime);
-                let _ = tx.send(crate::shell::CommandOutput::error(
-                    "cancelled".to_string(),
-                    143,
-                ));
-                return;
-            }
-            let output = guarded_execute(|| runtime.execute(&cmd), &cmd);
-            let _ = tx.send(output);
-        }).expect("fastshell-exec-tw thread spawn failed");
+                let output = guarded_execute(|| runtime.execute_top(&cmd), &cmd);
+                let _ = tx.send(output);
+            })
+            .expect("fastshell-exec-tw thread spawn failed");
 
         match rx.recv_timeout(Duration::from_millis(per_call_timeout_ms)) {
             Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
@@ -278,72 +422,50 @@ impl Fastshell {
         self.cancel_flag.store(true, Ordering::SeqCst);
     }
 
+    /// A clone of the internal cancel flag. Hosts can hold this handle and set
+    /// it from another thread **without locking the SDK**, so a running command
+    /// can be aborted even while the SDK mutex is held by that command (e.g. a
+    /// cancelled task's `run_shell` that would otherwise keep holding the lock).
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
+
+    /// A clone of the internal execution-deadline slot (absolute monotonic ms;
+    /// 0 = none). The SDK arms it before each timed command; network builtins
+    /// read it so they abort at the deadline instead of holding the runtime
+    /// until their own much longer socket timeout.
+    pub fn deadline_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.deadline_flag.clone()
+    }
+
     /// Like [`execute`], but runs the command with `dir` as the working
     /// directory and restores the previous cwd afterwards. Safe for
     /// concurrent hosts: callers no longer need `cd X && ...` prefixes and
     /// never pollute the shared cwd.
     pub fn execute_in(&self, dir: &str, command: &str) -> CommandResult {
+        self.execute_in_with_timeout(dir, command, self.config.command_timeout_ms)
+    }
+
+    /// Like [`execute_in`], but with a per-call timeout override (ms; 0 = no
+    /// timeout). Runs `command` with `dir` as the working directory and restores
+    /// the previous cwd afterwards, so callers never pollute the shared cwd.
+    pub fn execute_in_with_timeout(
+        &self,
+        dir: &str,
+        command: &str,
+        per_call_timeout_ms: u64,
+    ) -> CommandResult {
         if !self.initialized {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
-
-        let timeout_ms = self.config.command_timeout_ms;
-
-        if timeout_ms == 0 {
-            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-            let output = rt.execute_with_cwd(dir, command);
-            return CommandResult::from_code(output.stdout, output.stderr, output.exit_code);
-        }
-
-        self.cancel_flag.store(false, Ordering::SeqCst);
-        let rt = self.runtime.clone();
-        let cancel = self.cancel_flag.clone();
-        let cmd = command.to_string();
-        let dir = dir.to_string();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("fastshell-exec-cwd".to_string())
-            .spawn(move || {
-            let mut runtime = loop {
-                if cancel.load(Ordering::SeqCst) {
-                    let _ = tx.send(crate::shell::CommandOutput::error(
-                        "cancelled".to_string(),
-                        143,
-                    ));
-                    return;
-                }
-                match rt.try_lock() {
-                    Ok(r) => break r,
-                    Err(std::sync::TryLockError::WouldBlock) => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
-                }
-            };
-            if cancel.load(Ordering::SeqCst) {
-                drop(runtime);
-                let _ = tx.send(crate::shell::CommandOutput::error(
-                    "cancelled".to_string(),
-                    143,
-                ));
-                return;
-            }
-            let output = guarded_execute(|| runtime.execute_with_cwd(&dir, &cmd), &cmd);
-            let _ = tx.send(output);
-        }).expect("fastshell-exec-cwd thread spawn failed");
-
-        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-            Ok(output) => CommandResult::from_code(output.stdout, output.stderr, output.exit_code),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                self.cancel_flag.store(true, Ordering::SeqCst);
-                CommandResult {
-                    stdout: String::new(),
-                    stderr: "command timed out\n".to_string(),
-                    exit_code: 124,
-                }
-            }
-            Err(_) => CommandResult::error(format!("internal error: worker thread disconnected (shell panicked or was dropped) while running: {command}")),
-        }
+        execute_in_with_runtime(
+            self.runtime.clone(),
+            self.cancel_flag.clone(),
+            self.deadline_flag.clone(),
+            per_call_timeout_ms,
+            dir,
+            command,
+        )
     }
 
     pub fn execute_python(&self, code: &str) -> CommandResult {
@@ -351,26 +473,21 @@ impl Fastshell {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
         // (c) 2025 xiefujin <490021684@qq.com>
-        let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        let output = rt.execute_python_code(code);
-        CommandResult::from_code(output.stdout, output.stderr, output.exit_code)
+        execute_python_with_runtime(self.runtime.clone(), code)
     }
 
     pub fn execute_python_script(&self, script_path: &str) -> CommandResult {
         if !self.initialized {
             return CommandResult::error("SDK not initialized. Call init() first.".to_string());
         }
-        let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        let output = rt.execute_python_script(script_path);
-        CommandResult::from_code(output.stdout, output.stderr, output.exit_code)
+        execute_python_script_with_runtime(self.runtime.clone(), script_path)
     }
 
     pub fn get_cwd(&self) -> String {
         if !self.initialized {
             return "/".to_string();
         }
-        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        rt.cwd().to_string()
+        get_cwd_with_runtime(self.runtime.clone())
     }
 
     pub fn read_file(&self, path: &str) -> Result<String, String> {
@@ -554,12 +671,13 @@ mod tests {
 
     #[test]
     fn test_guarded_execute_catches_panic() {
-        let out = guarded_execute(
-            || panic!("boom"),
-            "some command",
-        );
+        let out = guarded_execute(|| panic!("boom"), "some command");
         assert_eq!(out.exit_code, 134);
-        assert!(out.stderr.contains("command panicked"), "stderr={}", out.stderr);
+        assert!(
+            out.stderr.contains("command panicked"),
+            "stderr={}",
+            out.stderr
+        );
         assert!(out.stderr.contains("boom"), "stderr={}", out.stderr);
         assert!(out.stderr.contains("some command"), "stderr={}", out.stderr);
     }
@@ -688,7 +806,7 @@ mod tests {
     fn test_get_info() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.3.0");
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert!(!info.platform.is_empty());
     }
 
@@ -741,13 +859,22 @@ mod tests {
         // shared with other tests and would race under parallel execution.
         assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), None);
         sdk.set_permission("network:perm-mgmt.internal", true);
-        assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), Some(true));
+        assert_eq!(
+            sdk.check_permission("network:perm-mgmt.internal"),
+            Some(true)
+        );
         sdk.set_permission("network:perm-mgmt.internal", false);
-        assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), Some(false));
+        assert_eq!(
+            sdk.check_permission("network:perm-mgmt.internal"),
+            Some(false)
+        );
         sdk.clear_permissions();
         assert_eq!(sdk.check_permission("network:perm-mgmt.internal"), None);
         // The global fallback must be wiped too (agent instances read it).
-        assert_eq!(crate::shell::global_permission("network:perm-mgmt.internal"), None);
+        assert_eq!(
+            crate::shell::global_permission("network:perm-mgmt.internal"),
+            None
+        );
     }
 
     #[test]
@@ -817,14 +944,14 @@ mod tests {
 
         let result = sdk.execute("nonexistent_xyz_123");
         assert_eq!(result.exit_code, 127);
-        assert!(result.stderr.contains("subprocess disabled"));
+        assert!(result.stderr.contains("command not found"));
     }
 
     #[test]
     fn test_sdk_info_includes_allow_subprocess() {
         let sdk = setup_sdk();
         let info = sdk.get_info();
-        assert_eq!(info.version, "0.3.0");
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert!(info.allow_subprocess);
     }
 }

@@ -42,9 +42,7 @@ impl Shell {
                 "-w" => ignore_ws = Some(IgnoreWs::All),
                 "-q" => brief = true,
                 "-N" | "--new-file" => {} // treat absent files as empty (no-op here)
-                ,
-                "-a" | "--text" => {} // treat all files as text (already text)
-                ,
+                "-a" | "--text" => {}     // treat all files as text (already text)
                 "-U" => {
                     if i + 1 < args.len() {
                         if let Ok(n) = args[i + 1].parse::<usize>() {
@@ -116,11 +114,11 @@ impl Shell {
             );
         }
 
-        let f1 = match self.vfs.read_to_string(path1, &self.cwd) {
+        let f1 = match self.read_text_lossy(path1) {
             Ok(c) => c,
             Err(e) => return CommandOutput::error(format!("diff: {}: {}\n", path1, e), 1),
         };
-        let f2 = match self.vfs.read_to_string(path2, &self.cwd) {
+        let f2 = match self.read_text_lossy(path2) {
             Ok(c) => c,
             Err(e) => return CommandOutput::error(format!("diff: {}: {}\n", path2, e), 1),
         };
@@ -233,7 +231,7 @@ fn diff_directories(
                     ));
                     has_diff = true;
                 } else {
-                    let f1_content = match shell.vfs.read_to_string(&sub_path1, &shell.cwd) {
+                    let f1_content = match shell.read_text_lossy(&sub_path1) {
                         Ok(c) => c,
                         Err(_) => {
                             output.push_str(&format!("diff: {}: cannot read\n", sub_path1));
@@ -241,7 +239,7 @@ fn diff_directories(
                             continue;
                         }
                     };
-                    let f2_content = match shell.vfs.read_to_string(&sub_path2, &shell.cwd) {
+                    let f2_content = match shell.read_text_lossy(&sub_path2) {
                         Ok(c) => c,
                         Err(_) => {
                             output.push_str(&format!("diff: {}: cannot read\n", sub_path2));

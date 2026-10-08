@@ -20,6 +20,7 @@ impl Shell {
         }
         let mut use_utc = false;
         let mut date_str: Option<String> = None;
+        let mut epoch_override: Option<u64> = None;
         let mut format = None;
         let mut rfc_email = false;
         let mut iso8601 = false;
@@ -32,6 +33,14 @@ impl Shell {
                 "-d" | "--date" => {
                     if i + 1 < args.len() {
                         date_str = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                "-r" | "--reference" => {
+                    if i + 1 < args.len() {
+                        if let Ok(secs) = args[i + 1].parse::<i64>() {
+                            epoch_override = Some(secs.max(0) as u64);
+                        }
                         i += 1;
                     }
                 }
@@ -61,13 +70,30 @@ impl Shell {
             i += 1;
         }
 
-        let secs = if let Some(ref ds) = date_str {
-            match parse_iso8601(ds) {
-                Some(s) => s,
-                None => match parse_relative_time(ds) {
+        let secs = if let Some(epoch) = epoch_override {
+            epoch
+        } else if let Some(ref ds) = date_str {
+            if let Some(rest) = ds.strip_prefix('@') {
+                // GNU style: `date -d @1700000000`
+                match rest.parse::<u64>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return CommandOutput::error(format!("date: invalid date '{}'\n", ds), 1)
+                    }
+                }
+            } else {
+                match parse_iso8601(ds) {
                     Some(s) => s,
-                    None => return CommandOutput::error(format!("date: invalid date '{}'\n", ds), 1),
-                },
+                    None => match parse_relative_time(ds) {
+                        Some(s) => s,
+                        None => {
+                            return CommandOutput::error(
+                                format!("date: invalid date '{}'\n", ds),
+                                1,
+                            )
+                        }
+                    },
+                }
             }
         } else {
             let dur = std::time::SystemTime::now()
@@ -103,10 +129,18 @@ fn format_rfc2822(secs: u64) -> String {
     let (hour, minute, second) = (tod / 3600, (tod % 3600) / 60, tod % 60);
     let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         [((days_since_epoch as i64 + 4) % 7) as usize];
-    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month_names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     format!(
         "{}, {:02} {} {} {:02}:{:02}:{:02} +0000",
-        weekday, day, month_names[(month - 1).max(0) as usize], year, hour, minute, second
+        weekday,
+        day,
+        month_names[(month - 1).max(0) as usize],
+        year,
+        hour,
+        minute,
+        second
     )
 }
 
@@ -116,10 +150,19 @@ fn format_iso8601(secs: u64, suffix: &str) -> String {
     let (year, month, day) = crate::shell::civil_from_days(days_since_epoch);
     let (hour, minute, second) = (tod / 3600, (tod % 3600) / 60, tod % 60);
     match suffix {
-        "seconds" => format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00", year, month, day, hour, minute, second),
-        "minutes" => format!("{:04}-{:02}-{:02}T{:02}:{:02}+00:00", year, month, day, hour, minute),
+        "seconds" => format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
+            year, month, day, hour, minute, second
+        ),
+        "minutes" => format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}+00:00",
+            year, month, day, hour, minute
+        ),
         "hours" => format!("{:04}-{:02}-{:02}T{:02}:00+00:00", year, month, day, hour),
-        "ns" => format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000000000+00:00", year, month, day, hour, minute, second),
+        "ns" => format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000000000+00:00",
+            year, month, day, hour, minute, second
+        ),
         _ => format!("{:04}-{:02}-{:02}", year, month, day),
     }
 }
@@ -265,7 +308,11 @@ fn format_date(secs: u64, use_utc: bool, fmt: &str) -> String {
         "December",
     ];
 
-    let tz_offset = if use_utc { "+0000".to_string() } else { timezone_offset() };
+    let tz_offset = if use_utc {
+        "+0000".to_string()
+    } else {
+        timezone_offset()
+    };
 
     let mut result = fmt.to_string();
     result = result.replace("%F", &format!("{:04}-{:02}-{:02}", year, month, day));
@@ -342,7 +389,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_date_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_date_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)
@@ -370,7 +418,11 @@ mod tests {
         let out = s.execute("date", &["+%F"], None);
         // %F = %Y-%m-%d
         let re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
-        assert!(re.is_match(out.stdout.trim()), "%F should be YYYY-MM-DD, got: {}", out.stdout);
+        assert!(
+            re.is_match(out.stdout.trim()),
+            "%F should be YYYY-MM-DD, got: {}",
+            out.stdout
+        );
     }
 
     #[test]
@@ -379,7 +431,11 @@ mod tests {
         let out = s.execute("date", &["+%T"], None);
         // %T = %H:%M:%S
         let re = regex::Regex::new(r"^\d{2}:\d{2}:\d{2}$").unwrap();
-        assert!(re.is_match(out.stdout.trim()), "%T should be HH:MM:SS, got: {}", out.stdout);
+        assert!(
+            re.is_match(out.stdout.trim()),
+            "%T should be HH:MM:SS, got: {}",
+            out.stdout
+        );
     }
 
     #[test]
@@ -410,7 +466,10 @@ mod tests {
             .unwrap()
             .as_secs();
         let v = super::parse_relative_time("5 minutes ago").unwrap();
-        assert!((v as i64 - (now as i64 - 300)).abs() < 5, "5 minutes ago should be ~now-300");
+        assert!(
+            (v as i64 - (now as i64 - 300)).abs() < 5,
+            "5 minutes ago should be ~now-300"
+        );
     }
 
     #[test]
@@ -422,6 +481,9 @@ mod tests {
             .unwrap()
             .as_secs();
         let val: i64 = out.stdout.trim().parse().unwrap();
-        assert!((val - (now as i64 - 86400)).abs() < 5, "date -d yesterday +%s should be ~now-86400");
+        assert!(
+            (val - (now as i64 - 86400)).abs() < 5,
+            "date -d yesterday +%s should be ~now-86400"
+        );
     }
 }

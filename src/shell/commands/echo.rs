@@ -36,9 +36,12 @@ impl Shell {
                     enable_escapes = false;
                     start += 1;
                 }
-                a if a.starts_with('-') => {
-                    crate::warn!("echo: warning: unsupported option '{}'", a);
+                // `--` ends option parsing; any other argument (including
+                // `---`) is literal — matches POSIX/bash echo, which only
+                // knows -n/-e/-E.
+                "--" => {
                     start += 1;
+                    break;
                 }
                 _ => break,
             }
@@ -113,7 +116,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_echo_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_echo_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)

@@ -62,9 +62,7 @@ fn joins_and_aggregates() {
     sdk.execute("sqlite3 shop.db 'CREATE TABLE customers (id, name)'");
     sdk.execute("sqlite3 shop.db 'CREATE TABLE orders (id, customer_id, amount)'");
     sdk.execute("sqlite3 shop.db \"INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')\"");
-    sdk.execute(
-        "sqlite3 shop.db \"INSERT INTO orders VALUES (1, 1, 10), (2, 1, 20), (3, 2, 15)\"",
-    );
+    sdk.execute("sqlite3 shop.db \"INSERT INTO orders VALUES (1, 1, 10), (2, 1, 20), (3, 2, 15)\"");
 
     let r = sdk.execute(
         "sqlite3 shop.db 'SELECT c.name, COUNT(o.id), SUM(o.amount) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.name ORDER BY c.name'",
@@ -83,7 +81,12 @@ fn transaction_commit_persists() {
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
 
     let r = sdk.execute("sqlite3 t.db 'SELECT x FROM t'");
-    assert_eq!(r.stdout.trim(), "42", "committed data must persist: {}", r.stdout);
+    assert_eq!(
+        r.stdout.trim(),
+        "42",
+        "committed data must persist: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -94,7 +97,12 @@ fn transaction_rollback_discards() {
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
 
     let r = sdk.execute("sqlite3 t.db 'SELECT COUNT(*) FROM t'");
-    assert_eq!(r.stdout.trim(), "0", "rolled-back data must be gone: {}", r.stdout);
+    assert_eq!(
+        r.stdout.trim(),
+        "0",
+        "rolled-back data must be gone: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -163,16 +171,24 @@ fn data_persists_across_calls() {
     sdk.execute("sqlite3 t.db 'CREATE TABLE kv (k, v)'");
     sdk.execute("sqlite3 t.db \"INSERT INTO kv VALUES ('theme', 'dark')\"");
     let r = sdk.execute("sqlite3 t.db \"SELECT v FROM kv WHERE k = 'theme'\"");
-    assert_eq!(r.stdout.trim(), "dark", "persistence across calls: {}", r.stdout);
+    assert_eq!(
+        r.stdout.trim(),
+        "dark",
+        "persistence across calls: {}",
+        r.stdout
+    );
 }
 
 #[test]
 fn pipeline_with_grep() {
     let sdk = setup();
     sdk.execute("sqlite3 t.db 'CREATE TABLE log (msg)'");
-    sdk.execute("sqlite3 t.db \"INSERT INTO log VALUES ('info: ok'), ('error: boom'), ('info: done')\"");
+    sdk.execute(
+        "sqlite3 t.db \"INSERT INTO log VALUES ('info: ok'), ('error: boom'), ('info: done')\"",
+    );
 
-    let r = sdk.execute("sqlite3 t.db \"SELECT msg FROM log WHERE msg LIKE 'error:%'\" | grep error");
+    let r =
+        sdk.execute("sqlite3 t.db \"SELECT msg FROM log WHERE msg LIKE 'error:%'\" | grep error");
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
     assert!(r.stdout.contains("boom"), "stdout={}", r.stdout);
 }

@@ -18,6 +18,36 @@ pub(crate) fn plugin<T>(
     }
 }
 
+/// A short, explicit success confirmation. Side-effect device commands used to
+/// return an empty string on success, which gave the agent no acknowledgement
+/// of the action ("it worked but I got no result") and caused repeated calls.
+fn ok(msg: &str) -> CommandOutput {
+    CommandOutput::success(format!("{msg}\n"))
+}
+
+impl Shell {
+    /// True when `key` was **successfully** opened within the debounce window.
+    /// Per-instance and success-based: a failed open is retried immediately, and
+    /// a success is not repeated (idempotency). Prevents the agent from
+    /// re-issuing an identical open (which on iOS also returns transient
+    /// `false` and looks like failure).
+    pub(crate) fn open_is_recent(&self, key: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut m = self.open_recent.borrow_mut();
+        m.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(30));
+        m.get(key)
+            .map(|t| now.duration_since(*t) < std::time::Duration::from_millis(1500))
+            .unwrap_or(false)
+    }
+
+    /// Record a successful open for debouncing.
+    pub(crate) fn mark_open(&self, key: &str) {
+        self.open_recent
+            .borrow_mut()
+            .insert(key.to_string(), std::time::Instant::now());
+    }
+}
+
 impl Shell {
     /// Resolve a device-command path (VFS semantics: `/x` = sandbox root,
     /// relative = cwd) into a **host absolute path** before handing it to the
@@ -40,6 +70,12 @@ impl Shell {
 impl Shell {
     // ── camera ──
     pub fn cmd_camera(&self, args: &[&str]) -> CommandOutput {
+        if args.first().is_some_and(|a| matches!(*a, "-h" | "--help")) {
+            return CommandOutput::success(
+                "usage: camera [PATH]\n  Capture a photo and save it to PATH (default /photo.jpg).\n"
+                    .to_string(),
+            );
+        }
         let path = args
             .first()
             .map(|s| s.to_string())
@@ -47,7 +83,10 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("camera", "photo") {
             return perm;
         }
-        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        let host = match self.device_host_path(&path) {
+            Ok(h) => h,
+            Err(e) => return e,
+        };
         match plugin(self, |p| p.take_photo(&host)) {
             Ok(()) => CommandOutput::success(format!("Photo saved to {}\n", path)),
             Err(e) => e,
@@ -56,6 +95,12 @@ impl Shell {
 
     // ── screencapture ──
     pub fn cmd_screencapture(&self, args: &[&str]) -> CommandOutput {
+        if args.first().is_some_and(|a| matches!(*a, "-h" | "--help")) {
+            return CommandOutput::success(
+                "usage: screencapture [PATH]\n  Capture the screen to PATH (default /screenshot.png).\n"
+                    .to_string(),
+            );
+        }
         let path = args
             .first()
             .map(|s| s.to_string())
@@ -63,7 +108,10 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("screen", "capture") {
             return perm;
         }
-        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        let host = match self.device_host_path(&path) {
+            Ok(h) => h,
+            Err(e) => return e,
+        };
         match plugin(self, |p| p.take_screenshot(&host)) {
             Ok(()) => CommandOutput::success(format!("Screenshot saved to {}\n", path)),
             Err(e) => e,
@@ -101,7 +149,10 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("photolib", "read") {
             return perm;
         }
-        let output_dir = match self.device_host_path(&output_dir) { Ok(h) => h, Err(e) => return e };
+        let output_dir = match self.device_host_path(&output_dir) {
+            Ok(h) => h,
+            Err(e) => return e,
+        };
         match plugin(self, |p| {
             if media_type == "video" {
                 p.pick_video(&output_dir).map(|p| {
@@ -148,7 +199,10 @@ impl Shell {
             return perm;
         }
         let duration = duration.max(1);
-        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        let host = match self.device_host_path(&path) {
+            Ok(h) => h,
+            Err(e) => return e,
+        };
         match plugin(self, |p| p.record_audio(&host, duration)) {
             Ok(()) => CommandOutput::success(format!("Recorded {}s to {}\n", duration, path)),
             Err(e) => e,
@@ -161,9 +215,12 @@ impl Shell {
             Some(p) => p.to_string(),
             None => return CommandOutput::error("play: missing file path\n".to_string(), 1),
         };
-        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        let host = match self.device_host_path(&path) {
+            Ok(h) => h,
+            Err(e) => return e,
+        };
         match plugin(self, |p| p.play_audio(&host)) {
-            Ok(()) => CommandOutput::success(String::new()),
+            Ok(()) => ok("playing"),
             Err(e) => e,
         }
     }
@@ -175,7 +232,7 @@ impl Shell {
             return CommandOutput::error("say: missing text\n".to_string(), 1);
         }
         match plugin(self, |p| p.text_to_speech(&text)) {
-            Ok(()) => CommandOutput::success(String::new()),
+            Ok(()) => ok("spoken"),
             Err(e) => e,
         }
     }
@@ -191,7 +248,10 @@ impl Shell {
         if let Some(perm) = self.check_device_permission("microphone", "speech") {
             return perm;
         }
-        let host = match self.device_host_path(&path) { Ok(h) => h, Err(e) => return e };
+        let host = match self.device_host_path(&path) {
+            Ok(h) => h,
+            Err(e) => return e,
+        };
         match plugin(self, |p| p.speech_to_text(&host)) {
             Ok(text) => CommandOutput::success(format!("{}\n", text)),
             Err(e) => e,
@@ -267,7 +327,7 @@ impl Shell {
                 return CommandOutput::error("clipboard set: missing text\n".to_string(), 1);
             }
             return match plugin(self, |p| p.set_clipboard(&text)) {
-                Ok(()) => CommandOutput::success(String::new()),
+                Ok(()) => ok("clipboard set"),
                 Err(e) => e,
             };
         }
@@ -284,7 +344,7 @@ impl Shell {
             return CommandOutput::error("pbcopy: missing text\n".to_string(), 1);
         }
         match plugin(self, |p| p.set_clipboard(&text)) {
-            Ok(()) => CommandOutput::success(String::new()),
+            Ok(()) => ok("clipboard set"),
             Err(e) => e,
         }
     }
@@ -327,6 +387,45 @@ impl Shell {
 
     // ── notify ──
     pub fn cmd_notify(&self, args: &[&str]) -> CommandOutput {
+        // Support `--title/-t` and `--message/--body/-m/-b` (notify-send style).
+        let mut title_opt: Option<String> = None;
+        let mut body_opt: Option<String> = None;
+        let mut rest: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--title" | "-t" => {
+                    if i + 1 < args.len() {
+                        title_opt = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                "--message" | "--body" | "-m" | "-b" => {
+                    if i + 1 < args.len() {
+                        body_opt = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                a if a.starts_with("--title=") => {
+                    title_opt = Some(a["--title=".len()..].to_string())
+                }
+                a if a.starts_with("--message=") => {
+                    body_opt = Some(a["--message=".len()..].to_string())
+                }
+                a => rest.push(a),
+            }
+            i += 1;
+        }
+        if title_opt.is_some() || body_opt.is_some() {
+            let title = title_opt.unwrap_or_else(|| "fastshell".to_string());
+            let body = body_opt.unwrap_or_default();
+            let sound = args.contains(&"--sound");
+            return match plugin(self, |p| p.send_notification(&title, &body, sound)) {
+                Ok(()) => ok("notified"),
+                Err(e) => e,
+            };
+        }
+        let args: &[&str] = &rest;
         let (title, body) = if let Some(pos) = args.iter().position(|&a| a == "--") {
             let title = args[..pos].join(" ");
             let body = args[pos + 1..].join(" ");
@@ -340,7 +439,7 @@ impl Shell {
         };
         let sound = args.contains(&"--sound");
         match plugin(self, |p| p.send_notification(&title, &body, sound)) {
-            Ok(()) => CommandOutput::success(String::new()),
+            Ok(()) => ok("notified"),
             Err(e) => e,
         }
     }
@@ -374,14 +473,17 @@ impl Shell {
         }
         match (path, text) {
             (Some(p), _) => {
-                let host = match self.device_host_path(&p) { Ok(h) => h, Err(e) => return e };
+                let host = match self.device_host_path(&p) {
+                    Ok(h) => h,
+                    Err(e) => return e,
+                };
                 match plugin(self, |p2| p2.share_file(&host, &mime)) {
-                    Ok(()) => CommandOutput::success(String::new()),
+                    Ok(()) => ok("shared"),
                     Err(e) => e,
                 }
             }
             (_, Some(t)) => match plugin(self, |p2| p2.share_text(&t)) {
-                Ok(()) => CommandOutput::success(String::new()),
+                Ok(()) => ok("shared"),
                 Err(e) => e,
             },
             _ => CommandOutput::error("share: missing file or --text\n".to_string(), 1),
@@ -390,12 +492,65 @@ impl Shell {
 
     // ── open ──
     pub fn cmd_open_url(&self, args: &[&str]) -> CommandOutput {
+        if matches!(args.first(), Some(&"-h") | Some(&"--help")) {
+            return CommandOutput::success(
+                "usage: open <url>\n  Open a URL via the host OS (http/https/mailto/tel/…).\n  To open app/system settings use `open_settings`.\n"
+                    .to_string(),
+            );
+        }
         let url = match args.first() {
             Some(u) => u.to_string(),
             None => return CommandOutput::error("open: missing URL\n".to_string(), 1),
         };
+        let key = format!("open:{url}");
+        if self.open_is_recent(&key) {
+            return ok(&format!("already opening: {url}"));
+        }
         match plugin(self, |p| p.open_url(&url)) {
-            Ok(()) => CommandOutput::success(String::new()),
+            // Echo a confirmation: an empty success gave the agent no feedback
+            // ("opened" is now visible in stdout), which used to cause re-opens.
+            Ok(()) => {
+                self.mark_open(&key);
+                ok(&format!("opened: {url}"))
+            }
+            Err(e) => e,
+        }
+    }
+
+    // ── open_settings ──
+    /// Open a settings page: `app` (default) | `system` | `accessibility` |
+    /// `notification`. Opens the app's own settings reliably on iOS/Android;
+    /// system/accessibility pages are Android-only (iOS returns a clear error).
+    pub fn cmd_open_settings(&self, args: &[&str]) -> CommandOutput {
+        if matches!(args.first(), Some(&"-h") | Some(&"--help")) {
+            return CommandOutput::success(
+                "usage: open_settings [app|system|accessibility|notification]\n  Open a settings page (default: app).\n"
+                    .to_string(),
+            );
+        }
+        let target = match args.first() {
+            None => "app",
+            Some(t) => match *t {
+                "app" | "system" | "accessibility" | "notification" => *t,
+                other => {
+                    return CommandOutput::error(
+                        format!(
+                            "open_settings: unknown target '{other}' (app|system|accessibility|notification)\n"
+                        ),
+                        1,
+                    )
+                }
+            },
+        };
+        let key = format!("settings:{target}");
+        if self.open_is_recent(&key) {
+            return ok(&format!("already opening: {target}"));
+        }
+        match plugin(self, |p| p.open_settings(target)) {
+            Ok(()) => {
+                self.mark_open(&key);
+                ok(&format!("settings opened: {target}"))
+            }
             Err(e) => e,
         }
     }
@@ -434,7 +589,7 @@ impl Shell {
     pub fn cmd_vibrate(&self, args: &[&str]) -> CommandOutput {
         let ms: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(200);
         match plugin(self, |p| p.vibrate(ms)) {
-            Ok(()) => CommandOutput::success(String::new()),
+            Ok(()) => ok("vibrated"),
             Err(e) => e,
         }
     }
@@ -449,7 +604,7 @@ impl Shell {
                         if let Ok(level) = args[i + 1].parse::<f64>() {
                             let level = level.clamp(0.0, 1.0);
                             return match plugin(self, |p| p.set_brightness(level)) {
-                                Ok(()) => CommandOutput::success(String::new()),
+                                Ok(()) => ok("brightness set"),
                                 Err(e) => e,
                             };
                         }
@@ -461,13 +616,13 @@ impl Shell {
                 }
                 "on" => {
                     return match plugin(self, |p| p.keep_screen_on(true)) {
-                        Ok(()) => CommandOutput::success(String::new()),
+                        Ok(()) => ok("screen on"),
                         Err(e) => e,
                     };
                 }
                 "off" => {
                     return match plugin(self, |p| p.keep_screen_on(false)) {
-                        Ok(()) => CommandOutput::success(String::new()),
+                        Ok(()) => ok("screen off"),
                         Err(e) => e,
                     };
                 }

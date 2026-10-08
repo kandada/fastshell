@@ -15,7 +15,7 @@ Send a signal to a process.
 ";
 
 impl Shell {
-    pub fn cmd_kill(&self, args: &[&str]) -> CommandOutput {
+    pub fn cmd_kill(&mut self, args: &[&str]) -> CommandOutput {
         if args.contains(&"-h") || args.contains(&"--help") {
             return CommandOutput::success(KILL_HELP_TEXT.to_string());
         }
@@ -28,6 +28,36 @@ impl Shell {
                 "kill: usage: kill [-signal|-s signal] pid...\n".to_string(),
                 1,
             );
+        }
+
+        // Job specs: `kill %1` / `%+` / `%-` / `%name`.
+        if args.iter().any(|a| a.starts_with('%')) {
+            let mut rest: Vec<&str> = Vec::new();
+            for a in args {
+                if let Some(key) = a.strip_prefix('%') {
+                    let idx = match key {
+                        "" | "+" | "%" => self.jobs.len().checked_sub(1),
+                        "-" => self.jobs.len().checked_sub(2),
+                        other => other
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|n| n.checked_sub(1))
+                            .or_else(|| self.jobs.iter().position(|j| j.cmd.contains(other))),
+                    };
+                    match idx {
+                        Some(i) if i < self.jobs.len() => {
+                            self.jobs[i].status = "Killed".to_string();
+                        }
+                        _ => return CommandOutput::error(format!("kill: {}: no such job\n", a), 1),
+                    }
+                } else {
+                    rest.push(a);
+                }
+            }
+            if rest.is_empty() {
+                return CommandOutput::success(String::new());
+            }
+            return self.cmd_kill(&rest);
         }
 
         let mut signal: i32 = 15;
@@ -82,6 +112,15 @@ impl Shell {
                 }
             };
 
+            // Refuse to signal this process or a whole process group — the
+            // agent must never be able to kill the host app.
+            if pid <= 0 || pid == std::process::id() as libc::pid_t {
+                return CommandOutput::error(
+                    format!("kill: {}: refusing to signal this process\n", pid),
+                    1,
+                );
+            }
+
             #[cfg(unix)]
             {
                 let ret = unsafe { libc::kill(pid, signal) };
@@ -113,7 +152,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_kill_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_kill_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)

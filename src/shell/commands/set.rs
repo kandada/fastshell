@@ -136,6 +136,14 @@ impl Shell {
                     }
                 }
             }
+            "-f" => {
+                self.shopt.insert("noglob".to_string(), true);
+                CommandOutput::success(String::new())
+            }
+            "+f" => {
+                self.shopt.insert("noglob".to_string(), false);
+                CommandOutput::success(String::new())
+            }
             other => CommandOutput::error(format!("set: {}: invalid option\n", other), 1),
         }
     }
@@ -152,11 +160,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "fastshell_set_test_{}_{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_set_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Shell::new(Vfs::new(dir).unwrap())
     }

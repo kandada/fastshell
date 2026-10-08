@@ -8,6 +8,7 @@ impl Shell {
         let mut count: Option<usize> = None;
         let mut echo_mode = false;
         let mut echo_args = Vec::new();
+        let mut range: Option<(i64, i64)> = None;
 
         let mut i = 0;
         while i < args.len() {
@@ -19,14 +20,28 @@ impl Shell {
                     }
                 }
                 "-e" => echo_mode = true,
+                "-i" | "--input-range" => {
+                    if i + 1 < args.len() {
+                        i += 1;
+                        if let Some((a, b)) = args[i].split_once('-') {
+                            if let (Ok(lo), Ok(hi)) =
+                                (a.trim().parse::<i64>(), b.trim().parse::<i64>())
+                            {
+                                range = Some((lo, hi));
+                            }
+                        }
+                    }
+                }
                 arg if !arg.starts_with('-') && echo_mode => echo_args.push(arg.to_string()),
                 _ => {}
             }
             i += 1;
         }
 
-        let mut items: Vec<String> = if echo_mode {
-            echo_args.into_iter().collect()
+        let mut items: Vec<String> = if let Some((lo, hi)) = range {
+            (lo..=hi).map(|n| n.to_string()).collect()
+        } else if echo_mode {
+            echo_args
         } else {
             let input = match stdin {
                 Some(s) => s.to_string(),
@@ -57,7 +72,7 @@ impl Shell {
             let mut content = String::new();
             for arg in args {
                 if !arg.starts_with('-') {
-                    match self.vfs.read_to_string(arg, &self.cwd) {
+                    match self.read_text_lossy(arg) {
                         Ok(c) => content.push_str(&c),
                         Err(e) => return CommandOutput::error(format!("rev: {}: {}\n", arg, e), 1),
                     }
@@ -82,10 +97,13 @@ impl Shell {
     }
 
     pub fn cmd_split(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
-        let mut prefix = "x".to_string();
         let mut lines_per_file = 1000usize;
         let mut by_lines = true;
-        let mut files = Vec::new();
+        // Positional operands follow GNU `split [OPTION]... [FILE [PREFIX]]`;
+        // `-` means read stdin. Both a stdin `-` and a following PREFIX must be
+        // kept (previously `-` was dropped as an unknown option, so the PREFIX
+        // was misinterpreted as the input FILE).
+        let mut positional: Vec<String> = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
@@ -112,23 +130,25 @@ impl Shell {
                     lines_per_file = parse_size(&arg[2..]);
                     by_lines = false;
                 }
-                arg if !arg.starts_with('-') && files.is_empty() => files.push(arg.to_string()),
-                arg if !arg.starts_with('-') && prefix == "x" => prefix = arg.to_string(),
+                arg if arg == "-" || !arg.starts_with('-') => positional.push(arg.to_string()),
                 _ => {}
             }
             i += 1;
         }
 
-        let input = if files.is_empty() {
-            match stdin {
+        let prefix = positional
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "x".to_string());
+        let input = match positional.first().map(|s| s.as_str()) {
+            None | Some("-") => match stdin {
                 Some(s) => s.to_string(),
                 None => return CommandOutput::error("split: missing input\n".to_string(), 1),
-            }
-        } else {
-            match self.vfs.read_to_string(&files[0], &self.cwd) {
+            },
+            Some(f) => match self.read_text_lossy(f) {
                 Ok(c) => c,
-                Err(e) => return CommandOutput::error(format!("split: {}: {}\n", files[0], e), 1),
-            }
+                Err(e) => return CommandOutput::error(format!("split: {}: {}\n", f, e), 1),
+            },
         };
 
         let mut output = String::new();
@@ -143,6 +163,18 @@ impl Shell {
                     Err(e) => {
                         output.push_str(&format!("split: {}: {}\n", name, e));
                     }
+                }
+                chunk_idx += 1;
+            }
+        } else {
+            // Byte mode (`split -b N`): chunk the raw bytes.
+            let bytes = input.as_bytes();
+            let size = lines_per_file.max(1);
+            let mut chunk_idx = 0;
+            for chunk in bytes.chunks(size) {
+                let name = format!("{}{}", prefix, suffix(chunk_idx));
+                if let Err(e) = self.vfs.write_bytes(&name, &self.cwd, chunk) {
+                    output.push_str(&format!("split: {}: {}\n", name, e));
                 }
                 chunk_idx += 1;
             }
@@ -176,14 +208,14 @@ impl Shell {
                 None => vec![],
             }
         } else {
-            match self.vfs.read_to_string(files[0], &self.cwd) {
+            match self.read_text_lossy(files[0]) {
                 Ok(c) => c.lines().map(|l| l.to_string()).collect(),
                 Err(e) => return CommandOutput::error(format!("comm: {}: {}\n", files[0], e), 1),
             }
         };
 
         let lines2 = if files.len() > 1 {
-            match self.vfs.read_to_string(files[1], &self.cwd) {
+            match self.read_text_lossy(files[1]) {
                 Ok(c) => c.lines().map(|l| l.to_string()).collect(),
                 Err(e) => return CommandOutput::error(format!("comm: {}: {}\n", files[1], e), 1),
             }
@@ -195,25 +227,55 @@ impl Shell {
         let mut i = 0;
         let mut j = 0;
 
+        // `-1` / `-2` / `-3` suppress the respective column (can be combined,
+        // e.g. `comm -12`).
+        let flags: Vec<&str> = args
+            .iter()
+            .filter(|a| a.starts_with('-'))
+            .copied()
+            .collect();
+        let suppressed = |col: char| flags.iter().any(|f| f.contains(col));
+        let (s1, s2, s3) = (suppressed('1'), suppressed('2'), suppressed('3'));
+        // A suppressed column does NOT contribute its tab (bash `comm -12` prints
+        // common lines with no leading tab).
+        let p2 = if s1 { "" } else { "\t" };
+        let p3 = format!(
+            "{}{}",
+            if s1 { "" } else { "\t" },
+            if s2 { "" } else { "\t" }
+        );
+
         while i < lines1.len() || j < lines2.len() {
             if i >= lines1.len() {
-                output.push_str(&format!("\t\t{}\n", lines2[j]));
+                // only in file2 → column 2
+                if !s2 {
+                    output.push_str(&format!("{}{}\n", p2, lines2[j]));
+                }
                 j += 1;
             } else if j >= lines2.len() {
-                output.push_str(&format!("{}\n", lines1[i]));
+                // only in file1 → column 1 (no tab)
+                if !s1 {
+                    output.push_str(&format!("{}\n", lines1[i]));
+                }
                 i += 1;
             } else {
                 match lines1[i].cmp(&lines2[j]) {
                     std::cmp::Ordering::Less => {
-                        output.push_str(&format!("{}\n", lines1[i]));
+                        if !s1 {
+                            output.push_str(&format!("{}\n", lines1[i]));
+                        }
                         i += 1;
                     }
                     std::cmp::Ordering::Greater => {
-                        output.push_str(&format!("\t\t{}\n", lines2[j]));
+                        if !s2 {
+                            output.push_str(&format!("{}{}\n", p2, lines2[j]));
+                        }
                         j += 1;
                     }
                     std::cmp::Ordering::Equal => {
-                        output.push_str(&format!("\t\t{}\n", lines1[i]));
+                        if !s3 {
+                            output.push_str(&format!("{}{}\n", p3, lines1[i]));
+                        }
                         i += 1;
                         j += 1;
                     }
@@ -262,7 +324,9 @@ impl Shell {
 
         let data = if files.is_empty() {
             match stdin {
-                Some(s) => s.as_bytes().to_vec(),
+                Some(s) => self
+                    .take_binary_in()
+                    .unwrap_or_else(|| s.as_bytes().to_vec()),
                 None => return CommandOutput::error("xxd: missing input\n".to_string(), 1),
             }
         } else {
@@ -297,7 +361,11 @@ impl Shell {
         };
 
         if reverse {
-            return xxd_reverse(data);
+            let bytes = xxd_reverse_bytes(data);
+            if !bytes.is_empty() {
+                self.set_binary_out(bytes.clone());
+            }
+            return CommandOutput::success(String::from_utf8_lossy(&bytes).to_string());
         }
 
         if plain {
@@ -342,6 +410,97 @@ impl Shell {
         }
 
         let expr: Vec<&str> = args.to_vec();
+        // `expr STRING : REGEX` — anchored regex match, returns match length.
+        if expr.len() == 3 && expr[1] == ":" {
+            let anchored = format!("^(?:{})", expr[2]);
+            match regex::Regex::new(&anchored) {
+                Ok(re) => {
+                    return match re.find(expr[0]) {
+                        Some(m) => {
+                            CommandOutput::success(format!("{}\n", m.as_str().chars().count()))
+                        }
+                        None => CommandOutput {
+                            stdout: "0\n".to_string(),
+                            stderr: String::new(),
+                            exit_code: 1,
+                        },
+                    };
+                }
+                Err(e) => return CommandOutput::error(format!("expr: {}\n", e), 1),
+            }
+        }
+        // `expr match STRING REGEX` — same as `STRING : REGEX`.
+        if expr.len() == 3 && expr[0] == "match" {
+            let anchored = format!("^(?:{})", expr[2]);
+            match regex::Regex::new(&anchored) {
+                Ok(re) => {
+                    return match re.find(expr[1]) {
+                        Some(m) => {
+                            CommandOutput::success(format!("{}\n", m.as_str().chars().count()))
+                        }
+                        None => CommandOutput {
+                            stdout: "0\n".to_string(),
+                            stderr: String::new(),
+                            exit_code: 1,
+                        },
+                    };
+                }
+                Err(e) => return CommandOutput::error(format!("expr: {}\n", e), 1),
+            }
+        }
+        // `expr substr STRING POS LENGTH` (1-based, POSIX).
+        if expr.len() == 4 && expr[0] == "substr" {
+            let chars: Vec<char> = expr[1].chars().collect();
+            let pos: i64 = expr[2].parse().unwrap_or(1);
+            let len: i64 = expr[3].parse().unwrap_or(0);
+            let start = (pos - 1).max(0) as usize;
+            let out: String = if start >= chars.len() || len <= 0 {
+                String::new()
+            } else {
+                chars[start..(start + len as usize).min(chars.len())]
+                    .iter()
+                    .collect()
+            };
+            return CommandOutput::success(format!("{}\n", out));
+        }
+        // `expr index STRING CHARS` — 1-based index of the first matching char.
+        if expr.len() == 3 && expr[0] == "index" {
+            let idx = expr[1]
+                .chars()
+                .position(|c| expr[2].contains(c))
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            return CommandOutput {
+                stdout: format!("{}\n", idx),
+                stderr: String::new(),
+                exit_code: if idx == 0 { 1 } else { 0 },
+            };
+        }
+        // `expr length STRING`
+        if expr.len() == 2 && expr[0] == "length" {
+            return CommandOutput::success(format!("{}\n", expr[1].chars().count()));
+        }
+        // Comparison (GNU expr): numeric when both parse as ints, else string.
+        if expr.len() == 3 {
+            let (a, op, b) = (expr[0], expr[1], expr[2]);
+            let (ai, bi) = (a.parse::<i64>().ok(), b.parse::<i64>().ok());
+            let truth = match op {
+                "=" | "==" => ai.zip(bi).map(|(x, y)| x == y).or(Some(a == b)),
+                "!=" => ai.zip(bi).map(|(x, y)| x != y).or(Some(a != b)),
+                "<" => ai.zip(bi).map(|(x, y)| x < y).or(Some(a < b)),
+                ">" => ai.zip(bi).map(|(x, y)| x > y).or(Some(a > b)),
+                "<=" => ai.zip(bi).map(|(x, y)| x <= y).or(Some(a <= b)),
+                ">=" => ai.zip(bi).map(|(x, y)| x >= y).or(Some(a >= b)),
+                _ => None,
+            };
+            if let Some(t) = truth {
+                return CommandOutput {
+                    stdout: format!("{}\n", if t { 1 } else { 0 }),
+                    stderr: String::new(),
+                    exit_code: if t { 0 } else { 1 },
+                };
+            }
+        }
         match evaluate_expr(&expr) {
             Ok(val) => CommandOutput::success(format!("{}\n", val)),
             Err(e) => CommandOutput::error(format!("expr: {}\n", e), 1),
@@ -357,7 +516,7 @@ fn parse_offset(s: &str) -> usize {
     }
 }
 
-fn xxd_reverse(data: &[u8]) -> CommandOutput {
+fn xxd_reverse_bytes(data: &[u8]) -> Vec<u8> {
     let input = String::from_utf8_lossy(data);
     let mut output = Vec::new();
 
@@ -384,7 +543,7 @@ fn xxd_reverse(data: &[u8]) -> CommandOutput {
         }
     }
 
-    CommandOutput::success(String::from_utf8_lossy(&output).to_string())
+    output
 }
 
 fn xxd_plain(data: &[u8]) -> CommandOutput {
@@ -414,18 +573,15 @@ fn shuffle<T>(items: &mut Vec<T>) {
 }
 
 fn suffix(idx: usize) -> String {
-    let letters = "abcdefghijklmnopqrstuvwxyz";
+    // GNU split's default suffix length is 2 (`xaa`, `xab`, …).
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
     let mut n = idx;
-    let mut result = String::new();
-    loop {
-        result.insert(0, letters.chars().nth(n % 26).unwrap());
+    let mut buf = [b'a'; 2];
+    for k in (0..2).rev() {
+        buf[k] = letters[n % 26];
         n /= 26;
-        if n == 0 {
-            break;
-        }
-        n -= 1;
     }
-    result
+    String::from_utf8_lossy(&buf).to_string()
 }
 
 fn parse_size(s: &str) -> usize {

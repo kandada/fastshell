@@ -39,9 +39,19 @@ impl Shell {
                         'E' => show_ends = true,
                         'T' => show_tabs = true,
                         'v' => show_nonprint = true,
-                        'e' => { show_ends = true; show_nonprint = true; }
-                        't' => { show_tabs = true; show_nonprint = true; }
-                        'A' => { show_ends = true; show_tabs = true; show_nonprint = true; }
+                        'e' => {
+                            show_ends = true;
+                            show_nonprint = true;
+                        }
+                        't' => {
+                            show_tabs = true;
+                            show_nonprint = true;
+                        }
+                        'A' => {
+                            show_ends = true;
+                            show_tabs = true;
+                            show_nonprint = true;
+                        }
                         _ => crate::warn!("cat: warning: unsupported option '{}'", arg),
                     }
                 }
@@ -50,11 +60,45 @@ impl Shell {
             }
         }
 
+        // Byte-accurate fast path for plain `cat` (no formatting flags): the
+        // common `cat file | ...` / `cat file > out` must not corrupt binary.
+        let plain = !show_numbers && !show_ends && !show_tabs && !show_nonprint;
+        if plain {
+            if !files.is_empty() {
+                let mut bytes: Vec<u8> = Vec::new();
+                for &file in &files {
+                    match self.vfs.read(file, &self.cwd) {
+                        Ok(b) => bytes.extend_from_slice(&b),
+                        Err(e) => {
+                            return CommandOutput::error(format!("cat: {}: {}\n", file, e), 1)
+                        }
+                    }
+                }
+                if !bytes.is_empty() {
+                    self.set_binary_out(bytes.clone());
+                }
+                return CommandOutput::success(String::from_utf8_lossy(&bytes).to_string());
+            }
+            if let Some(bytes) = self.take_binary_in() {
+                if !bytes.is_empty() {
+                    self.set_binary_out(bytes.clone());
+                }
+                return CommandOutput::success(String::from_utf8_lossy(&bytes).to_string());
+            }
+        }
+
         if files.is_empty() {
             if let Some(ref s) = stdin {
                 let mut output = String::new();
-                write_cat(&mut output, s, show_numbers, &mut line_num,
-                          show_ends, show_tabs, show_nonprint);
+                write_cat(
+                    &mut output,
+                    s,
+                    show_numbers,
+                    &mut line_num,
+                    show_ends,
+                    show_tabs,
+                    show_nonprint,
+                );
                 return CommandOutput::success(output);
             }
             return CommandOutput::error("cat: missing file operand\n".to_string(), 1);
@@ -63,10 +107,17 @@ impl Shell {
         let mut output = String::new();
         for &file in &files {
             found_file = true;
-            match self.vfs.read_to_string(file, &self.cwd) {
+            match self.read_text_lossy(file) {
                 Ok(content) => {
-                    write_cat(&mut output, &content, show_numbers, &mut line_num,
-                              show_ends, show_tabs, show_nonprint);
+                    write_cat(
+                        &mut output,
+                        &content,
+                        show_numbers,
+                        &mut line_num,
+                        show_ends,
+                        show_tabs,
+                        show_nonprint,
+                    );
                 }
                 Err(e) => {
                     return CommandOutput::error(format!("cat: {}: {}\n", file, e), 1);
@@ -121,7 +172,9 @@ fn write_cat(
 
 fn write_cat_char(out: &mut String, ch: char, show_tabs: bool, show_nonprint: bool) {
     match ch {
-        '\t' if show_tabs => { out.push_str("^I"); }
+        '\t' if show_tabs => {
+            out.push_str("^I");
+        }
         _ if show_nonprint && (ch as u32) < 0x20 => {
             let ctrl = (ch as u8 + 64) as char;
             out.push('^');
@@ -155,7 +208,8 @@ mod tests {
 
     fn mk_shell() -> Shell {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fastshell_cat_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_cat_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         let vfs = crate::vfs::Vfs::new(dir).unwrap();
         Shell::new(vfs)

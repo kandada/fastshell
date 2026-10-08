@@ -49,7 +49,12 @@ fn mk(tag: &str) -> Fastshell {
 }
 
 fn last_args() -> String {
-    LAST_CALL.lock().unwrap().clone().map(|(_, a)| a).unwrap_or_default()
+    LAST_CALL
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|(_, a)| a)
+        .unwrap_or_default()
 }
 
 /// Serialized: these tests share the process-global callback + statics.
@@ -64,7 +69,11 @@ fn node_eval_roundtrips_through_host() {
     let out = s.execute("node -e \"1 + 1\"");
     assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
     assert!(out.stdout.contains("EVAL:ok"), "stdout={}", out.stdout);
-    assert!(last_args().contains("1 + 1"), "code must be forwarded: {}", last_args());
+    assert!(
+        last_args().contains("1 + 1"),
+        "code must be forwarded: {}",
+        last_args()
+    );
 
     set_global_device_callback(None);
 }
@@ -96,7 +105,11 @@ fn eval_js_host_error_propagates() {
     let s = mk("err");
     let out = s.execute("node -e \"boom()\"");
     assert_ne!(out.exit_code, 0, "host rejection must fail the command");
-    assert!(out.stderr.contains("host js engine rejected"), "stderr={}", out.stderr);
+    assert!(
+        out.stderr.contains("host js engine rejected"),
+        "stderr={}",
+        out.stderr
+    );
 
     set_global_device_callback(None);
 }
@@ -108,12 +121,19 @@ fn render_forwards_html_and_path() {
 
     let s = mk("render");
     let sandbox = s.vfs_root();
-    s.write_file("page.html", "<html><body>hi</body></html>").unwrap();
+    s.write_file("page.html", "<html><body>hi</body></html>")
+        .unwrap();
     let out = s.execute("render -o /shot.png /page.html");
     assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
     let args = last_args();
-    assert!(args.contains("<html><body>hi</body></html>"), "html forwarded: {args}");
-    assert!(args.contains(&sandbox), "path resolved into sandbox: {args}");
+    assert!(
+        args.contains("<html><body>hi</body></html>"),
+        "html forwarded: {args}"
+    );
+    assert!(
+        args.contains(&sandbox),
+        "path resolved into sandbox: {args}"
+    );
     assert!(args.contains("shot.png"), "{args}");
 
     set_global_device_callback(None);

@@ -121,6 +121,14 @@ pub trait DevicePlugin: Send {
     fn share_file(&self, path: &str, mime: &str) -> Result<(), String>;
     fn share_text(&self, text: &str) -> Result<(), String>;
     fn open_url(&self, url: &str) -> Result<(), String>;
+    /// Open a settings page. `target` is `"app"` | `"system"` |
+    /// `"accessibility"` | `"notification"`. Default implementation reports
+    /// "not supported" so existing hosts (which don't implement it yet) are
+    /// unaffected and the shell command fails cleanly.
+    fn open_settings(&self, target: &str) -> Result<(), String> {
+        let _ = target;
+        Err("open_settings not supported".to_string())
+    }
 
     // ── biometric ──
     fn authenticate_biometric(&self, reason: &str) -> Result<bool, String>;

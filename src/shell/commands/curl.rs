@@ -58,6 +58,8 @@ enum DataKind {
     Binary,
     /// `--json` → `application/json`.
     Json,
+    /// `--data-urlencode` → form data with the value percent-encoded.
+    UrlEncode,
 }
 
 /// Parsed (but not yet resolved) curl command line.
@@ -83,6 +85,8 @@ struct CurlOptions {
     verbose: bool,
     write_format: Option<String>,
     include_headers: bool,
+    /// `-D <file>`: write the response header block to this file (`-` = stdout).
+    dump_header_file: Option<String>,
     fail_on_error: bool,
     fail_with_body: bool,
     request_timeout: Option<f64>,
@@ -91,13 +95,18 @@ struct CurlOptions {
     range: Option<String>,
     continue_at: Option<String>,
     retry: u32,
+    compressed: bool,
+    proxy: Option<String>,
     show_help: bool,
     show_version: bool,
 }
 
 impl CurlOptions {
     fn new() -> Self {
-        CurlOptions { max_redirects: 10, ..Default::default() }
+        CurlOptions {
+            max_redirects: 10,
+            ..Default::default()
+        }
     }
 
     fn set_data(&mut self, raw: &str, kind: DataKind) {
@@ -106,6 +115,7 @@ impl CurlOptions {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct HttpConfig {
     pub method: String,
     pub url: String,
@@ -121,6 +131,16 @@ pub(crate) struct HttpConfig {
     pub include_headers: bool,
     pub request_timeout_secs: f64,
     pub connect_timeout_secs: f64,
+    /// Cooperative cancel flag: checked before the request and between body
+    /// chunks so a cancelled task stops a slow download promptly.
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// `--proxy URL` (http/https/socks).
+    pub proxy: Option<String>,
+    /// Absolute command deadline (monotonic ms; 0 = none) captured when the
+    /// command started. Caps the socket timeouts so a command that has already
+    /// been declared timed-out aborts promptly instead of holding the runtime
+    /// for the full default 30s.
+    pub deadline_ms: u64,
 }
 
 impl Default for HttpConfig {
@@ -139,12 +159,15 @@ impl Default for HttpConfig {
             include_headers: false,
             request_timeout_secs: 30.0,
             connect_timeout_secs: 10.0,
+            cancel: None,
+            deadline_ms: 0,
+            proxy: None,
         }
     }
 }
 
 pub(crate) struct HttpResponse {
-    pub body: String,
+    pub body: Vec<u8>,
     pub status_code: u16,
     pub status_text: String,
     pub final_url: String,
@@ -186,7 +209,53 @@ fn curl_exit_code_for(kind: ureq::ErrorKind, msg: &str) -> i32 {
     }
 }
 
+/// Run an HTTP request, bounded by the command's remaining budget.
+///
+/// The request runs on a nested thread so that even if the transport (DNS or a
+/// stalled socket) cannot be interrupted, the command's worker returns at the
+/// deadline and releases the runtime lock. The abandoned thread holds no lock,
+/// so it cannot wedge later commands.
 pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, HttpError> {
+    let budget: Option<std::time::Duration> = if config.deadline_ms == 0 {
+        None
+    } else {
+        let now = crate::shell::exec_now_ms();
+        Some(if now >= config.deadline_ms {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_millis(config.deadline_ms - now)
+        })
+    };
+    match budget {
+        None => http_request_ex_inner(config),
+        Some(b) if b.is_zero() => Err(HttpError {
+            message: "operation timed out".to_string(),
+            curl_exit_code: 28,
+        }),
+        Some(b) => {
+            let cfg = config.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("fastshell-http".to_string())
+                .spawn(move || {
+                    let _ = tx.send(http_request_ex_inner(&cfg));
+                })
+                .map_err(|e| HttpError {
+                    message: format!("failed to spawn request: {e}"),
+                    curl_exit_code: 1,
+                })?;
+            match rx.recv_timeout(b) {
+                Ok(r) => r,
+                Err(_) => Err(HttpError {
+                    message: "operation timed out".to_string(),
+                    curl_exit_code: 28,
+                }),
+            }
+        }
+    }
+}
+
+fn http_request_ex_inner(config: &HttpConfig) -> Result<HttpResponse, HttpError> {
     let start = std::time::Instant::now();
     let mut agent_builder = ureq::AgentBuilder::new().redirects(if config.follow_redirects {
         config.max_redirects
@@ -194,13 +263,63 @@ pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, HttpE
         0
     });
 
-    if config.connect_timeout_secs > 0.0 {
-        agent_builder = agent_builder
-            .timeout_connect(std::time::Duration::from_secs_f64(config.connect_timeout_secs));
+    // Cap the transport timeouts by the command's remaining budget: a command
+    // that has already been declared timed-out aborts its socket promptly and
+    // releases the runtime, instead of waiting for the full default 30s (which
+    // used to wedge every following command).
+    let budget: Option<std::time::Duration> = if config.deadline_ms == 0 {
+        None
+    } else {
+        let now = crate::shell::exec_now_ms();
+        Some(if now >= config.deadline_ms {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_millis(config.deadline_ms - now)
+        })
+    };
+    if let Some(b) = budget {
+        if b.is_zero() {
+            return Err(HttpError {
+                message: "operation timed out".to_string(),
+                curl_exit_code: 28,
+            });
+        }
     }
-    if config.request_timeout_secs > 0.0 {
-        agent_builder =
-            agent_builder.timeout(std::time::Duration::from_secs_f64(config.request_timeout_secs));
+    let eff = |cfg_secs: f64| -> Option<std::time::Duration> {
+        let cfg = if cfg_secs > 0.0 {
+            Some(std::time::Duration::from_secs_f64(cfg_secs))
+        } else {
+            None
+        };
+        match (cfg, budget) {
+            (Some(c), Some(b)) => Some(c.min(b)),
+            (Some(c), None) => Some(c),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    };
+
+    if let Some(connect) = eff(config.connect_timeout_secs) {
+        if !connect.is_zero() {
+            agent_builder = agent_builder.timeout_connect(connect);
+        }
+    }
+    if let Some(overall) = eff(config.request_timeout_secs) {
+        if !overall.is_zero() {
+            agent_builder = agent_builder.timeout(overall);
+        }
+    }
+
+    if let Some(p) = &config.proxy {
+        match ureq::Proxy::new(p) {
+            Ok(pr) => agent_builder = agent_builder.proxy(pr),
+            Err(e) => {
+                return Err(HttpError {
+                    message: format!("invalid proxy '{}': {}", p, e),
+                    curl_exit_code: 5,
+                })
+            }
+        }
     }
 
     if config.insecure {
@@ -231,6 +350,14 @@ pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, HttpE
     // `agent.request` supports arbitrary methods (incl. -X CUSTOM), and
     // `or_any_status()` keeps 3xx/4xx/5xx responses as `Ok` so curl semantics
     // (return the body, exit 0 unless `-f`) are preserved.
+    if let Some(c) = &config.cancel {
+        if c.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(HttpError {
+                message: "cancelled".to_string(),
+                curl_exit_code: 143,
+            });
+        }
+    }
     let req = apply_req_opts(agent.request(&method, url), config);
     let response = if method == "HEAD" {
         req.call().or_any_status()
@@ -266,13 +393,34 @@ pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, HttpE
             let remote_ip = remote.ip().to_string();
             let remote_port = remote.port();
 
+            // Read the body as raw bytes — NOT `into_string()`, which UTF-8
+            // decodes the payload and corrupts binary downloads (images, …).
             let body = if method == "HEAD" {
-                String::new()
+                Vec::new()
             } else {
-                resp.into_string().map_err(|e| HttpError {
-                    message: e.to_string(),
-                    curl_exit_code: 1,
-                })?
+                use std::io::Read;
+                let mut buf = Vec::new();
+                let mut reader = resp.into_reader();
+                let mut chunk = [0u8; 64 * 1024];
+                loop {
+                    if let Some(c) = &config.cancel {
+                        if c.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Err(HttpError {
+                                message: "cancelled".to_string(),
+                                curl_exit_code: 143,
+                            });
+                        }
+                    }
+                    let n = reader.read(&mut chunk).map_err(|e| HttpError {
+                        message: e.to_string(),
+                        curl_exit_code: 1,
+                    })?;
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                buf
             };
             let size_download = body.len();
 
@@ -301,9 +449,60 @@ pub(crate) fn http_request_ex(config: &HttpConfig) -> Result<HttpResponse, HttpE
         Err(t) => {
             let kind = t.kind();
             let msg = t.to_string();
-            Err(HttpError { curl_exit_code: curl_exit_code_for(kind, &msg), message: msg })
+            Err(HttpError {
+                curl_exit_code: curl_exit_code_for(kind, &msg),
+                message: msg,
+            })
         }
     }
+}
+
+/// Percent-encode a form value (`--data-urlencode`): `name=value` keeps the
+/// name and encodes the value; a bare value is encoded whole.
+fn url_encode_form(s: &str) -> String {
+    match s.split_once('=') {
+        Some((k, v)) => format!("{}={}", k, percent_encode(v)),
+        None => percent_encode(s),
+    }
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Decode a `Content-Encoding: gzip`/`deflate` body (used by `--compressed`).
+fn decompress_body(body: &[u8], encoding: &str) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let enc = encoding.trim().to_ascii_lowercase();
+    let mut out = Vec::new();
+    match enc.as_str() {
+        "gzip" | "x-gzip" => {
+            flate2::read::GzDecoder::new(body)
+                .read_to_end(&mut out)
+                .ok()?;
+        }
+        "deflate" => {
+            let mut z = flate2::read::ZlibDecoder::new(body);
+            if z.read_to_end(&mut out).is_err() {
+                out.clear();
+                flate2::read::DeflateDecoder::new(body)
+                    .read_to_end(&mut out)
+                    .ok()?;
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
 }
 
 fn apply_req_opts(mut req: ureq::Request, config: &HttpConfig) -> ureq::Request {
@@ -318,7 +517,11 @@ fn apply_req_opts(mut req: ureq::Request, config: &HttpConfig) -> ureq::Request 
         req = req.set("Authorization", &format!("Basic {}", auth));
     }
     if let Some(ct) = &config.content_type {
-        if !config.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+        if !config
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
             req = req.set("Content-Type", ct);
         }
     }
@@ -459,13 +662,62 @@ fn format_write_info(format: &str, resp: &HttpResponse, method: &str) -> String 
 }
 
 fn is_value_short_opt(c: char) -> bool {
-    matches!(c, 'o' | 'H' | 'd' | 'X' | 'A' | 'b' | 'u' | 'w' | 'e' | 'm' | 'c' | 'r' | 'T'
-        | 'F' | 'C' | 'z' | 'Q' | 't' | 'K' | 'y')
+    matches!(
+        c,
+        'x' | 'o'
+            | 'H'
+            | 'd'
+            | 'X'
+            | 'A'
+            | 'b'
+            | 'u'
+            | 'w'
+            | 'e'
+            | 'm'
+            | 'c'
+            | 'r'
+            | 'T'
+            | 'F'
+            | 'C'
+            | 'z'
+            | 'Q'
+            | 't'
+            | 'K'
+            | 'y'
+            | 'D'
+    )
 }
 
 fn is_bool_short_opt(c: char) -> bool {
-    matches!(c, 's' | 'S' | 'L' | 'I' | 'i' | 'v' | 'k' | 'f' | 'O' | 'G' | 'h' | 'V' | '4'
-        | '6' | 'N' | 'q' | 'g' | 'j' | 'J' | 'R' | 'n' | 'p' | '#' | '0' | '1' | '2' | '3')
+    matches!(
+        c,
+        's' | 'S'
+            | 'L'
+            | 'I'
+            | 'i'
+            | 'v'
+            | 'k'
+            | 'f'
+            | 'O'
+            | 'G'
+            | 'h'
+            | 'V'
+            | '4'
+            | '6'
+            | 'N'
+            | 'q'
+            | 'g'
+            | 'j'
+            | 'J'
+            | 'R'
+            | 'n'
+            | 'p'
+            | '#'
+            | '0'
+            | '1'
+            | '2'
+            | '3'
+    )
 }
 
 impl CurlOptions {
@@ -483,8 +735,11 @@ impl CurlOptions {
             }
             'd' => self.set_data(val, DataKind::Form),
             'X' => self.method = Some(val.to_uppercase()),
-            'A' => self.headers.push(("User-Agent".to_string(), val.to_string())),
+            'A' => self
+                .headers
+                .push(("User-Agent".to_string(), val.to_string())),
             'b' => self.cookie_raw.push(val.to_string()),
+            'x' => self.proxy = Some(val.to_string()),
             'u' => {
                 if let Some(colon) = val.find(':') {
                     let user = val[..colon].to_string();
@@ -493,6 +748,7 @@ impl CurlOptions {
                 }
             }
             'w' => self.write_format = Some(val.to_string()),
+            'D' => self.dump_header_file = Some(val.to_string()),
             'e' => self.headers.push(("Referer".to_string(), val.to_string())),
             'm' => self.request_timeout = val.parse::<f64>().ok().filter(|&t| t >= 0.0),
             'c' => self.cookie_jar = Some(val.to_string()),
@@ -558,14 +814,16 @@ impl CurlOptions {
                     self.headers.push((v.to_string(), String::new()));
                 }
             }
-            "data" | "data-ascii" | "data-raw" | "data-urlencode" => {
-                self.set_data(need(name, val)?, DataKind::Form)
-            }
+            "data" | "data-ascii" | "data-raw" => self.set_data(need(name, val)?, DataKind::Form),
+            "data-urlencode" => self.set_data(need(name, val)?, DataKind::UrlEncode),
             "data-binary" => self.set_data(need(name, val)?, DataKind::Binary),
             "json" => self.set_data(need(name, val)?, DataKind::Json),
             "request" => self.method = Some(need(name, val)?.to_uppercase()),
-            "user-agent" => self.headers.push(("User-Agent".to_string(), need(name, val)?.to_string())),
+            "user-agent" => self
+                .headers
+                .push(("User-Agent".to_string(), need(name, val)?.to_string())),
             "cookie" => self.cookie_raw.push(need(name, val)?.to_string()),
+            "proxy" => self.proxy = Some(need(name, val)?.to_string()),
             "user" => {
                 let v = need(name, val)?;
                 if let Some(colon) = v.find(':') {
@@ -573,7 +831,10 @@ impl CurlOptions {
                 }
             }
             "write-out" => self.write_format = Some(need(name, val)?.to_string()),
-            "referer" => self.headers.push(("Referer".to_string(), need(name, val)?.to_string())),
+            "dump-header" => self.dump_header_file = Some(need(name, val)?.to_string()),
+            "referer" => self
+                .headers
+                .push(("Referer".to_string(), need(name, val)?.to_string())),
             "max-time" => self.request_timeout = need(name, val)?.parse::<f64>().ok(),
             "connect-timeout" => self.connect_timeout = need(name, val)?.parse::<f64>().ok(),
             "cookie-jar" => self.cookie_jar = Some(need(name, val)?.to_string()),
@@ -582,7 +843,8 @@ impl CurlOptions {
             "form" => {
                 let v = need(name, val)?;
                 if let Some(eq) = v.find('=') {
-                    self.form_fields.push((v[..eq].to_string(), v[eq + 1..].to_string()));
+                    self.form_fields
+                        .push((v[..eq].to_string(), v[eq + 1..].to_string()));
                 }
             }
             "continue-at" => self.continue_at = Some(need(name, val)?.to_string()),
@@ -607,37 +869,134 @@ impl CurlOptions {
             }
             "remote-name" => self.output_file = Some("__auto__".to_string()),
             "get" => self.get_mode = true,
-            "compressed" => { /* gzip is already the ureq default */ }
+            "compressed" => self.compressed = true,
             "help" => self.show_help = true,
             "version" => self.show_version = true,
             // ── recognised no-ops (boolean) ─────────────────────────────
-            "no-buffer" | "progress-bar" | "globoff" | "digest" | "basic" | "anyauth"
-            | "ntlm" | "negotiate" | "netrc" | "netrc-optional" | "http1.0" | "http1.1"
-            | "http2" | "http3" | "http2-prior-knowledge" | "no-alpn" | "no-npn"
-            | "noproxy" | "ignore-content-length" | "tr-encoding" | "tcp-nodelay"
-            | "tcp-fastopen" | "disable" | "disable-epsv" | "disable-eprt" | "ftp-pasv"
-            | "crlf" | "no-keepalive" | "ssl-no-revoke" | "cert-status" | "tlsv1"
-            | "tlsv1.0" | "tlsv1.1" | "tlsv1.2" | "tlsv1.3" | "sslv2" | "sslv3"
-            | "path-as-is" | "suppress-connect-headers" | "proxy-anyauth" | "proxy-basic"
-            | "proxy-digest" | "proxy-ntlm" | "proxy-negotiate" | "haproxy-protocol"
-            | "hsts" | "no-sessionid" | "ftp-pret" | "ftp-skip-pasv-ip"
-            | "post301" | "post302" | "post303" | "sasl-ir" | "use-ascii" | "raw"
+            "no-buffer"
+            | "progress-bar"
+            | "globoff"
+            | "digest"
+            | "basic"
+            | "anyauth"
+            | "ntlm"
+            | "negotiate"
+            | "netrc"
+            | "netrc-optional"
+            | "http1.0"
+            | "http1.1"
+            | "http2"
+            | "http3"
+            | "http2-prior-knowledge"
+            | "no-alpn"
+            | "no-npn"
+            | "noproxy"
+            | "ignore-content-length"
+            | "tr-encoding"
+            | "tcp-nodelay"
+            | "tcp-fastopen"
+            | "disable"
+            | "disable-epsv"
+            | "disable-eprt"
+            | "ftp-pasv"
+            | "crlf"
+            | "no-keepalive"
+            | "ssl-no-revoke"
+            | "cert-status"
+            | "tlsv1"
+            | "tlsv1.0"
+            | "tlsv1.1"
+            | "tlsv1.2"
+            | "tlsv1.3"
+            | "sslv2"
+            | "sslv3"
+            | "path-as-is"
+            | "suppress-connect-headers"
+            | "proxy-anyauth"
+            | "proxy-basic"
+            | "proxy-digest"
+            | "proxy-ntlm"
+            | "proxy-negotiate"
+            | "haproxy-protocol"
+            | "hsts"
+            | "no-sessionid"
+            | "ftp-pret"
+            | "ftp-skip-pasv-ip"
+            | "post301"
+            | "post302"
+            | "post303"
+            | "sasl-ir"
+            | "use-ascii"
+            | "raw"
             | "no-location-trusted" => {}
             // ── recognised no-ops (take a value) ────────────────────────
-            "resolve" | "limit-rate" | "cacert" | "capath" | "cert" | "cert-type"
-            | "key" | "key-type" | "pass" | "engine" | "crlfile" | "pinnedpubkey"
-            | "random-file" | "egd-file" | "ciphers" | "tls13-ciphers" | "tls-max"
-            | "proxy" | "proxy-user" | "proxy-header" | "interface" | "connect-to"
-            | "retry-delay" | "retry-max-time" | "speed-limit" | "speed-time" | "stderr"
-            | "output-dir" | "trace" | "trace-ascii" | "trace-time" | "dump-header"
-            | "config" | "parallel" | "parallel-max" | "rate" | "quote" | "telnet-option"
-            | "time-cond" | "proto" | "proto-redir" | "proto-default" | "doh-url"
-            | "unix-socket" | "abstract-unix-socket" | "aws-sigv4" | "oauth2-bearer"
-            | "service-name" | "delegation" | "dns-interface" | "dns-ipv4-addr"
-            | "dns-ipv6-addr" | "dns-servers" | "socks4" | "socks4a" | "socks5"
-            | "socks5-hostname" | "socks5-gssapi-service" | "preproxy" | "ftp-account"
-            | "ftp-alternative-to-user" | "ftp-method" | "ftp-port" | "mail-from"
-            | "mail-rcpt" | "mail-auth" | "pubkey" | "hostpubmd5" | "hostpubsha256" => {
+            "resolve"
+            | "limit-rate"
+            | "cacert"
+            | "capath"
+            | "cert"
+            | "cert-type"
+            | "key"
+            | "key-type"
+            | "pass"
+            | "engine"
+            | "crlfile"
+            | "pinnedpubkey"
+            | "random-file"
+            | "egd-file"
+            | "ciphers"
+            | "tls13-ciphers"
+            | "tls-max"
+            | "proxy-user"
+            | "proxy-header"
+            | "interface"
+            | "connect-to"
+            | "retry-delay"
+            | "retry-max-time"
+            | "speed-limit"
+            | "speed-time"
+            | "stderr"
+            | "output-dir"
+            | "trace"
+            | "trace-ascii"
+            | "trace-time"
+            | "config"
+            | "parallel"
+            | "parallel-max"
+            | "rate"
+            | "quote"
+            | "telnet-option"
+            | "time-cond"
+            | "proto"
+            | "proto-redir"
+            | "proto-default"
+            | "doh-url"
+            | "unix-socket"
+            | "abstract-unix-socket"
+            | "aws-sigv4"
+            | "oauth2-bearer"
+            | "service-name"
+            | "delegation"
+            | "dns-interface"
+            | "dns-ipv4-addr"
+            | "dns-ipv6-addr"
+            | "dns-servers"
+            | "socks4"
+            | "socks4a"
+            | "socks5"
+            | "socks5-hostname"
+            | "socks5-gssapi-service"
+            | "preproxy"
+            | "ftp-account"
+            | "ftp-alternative-to-user"
+            | "ftp-method"
+            | "ftp-port"
+            | "mail-from"
+            | "mail-rcpt"
+            | "mail-auth"
+            | "pubkey"
+            | "hostpubmd5"
+            | "hostpubsha256" => {
                 let _ = val;
             }
             _ => return Err(format!("option --{}: is unknown", name)),
@@ -738,30 +1097,108 @@ fn parse_curl_args(args: &[&str]) -> Result<CurlOptions, String> {
 fn long_option_takes_value(name: &str) -> bool {
     matches!(
         name,
-        "url" | "output" | "header" | "data" | "data-ascii" | "data-raw" | "data-binary"
-            | "data-urlencode" | "json" | "request" | "user-agent" | "cookie" | "user"
-            | "write-out" | "referer" | "max-time" | "connect-timeout" | "cookie-jar"
-            | "range" | "upload-file" | "form" | "continue-at" | "max-redirs" | "retry"
-            | "resolve" | "limit-rate" | "cacert" | "capath" | "cert" | "cert-type" | "key"
-            | "key-type" | "pass" | "engine" | "crlfile" | "pinnedpubkey" | "random-file"
-            | "egd-file" | "ciphers" | "tls13-ciphers" | "tls-max" | "proxy" | "proxy-user"
-            | "proxy-header" | "interface" | "connect-to" | "retry-delay" | "retry-max-time"
-            | "speed-limit" | "speed-time" | "stderr" | "output-dir" | "trace" | "trace-ascii"
-            | "trace-time" | "dump-header" | "config" | "parallel" | "parallel-max" | "rate"
-            | "quote" | "telnet-option" | "time-cond" | "proto" | "proto-redir"
-            | "proto-default" | "doh-url" | "unix-socket" | "abstract-unix-socket"
-            | "aws-sigv4" | "oauth2-bearer" | "service-name" | "delegation"
-            | "dns-interface" | "dns-ipv4-addr" | "dns-ipv6-addr" | "dns-servers" | "socks4"
-            | "socks4a" | "socks5" | "socks5-hostname" | "socks5-gssapi-service" | "preproxy"
-            | "ftp-account" | "ftp-alternative-to-user" | "ftp-method" | "ftp-port"
-            | "mail-from" | "mail-rcpt" | "mail-auth" | "pubkey" | "hostpubmd5"
+        "url"
+            | "output"
+            | "header"
+            | "data"
+            | "data-ascii"
+            | "data-raw"
+            | "data-binary"
+            | "data-urlencode"
+            | "json"
+            | "request"
+            | "user-agent"
+            | "cookie"
+            | "user"
+            | "write-out"
+            | "referer"
+            | "max-time"
+            | "connect-timeout"
+            | "cookie-jar"
+            | "range"
+            | "upload-file"
+            | "form"
+            | "proxy"
+            | "continue-at"
+            | "max-redirs"
+            | "retry"
+            | "resolve"
+            | "limit-rate"
+            | "cacert"
+            | "capath"
+            | "cert"
+            | "cert-type"
+            | "key"
+            | "key-type"
+            | "pass"
+            | "engine"
+            | "crlfile"
+            | "pinnedpubkey"
+            | "random-file"
+            | "egd-file"
+            | "ciphers"
+            | "tls13-ciphers"
+            | "tls-max"
+            | "proxy-user"
+            | "proxy-header"
+            | "interface"
+            | "connect-to"
+            | "retry-delay"
+            | "retry-max-time"
+            | "speed-limit"
+            | "speed-time"
+            | "stderr"
+            | "output-dir"
+            | "trace"
+            | "trace-ascii"
+            | "trace-time"
+            | "dump-header"
+            | "config"
+            | "parallel"
+            | "parallel-max"
+            | "rate"
+            | "quote"
+            | "telnet-option"
+            | "time-cond"
+            | "proto"
+            | "proto-redir"
+            | "proto-default"
+            | "doh-url"
+            | "unix-socket"
+            | "abstract-unix-socket"
+            | "aws-sigv4"
+            | "oauth2-bearer"
+            | "service-name"
+            | "delegation"
+            | "dns-interface"
+            | "dns-ipv4-addr"
+            | "dns-ipv6-addr"
+            | "dns-servers"
+            | "socks4"
+            | "socks4a"
+            | "socks5"
+            | "socks5-hostname"
+            | "socks5-gssapi-service"
+            | "preproxy"
+            | "ftp-account"
+            | "ftp-alternative-to-user"
+            | "ftp-method"
+            | "ftp-port"
+            | "mail-from"
+            | "mail-rcpt"
+            | "mail-auth"
+            | "pubkey"
+            | "hostpubmd5"
             | "hostpubsha256"
     )
 }
 
 fn resolve_str_arg(shell: &Shell, s: &str) -> String {
     if let Some(path) = s.strip_prefix('@') {
-        shell.vfs.read_to_string(path, &shell.cwd).unwrap_or_else(|_| s.to_string())
+        shell
+            .vfs
+            .read_to_string(path, &shell.cwd)
+            .unwrap_or_else(|_| s.to_string())
     } else {
         s.to_string()
     }
@@ -769,7 +1206,10 @@ fn resolve_str_arg(shell: &Shell, s: &str) -> String {
 
 fn resolve_bytes_arg(shell: &Shell, s: &str) -> Vec<u8> {
     if let Some(path) = s.strip_prefix('@') {
-        shell.vfs.read(path, &shell.cwd).unwrap_or_else(|_| s.as_bytes().to_vec())
+        shell
+            .vfs
+            .read(path, &shell.cwd)
+            .unwrap_or_else(|_| s.as_bytes().to_vec())
     } else {
         s.as_bytes().to_vec()
     }
@@ -780,13 +1220,20 @@ fn build_multipart(shell: &Shell, fields: &[(String, String)]) -> (String, Vec<u
     let mut body = Vec::new();
     for (name, value) in fields {
         body.extend_from_slice(
-            format!("--{}\r\nContent-Disposition: form-data; name=\"{}\"", boundary, name).as_bytes(),
+            format!(
+                "--{}\r\nContent-Disposition: form-data; name=\"{}\"",
+                boundary, name
+            )
+            .as_bytes(),
         );
         if let Some(path) = value.strip_prefix('@') {
             let fname = path.rsplit('/').next().unwrap_or(path).to_string();
             body.extend_from_slice(
-                format!("; filename=\"{}\"\r\nContent-Type: application/octet-stream\r\n\r\n", fname)
-                    .as_bytes(),
+                format!(
+                    "; filename=\"{}\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+                    fname
+                )
+                .as_bytes(),
             );
             if let Ok(data) = shell.vfs.read(path, &shell.cwd) {
                 body.extend_from_slice(&data);
@@ -805,7 +1252,7 @@ fn build_cookie_header(shell: &Shell, raws: &[String]) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for raw in raws {
         if let Some(path) = raw.strip_prefix('@') {
-            if let Ok(content) = shell.vfs.read_to_string(path, &shell.cwd) {
+            if let Ok(content) = shell.read_text_lossy(path) {
                 for line in content.lines() {
                     let line = line.trim();
                     if !line.is_empty() && !line.starts_with('#') {
@@ -816,7 +1263,7 @@ fn build_cookie_header(shell: &Shell, raws: &[String]) -> Option<String> {
         } else if raw.contains('=') {
             parts.push(raw.clone());
         } else if shell.vfs.exists(raw, &shell.cwd) {
-            if let Ok(content) = shell.vfs.read_to_string(raw, &shell.cwd) {
+            if let Ok(content) = shell.read_text_lossy(raw) {
                 for line in content.lines() {
                     let line = line.trim();
                     if !line.is_empty() && !line.starts_with('#') {
@@ -854,7 +1301,10 @@ impl Shell {
             Ok(o) => o,
             Err(e) => {
                 return CommandOutput::error(
-                    format!("curl: {}\ncurl: try 'curl --help' for more information\n", e),
+                    format!(
+                        "curl: {}\ncurl: try 'curl --help' for more information\n",
+                        e
+                    ),
                     2,
                 )
             }
@@ -903,7 +1353,7 @@ impl Shell {
                     return CommandOutput::error(
                         format!("curl: {}: {}\n", up, e),
                         26, // read error
-                    )
+                    );
                 }
             }
         } else if let Some(raw) = &opts.data_raw {
@@ -911,8 +1361,14 @@ impl Shell {
                 query_string = Some(resolve_str_arg(self, raw));
             } else {
                 data = Some(resolve_bytes_arg(self, raw));
+                if opts.data_kind == DataKind::UrlEncode {
+                    let encoded = url_encode_form(&resolve_str_arg(self, raw));
+                    data = Some(encoded.into_bytes());
+                }
                 content_type = match opts.data_kind {
-                    DataKind::Form => Some("application/x-www-form-urlencoded".to_string()),
+                    DataKind::Form | DataKind::UrlEncode => {
+                        Some("application/x-www-form-urlencoded".to_string())
+                    }
                     DataKind::Json => Some("application/json".to_string()),
                     DataKind::Binary => None,
                 };
@@ -953,17 +1409,20 @@ impl Shell {
 
         // Range / continue-at.
         if let Some(r) = &opts.range {
-            opts.headers.push(("Range".to_string(), format!("bytes={}", r)));
+            opts.headers
+                .push(("Range".to_string(), format!("bytes={}", r)));
         }
         if let Some(c) = &opts.continue_at {
             let offset = if c == "-" {
                 let fname = opts
                     .output_file
                     .as_deref()
-                    .and_then(|f| if f == "__auto__" {
-                        Some(crate::shell::extract_filename_from_url(&final_url))
-                    } else {
-                        Some(f.to_string())
+                    .and_then(|f| {
+                        if f == "__auto__" {
+                            Some(crate::shell::extract_filename_from_url(&final_url))
+                        } else {
+                            Some(f.to_string())
+                        }
                     })
                     .and_then(|f| self.vfs.metadata_len(&f, &self.cwd).ok());
                 fname.unwrap_or(0)
@@ -971,8 +1430,19 @@ impl Shell {
                 c.parse::<u64>().unwrap_or(0)
             };
             if offset > 0 {
-                opts.headers.push(("Range".to_string(), format!("bytes={}-", offset)));
+                opts.headers
+                    .push(("Range".to_string(), format!("bytes={}-", offset)));
             }
+        }
+
+        if opts.compressed
+            && !opts
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
+        {
+            opts.headers
+                .push(("Accept-Encoding".to_string(), "gzip, deflate".to_string()));
         }
 
         let curl_host = final_url
@@ -995,7 +1465,7 @@ impl Shell {
             );
         }
 
-        let config = HttpConfig {
+        let mut config = HttpConfig {
             method: method.clone(),
             url: final_url,
             data,
@@ -1009,13 +1479,26 @@ impl Shell {
             include_headers: opts.include_headers,
             request_timeout_secs: opts.request_timeout.unwrap_or(30.0),
             connect_timeout_secs: opts.connect_timeout.unwrap_or(10.0),
+            cancel: None,
+            deadline_ms: self.exec_deadline_ms(),
+            proxy: opts.proxy.clone(),
         };
 
         // --retry: retry transient transport errors up to `retry` times.
         let max_attempts = opts.retry.saturating_add(1).max(1);
-        let mut result: Result<HttpResponse, HttpError> =
-            Err(HttpError { message: "no attempt".to_string(), curl_exit_code: 1 });
+        let mut result: Result<HttpResponse, HttpError> = Err(HttpError {
+            message: "no attempt".to_string(),
+            curl_exit_code: 1,
+        });
+        config.cancel = Some(self.cancel.clone());
         for attempt in 0..max_attempts {
+            if self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                return CommandOutput {
+                    stdout: String::new(),
+                    stderr: "cancelled\n".to_string(),
+                    exit_code: 143,
+                };
+            }
             if attempt > 0 {
                 let backoff = std::time::Duration::from_millis(200 * attempt as u64);
                 std::thread::sleep(backoff);
@@ -1027,20 +1510,55 @@ impl Shell {
         }
 
         let mut out = match result {
-            Ok(response) => {
+            Ok(mut response) => {
+                // `--compressed`: transparently decode a compressed body.
+                if opts.compressed {
+                    if let Some((_, enc)) = response
+                        .response_headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+                    {
+                        if let Some(decoded) = decompress_body(&response.body, enc) {
+                            response.body = decoded;
+                        }
+                    }
+                }
+
                 if let Some(jar) = &opts.cookie_jar {
                     write_cookie_jar(self, jar, &response.response_headers);
                 }
 
-                let mut body_out = String::new();
-                if opts.include_headers {
-                    body_out.push_str(&format!("HTTP/1.1 {} {}\r\n", response.status_code, response.status_text));
+                // Header block (text) kept as bytes so it can be prepended to a
+                // binary body for file output; stdout uses a lossy string view.
+                // `-D <file>` dumps the same block to a file (`-` = stdout).
+                let dump_to_stdout = matches!(
+                    opts.dump_header_file.as_deref(),
+                    Some("-") | Some("/dev/stdout")
+                );
+                let dump_to_file = opts
+                    .dump_header_file
+                    .clone()
+                    .filter(|f| f != "-" && f != "/dev/stdout");
+                // `-I`/`--head` prints the header block (like `-i`), otherwise the
+                // body is empty and the command would produce no output at all.
+                let include_hdr = opts.include_headers || opts.head_mode || dump_to_stdout;
+                let mut header_bytes: Vec<u8> = Vec::new();
+                if include_hdr || dump_to_file.is_some() {
+                    header_bytes.extend_from_slice(
+                        format!(
+                            "HTTP/1.1 {} {}\r\n",
+                            response.status_code, response.status_text
+                        )
+                        .as_bytes(),
+                    );
                     for (k, v) in &response.response_headers {
-                        body_out.push_str(&format!("{}: {}\r\n", k, v));
+                        header_bytes.extend_from_slice(format!("{}: {}\r\n", k, v).as_bytes());
                     }
-                    body_out.push_str("\r\n");
+                    header_bytes.extend_from_slice(b"\r\n");
                 }
-                body_out.push_str(&response.body);
+                if let Some(file) = &dump_to_file {
+                    let _ = self.vfs.write_bytes(file, &self.cwd, &header_bytes);
+                }
 
                 let write_out = opts
                     .write_format
@@ -1048,11 +1566,31 @@ impl Shell {
                     .map(|fmt| format_write_info(fmt, &response, &method))
                     .unwrap_or_default();
 
-                let stderr = if opts.verbose { response.verbose_log.clone() } else { String::new() };
+                let stderr = if opts.verbose {
+                    response.verbose_log.clone()
+                } else {
+                    String::new()
+                };
 
-                let exit_code = if opts.fail_on_error && response.status_code >= 400 { 22 } else { 0 };
+                let exit_code = if opts.fail_on_error && response.status_code >= 400 {
+                    22
+                } else {
+                    0
+                };
 
-                let body_suppressed = opts.fail_on_error && response.status_code >= 400 && !opts.fail_with_body;
+                let body_suppressed =
+                    opts.fail_on_error && response.status_code >= 400 && !opts.fail_with_body;
+
+                let body_out = if body_suppressed {
+                    String::new()
+                } else {
+                    let mut s = String::new();
+                    if include_hdr {
+                        s.push_str(&String::from_utf8_lossy(&header_bytes));
+                    }
+                    s.push_str(&String::from_utf8_lossy(&response.body));
+                    s
+                };
 
                 if let Some(file) = opts.output_file.clone() {
                     let filename = if file == "__auto__" {
@@ -1061,21 +1599,40 @@ impl Shell {
                         file.clone()
                     };
                     if filename == "/dev/null" {
-                        CommandOutput { stdout: write_out, stderr, exit_code }
+                        CommandOutput {
+                            stdout: write_out,
+                            stderr,
+                            exit_code,
+                        }
                     } else if filename == "-" || filename == "/dev/stdout" {
-                        let mut stdout = if body_suppressed { String::new() } else { body_out };
+                        let mut stdout = body_out;
                         stdout.push_str(&write_out);
-                        CommandOutput { stdout, stderr, exit_code }
+                        CommandOutput {
+                            stdout,
+                            stderr,
+                            exit_code,
+                        }
                     } else if filename == "/dev/stderr" {
                         let mut stderr = stderr;
-                        if !body_suppressed {
-                            stderr.push_str(&body_out);
+                        stderr.push_str(&body_out);
+                        CommandOutput {
+                            stdout: write_out,
+                            stderr,
+                            exit_code,
                         }
-                        CommandOutput { stdout: write_out, stderr, exit_code }
                     } else {
-                        let body_to_write = if body_suppressed { String::new() } else { body_out };
-                        match self.vfs.write(&filename, &self.cwd, &body_to_write) {
-                            Ok(_) => CommandOutput { stdout: write_out, stderr, exit_code },
+                        // Write RAW bytes so binary downloads stay intact.
+                        let mut bytes: Vec<u8> = Vec::new();
+                        if !body_suppressed {
+                            bytes.extend_from_slice(&header_bytes);
+                            bytes.extend_from_slice(&response.body);
+                        }
+                        match self.vfs.write_bytes(&filename, &self.cwd, &bytes) {
+                            Ok(_) => CommandOutput {
+                                stdout: write_out,
+                                stderr,
+                                exit_code,
+                            },
                             Err(e) => CommandOutput {
                                 stdout: String::new(),
                                 stderr: format!("curl: ({}) Failed writing body: {}\n", 23, e),
@@ -1084,9 +1641,13 @@ impl Shell {
                         }
                     }
                 } else {
-                    let mut stdout = if body_suppressed { String::new() } else { body_out };
+                    let mut stdout = body_out;
                     stdout.push_str(&write_out);
-                    CommandOutput { stdout, stderr, exit_code }
+                    CommandOutput {
+                        stdout,
+                        stderr,
+                        exit_code,
+                    }
                 }
             }
             Err(e) => {
@@ -1096,7 +1657,11 @@ impl Shell {
                 } else {
                     String::new()
                 };
-                CommandOutput { stdout: String::new(), stderr, exit_code: e.curl_exit_code }
+                CommandOutput {
+                    stdout: String::new(),
+                    stderr,
+                    exit_code: e.curl_exit_code,
+                }
             }
         };
 
@@ -1127,11 +1692,14 @@ mod tests {
 
     fn resp() -> HttpResponse {
         HttpResponse {
-            body: "hello".to_string(),
+            body: b"hello".to_vec(),
             status_code: 200,
             status_text: "OK".to_string(),
             final_url: "http://example.com/x".to_string(),
-            response_headers: vec![("Content-Type".to_string(), "text/html; charset=utf-8".to_string())],
+            response_headers: vec![(
+                "Content-Type".to_string(),
+                "text/html; charset=utf-8".to_string(),
+            )],
             size_download: 5,
             verbose_log: String::new(),
             time_total: 0.123,
@@ -1147,10 +1715,16 @@ mod tests {
     fn test_format_write_info_basic() {
         let r = resp();
         assert_eq!(format_write_info("%{http_code}", &r, "GET"), "200");
-        assert_eq!(format_write_info("%{url_effective}", &r, "GET"), "http://example.com/x");
+        assert_eq!(
+            format_write_info("%{url_effective}", &r, "GET"),
+            "http://example.com/x"
+        );
         assert_eq!(format_write_info("%{content_type}", &r, "GET"), "text/html");
         assert_eq!(format_write_info("%{method}", &r, "GET"), "GET");
-        assert_eq!(format_write_info("%{remote_ip}:%{remote_port}", &r, "GET"), "1.2.3.4:443");
+        assert_eq!(
+            format_write_info("%{remote_ip}:%{remote_port}", &r, "GET"),
+            "1.2.3.4:443"
+        );
         assert_eq!(format_write_info("%{size_download}", &r, "GET"), "5");
     }
 
@@ -1238,7 +1812,11 @@ mod tests {
         let out = shell.cmd_curl(&["-s", "http://127.0.0.1:1/"]);
         assert_eq!(out.exit_code, 7, "stderr={}", out.stderr);
         assert!(out.stdout.is_empty());
-        assert!(out.stderr.is_empty(), "silent should suppress error, got {}", out.stderr);
+        assert!(
+            out.stderr.is_empty(),
+            "silent should suppress error, got {}",
+            out.stderr
+        );
     }
 
     #[test]
@@ -1304,7 +1882,64 @@ mod tests {
     fn test_curl_upload_file_missing() {
         let shell = mk_shell();
         let out = shell.cmd_curl(&["-T", "nonexistent.bin", "http://127.0.0.1:1/"]);
-        assert_eq!(out.exit_code, 26, "missing upload file should be a read error (26)");
+        assert_eq!(
+            out.exit_code, 26,
+            "missing upload file should be a read error (26)"
+        );
+    }
+
+    #[test]
+    fn curl_cancelled_before_request() {
+        let mut shell = mk_shell();
+        shell.cancel.store(true, Ordering::SeqCst);
+        let out = shell.execute("curl", &["https://example.com"], None);
+        assert_eq!(out.exit_code, 143, "stderr={}", out.stderr);
+        assert!(out.stderr.contains("cancelled"), "stderr={}", out.stderr);
+        shell.cancel.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn url_encode_form_semantics() {
+        assert_eq!(super::url_encode_form("a=b c"), "a=b+c");
+        assert_eq!(super::url_encode_form("a/b"), "a%2Fb");
+        assert_eq!(
+            super::url_encode_form("name=hello world"),
+            "name=hello+world"
+        );
+        assert_eq!(super::url_encode_form("x=1&y=2"), "x=1%26y%3D2");
+    }
+
+    #[test]
+    fn decompress_body_gzip_and_deflate() {
+        use std::io::Write;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"hello decompressed").unwrap();
+        let gz = gz.finish().unwrap();
+        assert_eq!(
+            super::decompress_body(&gz, "gzip").unwrap(),
+            b"hello decompressed"
+        );
+
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(b"zlib data").unwrap();
+        let z = z.finish().unwrap();
+        assert_eq!(super::decompress_body(&z, "deflate").unwrap(), b"zlib data");
+
+        assert!(super::decompress_body(b"x", "br").is_none());
+    }
+
+    #[test]
+    fn curl_proxy_and_compressed_parse() {
+        let mut shell = mk_shell();
+        // Parsing must not error (no request is made when no URL is present).
+        shell.cancel.store(false, Ordering::SeqCst);
+        let out = shell.execute("curl", &["--proxy", "http://127.0.0.1:8080"], None);
+        assert_eq!(
+            out.exit_code, 2,
+            "no URL → usage error 2, got {}",
+            out.exit_code
+        );
+        let out = shell.execute("curl", &["--compressed", "-d", "a=b"], None);
+        assert_eq!(out.exit_code, 2);
     }
 }
-

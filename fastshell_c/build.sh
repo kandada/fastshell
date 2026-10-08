@@ -33,7 +33,7 @@ echo "=== [1/2] cargo build staticlib (${TARGET}) ==="
 # Compile aacode-rs which INCLUDES fastshell as a dependency. This produces a
 # single staticlib containing both fastshell's sandbox engine AND aacode-rs's
 # native agent C ABI symbols (aacode_run_task, aacode_cancel, ...).
-cargo build --release --target "${TARGET}" --lib -p aacode-rs
+cargo build --release --target "${TARGET}" --lib -p aacode-rs --features browser
 
 STATICLIB="target/${TARGET}/release/libaacode_rs.a"
 mkdir -p "${CDIST}"
@@ -49,6 +49,8 @@ if [ "${1:-}" = "--so" ]; then
     "${CC}" -shared -fPIC \
         -I fastshell_c/include \
         fastshell_c/src/jni_glue.c \
+        fastshell_c/src/jni_browser_bridge.c \
+        fastshell_c/src/jni_surface_bridge.c \
         "${CDIST}/libaacode_rs.a" \
         fastshell/vendor/libffi/aarch64-linux-android/libffi.a \
         -Wl,--gc-sections -Wl,--exclude-libs,ALL -Wl,--no-undefined \

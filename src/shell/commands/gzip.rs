@@ -5,7 +5,7 @@ use crate::shell::{CommandOutput, Shell};
 use std::io::{Read, Write};
 
 impl Shell {
-    pub fn cmd_gzip(&self, args: &[&str]) -> CommandOutput {
+    pub fn cmd_gzip(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut to_stdout = false;
         let mut decompress = false;
         let mut keep = false;
@@ -14,25 +14,57 @@ impl Shell {
 
         for arg in args {
             match *arg {
-                "-c" | "--stdout" => to_stdout = true,
-                "-d" | "--decompress" => decompress = true,
-                "-k" | "--keep" => keep = true,
-                "-1" => level = flate2::Compression::new(1),
-                "-2" => level = flate2::Compression::new(2),
-                "-3" => level = flate2::Compression::new(3),
-                "-4" => level = flate2::Compression::new(4),
-                "-5" => level = flate2::Compression::new(5),
-                "-6" => level = flate2::Compression::new(6),
-                "-7" => level = flate2::Compression::new(7),
-                "-8" => level = flate2::Compression::new(8),
-                "-9" => level = flate2::Compression::new(9),
-                _ if arg.starts_with('-') => {}
+                "--stdout" => to_stdout = true,
+                "--decompress" => decompress = true,
+                "--keep" => keep = true,
+                _ if arg.starts_with("--") => {}
+                _ if arg.starts_with('-') && arg.len() > 1 => {
+                    // Expand combined short flags (`-dc`, `-cd`, `-9k`, …).
+                    for ch in arg[1..].chars() {
+                        match ch {
+                            'c' => to_stdout = true,
+                            'd' => decompress = true,
+                            'k' => keep = true,
+                            '1'..='9' => level = flate2::Compression::new(ch.to_digit(10).unwrap()),
+                            _ => {}
+                        }
+                    }
+                }
                 _ => files.push(arg.to_string()),
             }
         }
 
         if files.is_empty() {
-            return CommandOutput::error("gzip: missing file operand\n".to_string(), 1);
+            // No file operand: filter stdin → stdout (like GNU gzip), so
+            // `printf x | gzip` / `... | gunzip` work.
+            let input_bytes = match self
+                .take_binary_in()
+                .or_else(|| stdin.map(|s| s.as_bytes().to_vec()))
+            {
+                Some(b) => b,
+                None => return CommandOutput::error("gzip: missing file operand\n".to_string(), 1),
+            };
+            let result_bytes = if decompress {
+                let mut decoder = flate2::read::GzDecoder::new(&input_bytes[..]);
+                let mut d = Vec::new();
+                if let Err(e) = decoder.read_to_end(&mut d) {
+                    return CommandOutput::error(format!("gzip: {}\n", e), 1);
+                }
+                d
+            } else {
+                let mut enc = flate2::write::GzEncoder::new(Vec::new(), level);
+                if let Err(e) = enc.write_all(&input_bytes) {
+                    return CommandOutput::error(format!("gzip: {}\n", e), 1);
+                }
+                match enc.finish() {
+                    Ok(c) => c,
+                    Err(e) => return CommandOutput::error(format!("gzip: {}\n", e), 1),
+                }
+            };
+            if !result_bytes.is_empty() {
+                self.set_binary_out(result_bytes.clone());
+            }
+            return CommandOutput::success(String::from_utf8_lossy(&result_bytes).to_string());
         }
 
         let mut output_bytes = Vec::new();
@@ -92,6 +124,11 @@ impl Shell {
         }
 
         if to_stdout {
+            // Binary stdout must not go through the lossy String channel — stash
+            // the raw bytes so a redirect (`> file`) writes them verbatim.
+            if !output_bytes.is_empty() {
+                self.set_binary_out(output_bytes.clone());
+            }
             CommandOutput::success(String::from_utf8_lossy(&output_bytes).to_string())
         } else {
             CommandOutput::success(String::new())

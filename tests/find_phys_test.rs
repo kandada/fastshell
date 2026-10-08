@@ -1,19 +1,29 @@
 use fastshell::sdk::Fastshell;
 
 fn setup() -> (Fastshell, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("fs_sdk_phys_{}_{}", std::process::id(), rand_suffix()));
+    let dir = std::env::temp_dir().join(format!(
+        "fs_sdk_phys_{}_{}",
+        std::process::id(),
+        rand_suffix()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("projects/test1")).unwrap();
     std::fs::write(dir.join("projects/test1/init.md"), "hello").unwrap();
     std::fs::create_dir_all(dir.join("projects/test1/.aacode")).unwrap();
     let mut sdk = Fastshell::new();
-    let cfg = fastshell::sdk::types::Config { sandbox_path: dir.to_string_lossy().to_string(), ..Default::default() };
+    let cfg = fastshell::sdk::types::Config {
+        sandbox_path: dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
     sdk.init(cfg).unwrap();
     (sdk, dir.canonicalize().unwrap())
 }
 
 fn rand_suffix() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
 }
 
 #[test]
@@ -25,8 +35,15 @@ fn sdk_find_full_physical_path_pipeline() {
         p.display()
     );
     let out = sdk.execute(&cmd);
-    eprintln!("stdout={:?} stderr={:?} exit={}", out.stdout, out.stderr, out.exit_code);
-    assert!(out.stdout.contains("init.md"), "expected init.md in output: {:?}", out);
+    eprintln!(
+        "stdout={:?} stderr={:?} exit={}",
+        out.stdout, out.stderr, out.exit_code
+    );
+    assert!(
+        out.stdout.contains("init.md"),
+        "expected init.md in output: {:?}",
+        out
+    );
 }
 
 #[test]

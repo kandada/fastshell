@@ -218,6 +218,16 @@ fn get_entries_recursive(base: &Path) -> Result<Vec<PathBuf>, String> {
 
 impl Shell {
     pub fn cmd_chmod(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(
+                "Usage: chmod [OPTION]... MODE FILE...\n\
+                 Change the mode of each FILE.\n\n\
+                   -R          change files and directories recursively\n\
+                   MODE        octal (e.g. 755) or symbolic (e.g. u+x, go-w)\n\
+                   -h, --help  display this help and exit\n"
+                    .to_string(),
+            );
+        }
         let mut recursive = false;
         let mut idx = 0;
 

@@ -19,7 +19,7 @@ fn setup() -> Fastshell {
         allow_subprocess: true,
         network_ask_permission: false,
         command_timeout_ms: 0,
-    ..Default::default()
+        ..Default::default()
     })
     .unwrap();
 

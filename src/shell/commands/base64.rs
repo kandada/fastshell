@@ -61,7 +61,9 @@ impl Shell {
 
         let input_data: Vec<u8> = if files.is_empty() {
             match stdin {
-                Some(s) => s.as_bytes().to_vec(),
+                Some(s) => self
+                    .take_binary_in()
+                    .unwrap_or_else(|| s.as_bytes().to_vec()),
                 None => return CommandOutput::error("base64: missing input\n".to_string(), 1),
             }
         } else {
@@ -88,7 +90,12 @@ impl Shell {
                     .collect()
             };
             match base64::engine::general_purpose::STANDARD.decode(&cleaned) {
-                Ok(bytes) => CommandOutput::success(String::from_utf8_lossy(&bytes).to_string()),
+                Ok(bytes) => {
+                    if !bytes.is_empty() {
+                        self.set_binary_out(bytes.clone());
+                    }
+                    CommandOutput::success(String::from_utf8_lossy(&bytes).to_string())
+                }
                 Err(e) => CommandOutput::error(format!("base64: decode error: {}\n", e), 1),
             }
         } else {

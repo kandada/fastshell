@@ -51,10 +51,7 @@ impl Shell {
         }
         for name in args {
             if self.aliases.remove(*name).is_none() {
-                return CommandOutput::error(
-                    format!("unalias: {}: not found\n", name),
-                    1,
-                );
+                return CommandOutput::error(format!("unalias: {}: not found\n", name), 1);
             }
         }
         CommandOutput::success(String::new())

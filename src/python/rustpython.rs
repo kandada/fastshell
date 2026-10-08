@@ -25,7 +25,9 @@
 //!     contract as the previous CPython engine; concurrent agent tasks
 //!     queue for Python while everything else runs in parallel.
 
-use super::{ExecutionResult, PythonEngine};
+use super::{ExecutionResult, PythonEngine, PY_COMPAT_PRELUDE};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
@@ -36,11 +38,31 @@ use vm::{AsObject, Interpreter};
 /// Python wrapper that isolates one execution inside the persistent
 /// interpreter. The user code + cwd are injected as scope globals (never via
 /// string formatting, so arbitrary code/quotes are safe).
+use super::SANDBOX_WRAPPER;
+
 const WRAPPER: &str = r#"
 import sys, io, os, types, traceback
 sys.stdout = io.StringIO()
 sys.stderr = io.StringIO()
 __aacode_exit = 0
+# Reset any sandbox patches left by a previous run in this persistent
+# interpreter, so the WRAPPER's own file calls use the REAL functions
+# (otherwise os.chdir(real_cwd) gets re-translated → doubled path).
+try:
+    import builtins as _rb, shutil as _rs, io as _rio
+    if hasattr(os, '_fs_orig'):
+        for _rk, _rv in list(os._fs_orig.items()):
+            if _rk.startswith('shutil_'):
+                setattr(_rs, _rk[7:], _rv)
+            else:
+                setattr(os, _rk, _rv)
+    if hasattr(_rb, '_fs_orig_open'):
+        _rb.open = _rb._fs_orig_open
+    if hasattr(_rio, '_fs_orig_open'):
+        _rio.open = _rio._fs_orig_open
+    del _rb, _rs, _rio
+except Exception:
+    pass
 __aacode_prev_cwd = os.getcwd()
 try:
     if __aacode_cwd:
@@ -69,7 +91,36 @@ try:
             sys.stdin = open('_py_stdin')
     except OSError:
         pass
-    exec(compile(__aacode_code, __aacode_file, 'exec'), __aacode_main.__dict__)
+    # Compatibility dialect (py2 builtins + legacy module aliases), best-effort.
+    try:
+        exec(compile(__aacode_prelude, '<compat>', 'exec'), __aacode_main.__dict__)
+    except BaseException:
+        pass
+    # Sandbox path translation: resolve the shell's virtual root (`/projects/...`)
+    # and relative paths under FASTSHELL_ROOT (matches the shell VFS).
+    try:
+        os.environ['FASTSHELL_ROOT'] = __aacode_root
+        os.environ['FASTSHELL_CWD'] = __aacode_logical_cwd
+        exec(compile(__aacode_sandbox, '<sandbox>', 'exec'), __aacode_main.__dict__)
+    except BaseException:
+        pass
+    # sqlite3: RustPython ships no `_sqlite3` on mobile, so bridge to the native
+    # rusqlite implementation via a pure-Python `sqlite3` shim.
+    try:
+        import sqlite3 as _fs_real_sqlite3
+    except BaseException:
+        try:
+            import types as _fs_t, sys as _fs_s
+            _fs_m = _fs_t.ModuleType("sqlite3")
+            exec(compile(__aacode_sqlite_shim, "<sqlite3>", "exec"), _fs_m.__dict__)
+            _fs_s.modules["sqlite3"] = _fs_m
+        except BaseException:
+            pass
+    exec(compile(
+        __aacode_code,
+        __aacode_file,
+        'exec',
+    ), __aacode_main.__dict__)
 except SystemExit as e:
     c = e.code
     __aacode_exit = c if isinstance(c, int) else (0 if c is None else 1)
@@ -107,6 +158,8 @@ finally:
 
 /// One queued Python execution.
 struct Job {
+    root: String,
+    logical_cwd: String,
     code: String,
     file_label: String,
     cwd: String,
@@ -127,6 +180,8 @@ fn worker_sender() -> mpsc::Sender<Job> {
             code: String::new(),
             file_label: String::new(),
             cwd: String::new(),
+            root: String::new(),
+            logical_cwd: String::new(),
             reply: probe_tx,
         })
         .is_ok();
@@ -152,7 +207,14 @@ fn spawn_worker() -> mpsc::Sender<Job> {
                     continue;
                 }
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_one(&interp, &job.code, &job.file_label, &job.cwd)
+                    run_one(
+                        &interp,
+                        &job.code,
+                        &job.file_label,
+                        &job.cwd,
+                        &job.root,
+                        &job.logical_cwd,
+                    )
                 }))
                 .unwrap_or_else(|_| {
                     ExecutionResult::error(
@@ -178,7 +240,14 @@ fn build_interpreter() -> Interpreter {
 }
 
 /// Executes one job inside the persistent interpreter.
-fn run_one(interp: &Interpreter, code: &str, file_label: &str, cwd_str: &str) -> ExecutionResult {
+fn run_one(
+    interp: &Interpreter,
+    code: &str,
+    file_label: &str,
+    cwd_str: &str,
+    root: &str,
+    logical_cwd: &str,
+) -> ExecutionResult {
     interp.enter(|vm| {
         let scope = vm.new_scope_with_builtins();
 
@@ -189,6 +258,15 @@ fn run_one(interp: &Interpreter, code: &str, file_label: &str, cwd_str: &str) ->
         set("__aacode_code", vm.ctx.new_str(code).into());
         set("__aacode_cwd", vm.ctx.new_str(cwd_str).into());
         set("__aacode_file", vm.ctx.new_str(file_label).into());
+        set("__aacode_prelude", vm.ctx.new_str(PY_COMPAT_PRELUDE).into());
+        set("__aacode_sandbox", vm.ctx.new_str(SANDBOX_WRAPPER).into());
+        set("__aacode_root", vm.ctx.new_str(root).into());
+        set("__aacode_sqlite_shim", vm.ctx.new_str(SQLITE_SHIM).into());
+        // Native sqlite bridge (rusqlite) exposed as a builtin so the pure-Python
+        // `sqlite3` shim can call it from any module.
+        let sqlite_fn = vm.new_function("_fs_sqlite", fs_sqlite_native);
+        let _ = vm.builtins.set_attr("_fs_sqlite", sqlite_fn, vm);
+        set("__aacode_logical_cwd", vm.ctx.new_str(logical_cwd).into());
 
         let run_result = vm.run_string(scope.clone(), WRAPPER, "<aacode-wrapper>".to_owned());
 
@@ -249,10 +327,13 @@ impl RustPythonEngine {
 
     fn run(&self, code: &str, file_label: &str, cwd: &Path) -> ExecutionResult {
         let (reply_tx, reply_rx) = mpsc::channel();
+        let (root, logical_cwd) = crate::python::python_sandbox().unwrap_or_default();
         let job = Job {
             code: code.to_string(),
             file_label: file_label.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
+            root,
+            logical_cwd,
             reply: reply_tx,
         };
         if worker_sender().send(job).is_err() {
@@ -303,7 +384,11 @@ impl PythonEngine for RustPythonEngine {
     }
 
     fn version(&self) -> Option<String> {
-        Some("Python 3.13 (RustPython 0.5.0, embedded)".to_string())
+        // Derive the Python version from RustPython itself so it can't drift.
+        Some(format!(
+            "Python {} (RustPython 0.5.0, embedded)",
+            rustpython_vm::version::get_version_number()
+        ))
     }
 }
 
@@ -404,7 +489,11 @@ print("UNITTEST-DONE")
             &tmp_dir("unittest"),
         );
         assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
-        assert!(out.stdout.contains("UNITTEST-DONE"), "stdout={}", out.stdout);
+        assert!(
+            out.stdout.contains("UNITTEST-DONE"),
+            "stdout={}",
+            out.stdout
+        );
         assert!(
             out.stderr.contains("OK") || out.stdout.contains("OK"),
             "unittest result missing: stdout={} stderr={}",
@@ -469,7 +558,11 @@ print("BIGINT-OK", big % 97)
 
         std::fs::write(dir.join("localmod.py"), "VALUE = 2").unwrap();
         let out = e.execute("import localmod; print(localmod.VALUE)", &dir);
-        assert!(out.stdout.contains('2'), "stale module cache: {}", out.stdout);
+        assert!(
+            out.stdout.contains('2'),
+            "stale module cache: {}",
+            out.stdout
+        );
     }
 
     #[test]
@@ -510,10 +603,18 @@ print("BIGINT-OK", big % 97)
         let mut e = RustPythonEngine::new();
         // Project A sees its own module.
         let out_a = e.execute("import sharedmod; print(sharedmod.WHO)", &dir_a);
-        assert!(out_a.stdout.contains("A"), "A should see its own module: {}", out_a.stdout);
+        assert!(
+            out_a.stdout.contains("A"),
+            "A should see its own module: {}",
+            out_a.stdout
+        );
         // Project B sees its own module (not A's leaked path).
         let out_b = e.execute("import sharedmod; print(sharedmod.WHO)", &dir_b);
-        assert!(out_b.stdout.contains("B"), "B should see its own module: {}", out_b.stdout);
+        assert!(
+            out_b.stdout.contains("B"),
+            "B should see its own module: {}",
+            out_b.stdout
+        );
 
         let _ = std::fs::remove_dir_all(&sp_a);
         let _ = std::fs::remove_dir_all(&sp_b);
@@ -527,7 +628,10 @@ print("BIGINT-OK", big % 97)
                 .args(["-o", "rss=", "-p", &std::process::id().to_string()])
                 .output()
                 .unwrap();
-            String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
         }
         let dir = tmp_dir("mem");
         let mut e = RustPythonEngine::new();
@@ -546,3 +650,278 @@ print("BIGINT-OK", big % 97)
         );
     }
 }
+
+// ── Python `sqlite3` bridge (rusqlite) ───────────────────────────────────
+//
+// RustPython's stdlib excludes `_sqlite3` on Android (`libsqlite3-sys` is
+// cfg-gated out), so we expose one native function `__fs_sqlite` backed by
+// fastshell's bundled rusqlite, and inject a pure-Python `sqlite3` shim that
+// wraps it into a small DB-API subset.
+
+thread_local! {
+    static FS_SQLITE_CONNS: RefCell<HashMap<i64, rusqlite::Connection>> =
+        RefCell::new(HashMap::new());
+    static FS_SQLITE_NEXT: Cell<i64> = const { Cell::new(1) };
+}
+
+fn fs_json_to_sql(v: &serde_json::Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value as RV;
+    match v {
+        serde_json::Value::Null => RV::Null,
+        serde_json::Value::Bool(b) => RV::Integer(if *b { 1 } else { 0 }),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                RV::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                RV::Real(f)
+            } else {
+                RV::Null
+            }
+        }
+        serde_json::Value::String(s) => RV::Text(s.clone()),
+        other => RV::Text(other.to_string()),
+    }
+}
+
+fn fs_sql_to_json(v: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
+    use rusqlite::types::ValueRef as RV;
+    match v {
+        RV::Null => serde_json::Value::Null,
+        RV::Integer(i) => serde_json::json!(i),
+        RV::Real(f) => serde_json::json!(f),
+        RV::Text(t) => serde_json::json!(String::from_utf8_lossy(t).to_string()),
+        RV::Blob(b) => serde_json::json!(format!("<blob {} bytes>", b.len())),
+    }
+}
+
+fn fs_sqlite_dispatch(op: &str, a: &str, b: &str, c: &str) -> String {
+    match op {
+        "connect" => {
+            let conn = if a.is_empty() || a == ":memory:" {
+                rusqlite::Connection::open_in_memory()
+            } else {
+                rusqlite::Connection::open(a)
+            };
+            match conn {
+                Ok(conn) => {
+                    let id = FS_SQLITE_NEXT.with(|n| {
+                        let v = n.get();
+                        n.set(v + 1);
+                        v
+                    });
+                    FS_SQLITE_CONNS.with(|m| m.borrow_mut().insert(id, conn));
+                    serde_json::json!({ "handle": id }).to_string()
+                }
+                Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+            }
+        }
+        "close" => {
+            if let Ok(id) = a.parse::<i64>() {
+                FS_SQLITE_CONNS.with(|m| {
+                    m.borrow_mut().remove(&id);
+                });
+            }
+            "{}".to_string()
+        }
+        "commit" => {
+            if let Ok(id) = a.parse::<i64>() {
+                FS_SQLITE_CONNS.with(|m| {
+                    if let Some(conn) = m.borrow().get(&id) {
+                        let _ = conn.execute_batch("COMMIT;");
+                    }
+                });
+            }
+            "{}".to_string()
+        }
+        "version" => serde_json::json!({ "version": rusqlite::version() }).to_string(),
+        "execute" => {
+            let id = a.parse::<i64>().unwrap_or(0);
+            let params: Vec<serde_json::Value> = serde_json::from_str(b).unwrap_or_default();
+            FS_SQLITE_CONNS.with(|m| {
+                let map = m.borrow();
+                let Some(conn) = map.get(&id) else {
+                    return serde_json::json!({ "error": "no such connection" }).to_string();
+                };
+                let mut stmt = match conn.prepare(c) {
+                    Ok(s) => s,
+                    Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+                };
+                let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let ncols = stmt.column_count();
+                let rp: Vec<rusqlite::types::Value> = params.iter().map(fs_json_to_sql).collect();
+                if ncols == 0 {
+                    return match stmt.execute(rusqlite::params_from_iter(rp.iter())) {
+                        Ok(n) => serde_json::json!({ "rows": [], "rowcount": n, "columns": [] })
+                            .to_string(),
+                        Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+                    };
+                }
+                let mut rows = match stmt.query(rusqlite::params_from_iter(rp.iter())) {
+                    Ok(r) => r,
+                    Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+                };
+                let mut out: Vec<Vec<serde_json::Value>> = Vec::new();
+                loop {
+                    match rows.next() {
+                        Ok(Some(row)) => {
+                            let mut r = Vec::with_capacity(ncols);
+                            for i in 0..ncols {
+                                r.push(
+                                    row.get_ref(i)
+                                        .map(fs_sql_to_json)
+                                        .unwrap_or(serde_json::Value::Null),
+                                );
+                            }
+                            out.push(r);
+                        }
+                        Ok(None) => break,
+                        Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+                    }
+                }
+                serde_json::json!({ "rows": out, "rowcount": -1, "columns": cols }).to_string()
+            })
+        }
+        _ => serde_json::json!({ "error": format!("unknown op {op}") }).to_string(),
+    }
+}
+
+fn fs_sqlite_native(
+    op: String,
+    a: String,
+    b: String,
+    c: String,
+    vm: &vm::VirtualMachine,
+) -> vm::PyObjectRef {
+    let out = fs_sqlite_dispatch(&op, &a, &b, &c);
+    vm.ctx.new_str(out).into()
+}
+
+/// Pure-Python `sqlite3` shim (DB-API subset) over the native `__fs_sqlite`.
+const SQLITE_SHIM: &str = r#"
+import json as _fs_json
+import sys as _fs_sys
+
+class _FsError(Exception):
+    pass
+
+class _FsOperationalError(_FsError):
+    pass
+
+class _FsIntegrityError(_FsError):
+    pass
+
+class _FsProgrammingError(_FsError):
+    pass
+
+class _FsCursor:
+    def __init__(self, conn):
+        self.connection = conn
+        self._rows = []
+        self._idx = 0
+        self.rowcount = -1
+        self.description = None
+        self.lastrowid = None
+        self.arraysize = 1
+
+    def execute(self, sql, params=()):
+        r = _fs_json.loads(_fs_sqlite("execute", str(self.connection._h), _fs_json.dumps(list(params)), sql))
+        if "error" in r:
+            raise _FsOperationalError(r["error"])
+        self._rows = r.get("rows", [])
+        self._idx = 0
+        self.rowcount = r.get("rowcount", -1)
+        cols = r.get("columns", [])
+        self.description = [(c, None, None, None, None, None, None) for c in cols] if cols else None
+        return self
+
+    def executemany(self, sql, seq):
+        n = 0
+        for p in seq:
+            self.execute(sql, p)
+            n += 1
+        self.rowcount = n
+        return self
+
+    def executescript(self, script):
+        for stmt in script.split(";"):
+            if stmt.strip():
+                self.execute(stmt)
+        return self
+
+    def fetchone(self):
+        if self._idx < len(self._rows):
+            row = self._rows[self._idx]
+            self._idx += 1
+            return tuple(row)
+        return None
+
+    def fetchmany(self, size=1):
+        rows = self._rows[self._idx:self._idx + size]
+        self._idx += len(rows)
+        return [tuple(r) for r in rows]
+
+    def fetchall(self):
+        rows = self._rows[self._idx:]
+        self._idx = len(self._rows)
+        return [tuple(r) for r in rows]
+
+    def close(self):
+        pass
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+class _FsConnection:
+    def __init__(self, path=":memory:"):
+        r = _fs_json.loads(_fs_sqlite("connect", str(path), "", ""))
+        if "error" in r:
+            raise _FsOperationalError(r["error"])
+        self._h = r["handle"]
+        self._closed = False
+
+    def cursor(self):
+        return _FsCursor(self)
+
+    def execute(self, sql, params=()):
+        return _FsCursor(self).execute(sql, params)
+
+    def executemany(self, sql, seq):
+        return _FsCursor(self).executemany(sql, seq)
+
+    def executescript(self, script):
+        return _FsCursor(self).executescript(script)
+
+    def commit(self):
+        _fs_sqlite("commit", str(self._h), "", "")
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        if not self._closed:
+            _fs_sqlite("close", str(self._h), "", "")
+            self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.commit()
+
+def connect(path=":memory:", *a, **k):
+    return _FsConnection(path)
+
+try:
+    sqlite_version = _fs_json.loads(_fs_sqlite("version", "", "", ""))["version"]
+except Exception:
+    sqlite_version = "3"
+
+version = "2.6.0"
+paramstyle = "qmark"
+Error = _FsError
+DatabaseError = _FsError
+OperationalError = _FsOperationalError
+IntegrityError = _FsIntegrityError
+ProgrammingError = _FsProgrammingError
+Warning = Warning
+"#;

@@ -42,13 +42,17 @@ impl Shell {
             return perm;
         }
 
-        let result = crate::shell::http_request("GET", &url, None, true);
+        let result = crate::shell::http_request("GET", &url, None, true, self.exec_deadline_ms());
         match result {
             Ok(body) => {
                 let filename = match output_file {
                     Some(ref f) => f.clone(),
                     None => crate::shell::extract_filename_from_url(&url),
                 };
+                // `wget -O -` writes the body to stdout.
+                if filename == "-" {
+                    return CommandOutput::success(body);
+                }
                 match self.vfs.write(&filename, &self.cwd, &body) {
                     Ok(_) => CommandOutput::success(format!(
                         "{} saved [{} bytes]\n",

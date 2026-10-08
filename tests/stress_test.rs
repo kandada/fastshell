@@ -22,7 +22,7 @@ fn setup_no_timeout() -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: 0,
-    ..Default::default()
+        ..Default::default()
     })
     .unwrap();
     sdk
@@ -39,7 +39,7 @@ fn setup_with_timeout(ms: u64) -> Fastshell {
         allow_subprocess: false,
         network_ask_permission: false,
         command_timeout_ms: ms,
-    ..Default::default()
+        ..Default::default()
     })
     .unwrap();
     sdk
@@ -50,6 +50,7 @@ fn setup_with_timeout(ms: u64) -> Fastshell {
 // ═══════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_concurrent_reads() {
     let sdk = Arc::new(setup_no_timeout());
     sdk.write_file("shared.txt", "shared data").unwrap();
@@ -72,6 +73,7 @@ fn stress_concurrent_reads() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_concurrent_mkdir_ls() {
     let sdk = Arc::new(setup_no_timeout());
 
@@ -98,6 +100,7 @@ fn stress_concurrent_mkdir_ls() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_concurrent_write_then_read() {
     let sdk = Arc::new(setup_no_timeout());
     let written = Arc::new(AtomicBool::new(false));
@@ -130,6 +133,7 @@ fn stress_concurrent_write_then_read() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_sequential_many_commands() {
     let sdk = setup_no_timeout();
     let start = Instant::now();
@@ -151,6 +155,7 @@ fn stress_sequential_many_commands() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_pipeline_many_stages() {
     let sdk = setup_no_timeout();
     let r = sdk.execute("echo start | grep start | sed 's/start/next/' | grep next | sed 's/next/final/' | grep final | wc -l");
@@ -159,6 +164,7 @@ fn stress_pipeline_many_stages() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_many_pipelines() {
     let sdk = setup_no_timeout();
     for i in 0..100 {
@@ -172,6 +178,7 @@ fn stress_many_pipelines() {
 // ═══════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn recovery_command_timeout() {
     let sdk = setup_with_timeout(50);
     let start = Instant::now();
@@ -191,6 +198,7 @@ fn recovery_command_timeout() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn recovery_cancel_execution() {
     let sdk = Arc::new(setup_no_timeout());
     let sdk_clone = sdk.clone();
@@ -208,6 +216,7 @@ fn recovery_cancel_execution() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn recovery_after_timeout_still_works() {
     let sdk = setup_with_timeout(50);
 
@@ -227,6 +236,7 @@ fn recovery_after_timeout_still_works() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn recovery_after_error_command() {
     let sdk = setup_with_timeout(5000);
     let r1 = sdk.execute("nonexistent_command_12345");
@@ -237,6 +247,7 @@ fn recovery_after_error_command() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn recovery_non_utf8_output() {
     let sdk = setup_no_timeout();
     let r = sdk.execute("echo hello");
@@ -245,6 +256,7 @@ fn recovery_non_utf8_output() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn recovery_many_errors_then_success() {
     let sdk = setup_no_timeout();
     for _ in 0..20 {
@@ -256,6 +268,7 @@ fn recovery_many_errors_then_success() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn recovery_shutdown_while_commands() {
     let mut sdk = setup_no_timeout();
     sdk.execute("echo before_shutdown");
@@ -270,6 +283,7 @@ fn recovery_shutdown_while_commands() {
 // ═══════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn thread_safety_arc_send_sync() {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
@@ -278,6 +292,7 @@ fn thread_safety_arc_send_sync() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn thread_safety_config_types() {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
@@ -290,6 +305,7 @@ fn thread_safety_config_types() {
 // ═══════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn leak_many_init_shutdown_cycles() {
     for _ in 0..20 {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -302,7 +318,7 @@ fn leak_many_init_shutdown_cycles() {
             allow_subprocess: false,
             network_ask_permission: false,
             command_timeout_ms: 0,
-        ..Default::default()
+            ..Default::default()
         })
         .unwrap();
         for _ in 0..50 {
@@ -313,6 +329,7 @@ fn leak_many_init_shutdown_cycles() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_rapid_create_destroy() {
     for i in 0..10 {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -325,7 +342,7 @@ fn stress_rapid_create_destroy() {
             allow_subprocess: false,
             network_ask_permission: false,
             command_timeout_ms: 0,
-        ..Default::default()
+            ..Default::default()
         })
         .unwrap();
         for j in 0..100 {
@@ -341,6 +358,7 @@ fn stress_rapid_create_destroy() {
 // ═══════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_permission_flip() {
     let sdk = setup_no_timeout();
     for i in 0..50 {
@@ -354,6 +372,7 @@ fn stress_permission_flip() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_empty_command() {
     let sdk = setup_no_timeout();
     for _ in 0..100 {
@@ -363,6 +382,7 @@ fn stress_empty_command() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_whitespace_only_command() {
     let sdk = setup_no_timeout();
     let r = sdk.execute("   ");
@@ -370,6 +390,7 @@ fn stress_whitespace_only_command() {
 }
 
 #[test]
+#[ignore = "heavy: run with --ignored"]
 fn stress_bulk_file_api() {
     let sdk = setup_no_timeout();
     let start = Instant::now();

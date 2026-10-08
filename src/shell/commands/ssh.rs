@@ -85,7 +85,11 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)

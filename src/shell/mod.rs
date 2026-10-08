@@ -7,10 +7,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod commands;
+pub mod dialect;
 
 pub const EXIT_NEED_PERMISSION: i32 = 100;
 pub const EXIT_NOT_SUPPORTED: i32 = 126;
@@ -92,6 +93,34 @@ impl CommandOutput {
     }
 }
 
+/// Process-monotonic clock used for command deadlines.
+fn exec_origin() -> &'static std::time::Instant {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(std::time::Instant::now)
+}
+
+/// Milliseconds elapsed since the process-monotonic origin.
+pub fn exec_now_ms() -> u64 {
+    exec_origin().elapsed().as_millis() as u64
+}
+
+/// Absolute deadline `ms` from now on the monotonic clock. `0` stays `0`
+/// (meaning "no deadline").
+pub fn exec_deadline_after(ms: u64) -> u64 {
+    if ms == 0 {
+        0
+    } else {
+        exec_now_ms().saturating_add(ms)
+    }
+}
+
+#[derive(Clone)]
+pub struct Job {
+    pub pid: String,
+    pub cmd: String,
+    pub status: String,
+}
+
 #[derive(Clone)]
 pub struct Shell {
     pub vfs: Vfs,
@@ -102,6 +131,10 @@ pub struct Shell {
     pub aliases: HashMap<String, String>,
     pub functions: HashMap<String, String>,
     pub vars: HashMap<String, String>,
+    /// Indexed arrays: `a=(x y z)` → `a[0]=x …` (`${a[@]}`, `${#a[@]}`).
+    pub arrays: HashMap<String, Vec<String>>,
+    /// Associative arrays: `declare -A m; m[k]=v` (`${m[k]}`).
+    pub assoc: HashMap<String, HashMap<String, String>>,
     pub exported: HashSet<String>,
     pub pipefail: bool,
     pub errexit: bool,
@@ -114,9 +147,67 @@ pub struct Shell {
     pub plugin: Arc<Mutex<Option<Box<dyn DevicePlugin>>>>,
     /// Cooperative cancellation flag — checked by long-running builtins.
     pub cancel: Arc<AtomicBool>,
+    /// Absolute per-command deadline (milliseconds on a process-monotonic
+    /// clock; `0` = none). Shared with the SDK so network / blocking builtins
+    /// can bound their own timeouts and release the runtime promptly when a
+    /// command times out — otherwise a timed-out command would keep the runtime
+    /// locked until its own (much longer) socket timeout. See
+    /// [`Shell::remaining_budget`].
+    pub exec_deadline: Arc<AtomicU64>,
+    /// Directory stack for `pushd`/`popd`/`dirs`.
+    pub dir_stack: Vec<String>,
+    /// Names declared `readonly` (assignment is an error).
+    pub readonly: HashSet<String>,
+    /// Names declared integer (`declare -i`): assignments are arithmetic.
+    pub integer: HashSet<String>,
+    /// `trap` handlers, keyed by signal name (`EXIT`, `ERR`, `INT`, `TERM`, …).
+    pub traps: HashMap<String, String>,
+    /// Current `umask` (octal value; default 022).
+    pub umask: u32,
+    /// `shopt` flags (`nullglob`, `failglob`, `nocaseglob`, `dotglob`, …).
+    pub shopt: HashMap<String, bool>,
+    /// Background `&` jobs (run synchronously; recorded for `jobs`/`wait`).
+    pub jobs: Vec<Job>,
+    /// Monotonic counter used to synthesise background PIDs.
+    pub job_counter: u64,
+    /// `$!` — PID of the most recent background job.
+    pub last_bg_pid: String,
+    /// `declare -n` namerefs: name → target variable.
+    pub namerefs: HashMap<String, String>,
+    /// `export -f` exported functions (accepted; child `sh -c` already sees them).
+    pub exported_functions: HashSet<String>,
+    /// Per-instance debounce for `open` / `open_settings`: target → last
+    /// successful open time. Only successes are recorded, so a failed open can
+    /// be retried immediately and a success is not repeated (idempotency).
+    pub open_recent: std::cell::RefCell<HashMap<String, std::time::Instant>>,
+    /// Binary stdout side-channel for commands that emit raw bytes (`gzip -c`,
+    /// `tar -c`, …). The executor's redirect handling writes these bytes
+    /// verbatim; `CommandOutput.stdout` keeps a lossy text form for display.
+    pub binary_out: std::cell::RefCell<Option<Vec<u8>>>,
+    /// Binary stdin side-channel (`< file`, pipe stage) — the byte-accurate
+    /// counterpart of `CommandOutput`'s text stdin. Binary-aware commands
+    /// (`cat`, `wc -c`, `base64 -d`, `gunzip`, `xxd -r`, …) read it.
+    pub binary_in: std::cell::RefCell<Option<Vec<u8>>>,
 }
 
 impl Shell {
+    /// Read a file as text, tolerating non-UTF-8 bytes (lossy). Unlike
+    /// `Vfs::read_to_string`, this never fails on binary content, so `head`,
+    /// `tail`, `cat`, `grep` … can process images/archives without a
+    /// "stream did not contain valid UTF-8" error. For byte-exact output use
+    /// `xxd` / `od` / `base64` (they read raw bytes).
+    pub fn read_text_lossy(&self, path: &str) -> std::result::Result<String, String> {
+        self.vfs
+            .read(path, &self.cwd)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Read a file as raw bytes.
+    pub fn read_bytes(&self, path: &str) -> std::result::Result<Vec<u8>, String> {
+        self.vfs.read(path, &self.cwd).map_err(|e| e.to_string())
+    }
+
     pub fn new(vfs: Vfs) -> Self {
         Shell {
             vfs,
@@ -127,6 +218,8 @@ impl Shell {
             aliases: HashMap::new(),
             functions: HashMap::new(),
             vars: HashMap::new(),
+            arrays: HashMap::new(),
+            assoc: HashMap::new(),
             exported: HashSet::new(),
             pipefail: false,
             errexit: false,
@@ -138,7 +231,42 @@ impl Shell {
             permissions: Arc::new(Mutex::new(HashMap::new())),
             plugin: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
+            exec_deadline: Arc::new(AtomicU64::new(0)),
+            dir_stack: Vec::new(),
+            readonly: HashSet::new(),
+            integer: HashSet::new(),
+            traps: HashMap::new(),
+            umask: 0o022,
+            shopt: HashMap::new(),
+            jobs: Vec::new(),
+            job_counter: 0,
+            last_bg_pid: String::new(),
+            namerefs: HashMap::new(),
+            exported_functions: HashSet::new(),
+            open_recent: std::cell::RefCell::new(HashMap::new()),
+            binary_out: std::cell::RefCell::new(None),
+            binary_in: std::cell::RefCell::new(None),
         }
+    }
+
+    /// Stash raw bytes for the current command's stdout (see `binary_out`).
+    pub fn set_binary_out(&self, bytes: Vec<u8>) {
+        *self.binary_out.borrow_mut() = Some(bytes);
+    }
+
+    /// Take the stashed binary stdout, if any (clears it).
+    pub fn take_binary_out(&self) -> Option<Vec<u8>> {
+        self.binary_out.borrow_mut().take()
+    }
+
+    /// Stash the current command's binary stdin (`< file` / pipe stage).
+    pub fn set_binary_in(&self, bytes: Vec<u8>) {
+        *self.binary_in.borrow_mut() = Some(bytes);
+    }
+
+    /// Take the stashed binary stdin, if any (clears it).
+    pub fn take_binary_in(&self) -> Option<Vec<u8>> {
+        self.binary_in.borrow_mut().take()
     }
 
     pub fn new_with_config(
@@ -156,6 +284,8 @@ impl Shell {
             aliases: HashMap::new(),
             functions: HashMap::new(),
             vars: HashMap::new(),
+            arrays: HashMap::new(),
+            assoc: HashMap::new(),
             exported: HashSet::new(),
             pipefail: false,
             errexit: false,
@@ -167,6 +297,21 @@ impl Shell {
             permissions,
             plugin: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
+            exec_deadline: Arc::new(AtomicU64::new(0)),
+            dir_stack: Vec::new(),
+            readonly: HashSet::new(),
+            integer: HashSet::new(),
+            traps: HashMap::new(),
+            umask: 0o022,
+            shopt: HashMap::new(),
+            jobs: Vec::new(),
+            job_counter: 0,
+            last_bg_pid: String::new(),
+            namerefs: HashMap::new(),
+            exported_functions: HashSet::new(),
+            open_recent: std::cell::RefCell::new(HashMap::new()),
+            binary_out: std::cell::RefCell::new(None),
+            binary_in: std::cell::RefCell::new(None),
         }
     }
 
@@ -187,6 +332,8 @@ impl Shell {
             aliases: HashMap::new(),
             functions: HashMap::new(),
             vars: HashMap::new(),
+            arrays: HashMap::new(),
+            assoc: HashMap::new(),
             exported: HashSet::new(),
             pipefail: false,
             errexit: false,
@@ -198,12 +345,52 @@ impl Shell {
             permissions,
             plugin,
             cancel: Arc::new(AtomicBool::new(false)),
+            exec_deadline: Arc::new(AtomicU64::new(0)),
+            dir_stack: Vec::new(),
+            readonly: HashSet::new(),
+            integer: HashSet::new(),
+            traps: HashMap::new(),
+            umask: 0o022,
+            shopt: HashMap::new(),
+            jobs: Vec::new(),
+            job_counter: 0,
+            last_bg_pid: String::new(),
+            namerefs: HashMap::new(),
+            exported_functions: HashSet::new(),
+            open_recent: std::cell::RefCell::new(HashMap::new()),
+            binary_out: std::cell::RefCell::new(None),
+            binary_in: std::cell::RefCell::new(None),
         }
     }
 
     /// Replace the cancel flag (e.g. to share with the SDK's flag).
     pub fn set_cancel_flag(&mut self, cancel: Arc<AtomicBool>) {
         self.cancel = cancel;
+    }
+
+    /// Share the SDK's execution-deadline slot (absolute monotonic ms; 0 = off).
+    pub fn set_exec_deadline_flag(&mut self, deadline: Arc<AtomicU64>) {
+        self.exec_deadline = deadline;
+    }
+
+    /// The current absolute deadline (monotonic ms; `0` = no deadline).
+    pub fn exec_deadline_ms(&self) -> u64 {
+        self.exec_deadline.load(Ordering::SeqCst)
+    }
+
+    /// Time left before the current command's deadline, or `None` when the
+    /// command has no deadline. `Some(ZERO)` means the budget is already spent.
+    pub fn remaining_budget(&self) -> Option<std::time::Duration> {
+        let d = self.exec_deadline_ms();
+        if d == 0 {
+            return None;
+        }
+        let now = exec_now_ms();
+        Some(if now >= d {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_millis(d - now)
+        })
     }
 
     pub fn check_device_permission(
@@ -280,11 +467,58 @@ impl Shell {
             };
         }
         let _ = take_warnings();
+        // Command dialect compatibility (alternative names + harmless flag spellings).
+        let (command, args_owned) = dialect::normalize(command, args);
+        let command = command.as_str();
+        let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+        let args: &[&str] = &args_refs;
         let mut result = match command {
             "alias" => self.cmd_alias(args),
             "unalias" => self.cmd_unalias(args),
             "set" => self.cmd_set(args),
+            "pushd" => self.cmd_pushd(args),
+            "popd" => self.cmd_popd(args),
+            "dirs" => self.cmd_dirs(args),
+            "umask" => self.cmd_umask(args),
+            "ulimit" => self.cmd_ulimit(args),
+            "builtin" => self.cmd_builtin(args),
+            "hash" => self.cmd_hash(args),
+            "shopt" => self.cmd_shopt(args),
+            "readonly" => self.cmd_readonly(args),
+            "trap" => self.cmd_trap(args),
+            "jobs" => self.cmd_jobs(args),
+            "wait" => self.cmd_wait(args),
+            "disown" => self.cmd_disown(args),
+            "fg" => self.cmd_fg(args),
+            "bg" => self.cmd_bg(args),
             "ls" => self.cmd_ls(args),
+            // Dialect/alias names (cmd.exe / common shells).
+            "dir" => self.cmd_ls(args),
+            "ll" => {
+                let mut a = vec!["-l"];
+                a.extend_from_slice(args);
+                self.cmd_ls(&a)
+            }
+            "la" | "l" => {
+                let mut a = vec!["-a"];
+                a.extend_from_slice(args);
+                self.cmd_ls(&a)
+            }
+            "md" => self.cmd_mkdir(args),
+            "rd" => self.cmd_rmdir(args),
+            "del" | "erase" => self.cmd_rm(args),
+            "copy" => self.cmd_cp(args),
+            "move" | "ren" | "rename" => self.cmd_mv(args),
+            "more" => self.cmd_cat(args, stdin),
+            "cls" => self.cmd_clear(args),
+            "where" => self.cmd_which(args),
+            "whereis" => self.cmd_whereis(args),
+            "tasklist" => self.cmd_ps(args),
+            "ipconfig" => self.cmd_ifconfig(args),
+            "ver" => CommandOutput::success("fastshell 1.0 (POSIX-like)\n".to_string()),
+            "unlink" => self.cmd_unlink(args),
+            "link" => self.cmd_link(args),
+            "envsubst" => self.cmd_envsubst(args, stdin),
             "cd" => self.cmd_cd(args),
             "pwd" => self.cmd_pwd(args),
             "mkdir" => self.cmd_mkdir(args),
@@ -303,7 +537,9 @@ impl Shell {
             "tree" => self.cmd_tree(args),
             "echo" => self.cmd_echo(args),
             "read" => self.cmd_read(args, stdin),
+            "mapfile" | "readarray" => self.cmd_mapfile(args, stdin),
             "eval" => self.cmd_eval(args),
+            "exec" => self.cmd_exec(args),
             "touch" => self.cmd_touch(args),
             "chmod" => self.cmd_chmod(args),
             "kill" => self.cmd_kill(args),
@@ -311,8 +547,8 @@ impl Shell {
             "top" | "htop" => self.cmd_top(args),
             "curl" => self.cmd_curl(args),
             "wget" => self.cmd_wget(args),
-            "gzip" => self.cmd_gzip(args),
-            "gunzip" => self.cmd_gunzip(args),
+            "gzip" => self.cmd_gzip(args, stdin),
+            "gunzip" => self.cmd_gunzip(args, stdin),
             "tar" => self.cmd_tar(args),
             "ping" => self.cmd_ping(args),
             "ssh" => self.cmd_ssh(args),
@@ -335,19 +571,30 @@ impl Shell {
             "xargs" => self.cmd_xargs(args, stdin),
             "which" => self.cmd_which(args),
             "command" => self.cmd_command(args),
+            "type" => self.cmd_type(args),
+            "help" => self.cmd_help(args),
             "cut" => self.cmd_cut(args, stdin),
             "awk" => self.cmd_awk(args, stdin),
             "tr" => self.cmd_tr(args, stdin),
             "sleep" => self.cmd_sleep(args),
             "date" => self.cmd_date(args),
             "true" => self.cmd_true(args),
+            ":" => self.cmd_true(args),
             "export" => self.cmd_export(args),
             "false" => self.cmd_false_(args),
             "[" | "test" => self.cmd_test(args),
             "base64" => self.cmd_base64(args, stdin),
+            "base32" => self.cmd_base32(args, stdin),
             "sha256sum" => self.cmd_sha256sum(args, stdin),
+            "sha224sum" => self.cmd_sha224sum(args, stdin),
+            "sha384sum" => self.cmd_sha384sum(args, stdin),
             "sha512sum" => self.cmd_sha512sum(args, stdin),
+            "b2sum" => self.cmd_b2sum(args, stdin),
             "md5sum" | "md5" => self.cmd_md5sum(args, stdin),
+            "cksum" => self.cmd_cksum(args, stdin),
+            "crc32" => self.cmd_crc32(args, stdin),
+            "join" => self.cmd_join(args, stdin),
+            "csplit" => self.cmd_csplit(args, stdin),
             "du" => self.cmd_du(args),
             "df" => self.cmd_df(args),
             "stat" => self.cmd_stat(args),
@@ -355,20 +602,14 @@ impl Shell {
             "env" => self.cmd_env(args),
             "printenv" => self.cmd_printenv(args),
             "printf" => self.cmd_printf(args, stdin),
+            "getopts" => self.cmd_getopts(args),
             "basename" => self.cmd_basename(args),
             "dirname" => self.cmd_dirname(args),
             "realpath" => self.cmd_realpath(args),
             "file" => self.cmd_file(args, stdin),
             "pdftotext" => self.cmd_pdftotext(args, stdin),
             "pip-install" => self.cmd_pip_install(args),
-            "pip" => {
-                match args.first().copied() {
-                    Some("install") => self.cmd_pip_install(&args[1..]),
-                    Some("list") | Some("freeze") => self.cmd_pip_install(&["--list"]),
-                    Some("-h") | Some("--help") => self.cmd_pip_install(&["-h"]),
-                    _ => CommandOutput::error("pip: only 'pip install', 'pip list', 'pip freeze' are supported. Use 'pip-install' directly.\n".to_string(), 1),
-                }
-            },
+            "pip" => self.cmd_pip(args),
             "doctotext" => self.cmd_doctotext(args),
             "epubtext" => self.cmd_epubtext(args),
             "column" => self.cmd_column(args, stdin),
@@ -419,11 +660,21 @@ impl Shell {
             "uptime" => self.cmd_uptime(args),
             "free" => self.cmd_free(args),
             "nslookup" => self.cmd_nslookup(args),
+            "getconf" => self.cmd_getconf(args),
+            "getent" => self.cmd_getent(args),
             "bzip2" => self.cmd_bzip2(args),
             "bunzip2" => self.cmd_bunzip2(args),
             "xz" => self.cmd_xz(args),
             "unxz" => self.cmd_unxz(args),
             "zcat" => self.cmd_zcat(args),
+            "cpio" => self.cmd_cpio(args, stdin),
+            "zstd" => self.cmd_zstd(args, stdin),
+            "unzstd" => self.cmd_unzstd(args, stdin),
+            "zstdcat" => {
+                let mut a = vec!["-dc"];
+                a.extend_from_slice(args);
+                self.cmd_zstd(&a, stdin)
+            }
             "dos2unix" => self.cmd_dos2unix(args),
             "unix2dos" => self.cmd_unix2dos(args),
             "cal" => self.cmd_cal(args),
@@ -437,6 +688,12 @@ impl Shell {
             "reset" => self.cmd_reset(args),
             "hexdump" => self.cmd_hexdump(args, stdin),
             "sha3sum" => self.cmd_sha3sum(args, stdin),
+            "arch" => self.cmd_arch(args),
+            "factor" => self.cmd_factor(args),
+            "numfmt" => self.cmd_numfmt(args, stdin),
+            "pr" => self.cmd_pr(args, stdin),
+            "fmt" => self.cmd_fmt(args, stdin),
+            "stdbuf" => self.cmd_stdbuf(args),
             "tsort" => self.cmd_tsort(args, stdin),
             "renice" => self.cmd_renice(args),
             "nohup" => self.cmd_nohup(args),
@@ -488,6 +745,9 @@ impl Shell {
             "notify" | "notify-send" => self.cmd_notify(args),
             "share" => self.cmd_share(args),
             "open" | "xdg-open" => self.cmd_open_url(args),
+            "open_settings" | "open-settings" | "open-settings-page" => {
+                self.cmd_open_settings(args)
+            }
             "auth" => self.cmd_auth(args),
             "battery" => self.cmd_battery(args),
             "vibrate" => self.cmd_vibrate(args),
@@ -504,9 +764,25 @@ impl Shell {
                 if self.allow_subprocess {
                     self.run_subprocess(command, args)
                 } else {
+                    // Distinguish "unrecognized shell keyword" (the surrounding
+                    // block construct wasn't recognized) from "unknown external
+                    // command", so the model isn't misled into thinking the
+                    // whole shell is disabled.
+                    const KEYWORDS: &[&str] = &[
+                        "do", "done", "then", "elif", "else", "fi", "esac", "in", "{", "}",
+                    ];
+                    let stderr = if KEYWORDS.contains(&command) {
+                        format!(
+                            "{command}: unexpected shell keyword here (the surrounding block construct wasn't recognized)\n"
+                        )
+                    } else {
+                        format!(
+                            "{command}: command not found (external commands are unavailable on this platform)\n"
+                        )
+                    };
                     CommandOutput {
                         stdout: String::new(),
-                        stderr: format!("{}: command not found (subprocess disabled)\n", command),
+                        stderr,
                         exit_code: 127,
                     }
                 }
@@ -535,8 +811,7 @@ impl Shell {
                 cmd.env(key, val);
             }
         }
-        match cmd.output()
-        {
+        match cmd.output() {
             Ok(out) => {
                 let exit_code = if let Some(code) = out.status.code() {
                     code
@@ -573,6 +848,25 @@ impl Shell {
                 exit_code: 127,
             },
         }
+    }
+
+    /// Run an external command honoring [`Shell::allow_subprocess`].
+    ///
+    /// Builtins that shell out MUST go through this instead of
+    /// `std::process::Command` directly — otherwise they bypass the mobile gate
+    /// (`allow_subprocess = false`) and can hit Android's seccomp policy, which
+    /// terminates the whole app with SIGSYS. Returns 127 with a clear message
+    /// when external execution is disabled.
+    pub(crate) fn run_external(&self, command: &str, args: &[&str]) -> CommandOutput {
+        if !self.allow_subprocess {
+            return CommandOutput::error(
+                format!(
+                    "{command}: not supported on this platform (external commands are disabled)\n"
+                ),
+                127,
+            );
+        }
+        self.run_subprocess(command, args)
     }
 }
 
@@ -649,12 +943,72 @@ pub(crate) fn http_request(
     url: &str,
     data: Option<&str>,
     follow_redirects: bool,
+    deadline_ms: u64,
 ) -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new()
+    let budget: Option<std::time::Duration> = if deadline_ms == 0 {
+        None
+    } else {
+        let now = exec_now_ms();
+        Some(if now >= deadline_ms {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_millis(deadline_ms - now)
+        })
+    };
+    match budget {
+        None => http_request_inner(method, url, data, follow_redirects, deadline_ms),
+        Some(b) if b.is_zero() => Err("operation timed out".to_string()),
+        Some(b) => {
+            let method = method.to_string();
+            let url = url.to_string();
+            let data = data.map(|s| s.to_string());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("fastshell-http".to_string())
+                .spawn(move || {
+                    let _ = tx.send(http_request_inner(
+                        &method,
+                        &url,
+                        data.as_deref(),
+                        follow_redirects,
+                        deadline_ms,
+                    ));
+                })
+                .map_err(|e| format!("failed to spawn request: {e}"))?;
+            match rx.recv_timeout(b) {
+                Ok(r) => r,
+                Err(_) => Err("operation timed out".to_string()),
+            }
+        }
+    }
+}
+
+fn http_request_inner(
+    method: &str,
+    url: &str,
+    data: Option<&str>,
+    follow_redirects: bool,
+    deadline_ms: u64,
+) -> Result<String, String> {
+    let mut builder = ureq::AgentBuilder::new()
         .redirects(if follow_redirects { 10 } else { 0 })
         .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .build();
+        .timeout(std::time::Duration::from_secs(30));
+    if deadline_ms != 0 {
+        let now = exec_now_ms();
+        let rem = if now >= deadline_ms {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_millis(deadline_ms - now)
+        };
+        if rem.is_zero() {
+            return Err("operation timed out".to_string());
+        }
+        builder = builder
+            .timeout_connect(std::time::Duration::from_secs(10).min(rem))
+            .timeout(std::time::Duration::from_secs(30).min(rem));
+    }
+    let agent = builder.build();
 
     let response = match method {
         "POST" => {
@@ -807,7 +1161,14 @@ fn list_processes_linux() -> Result<Vec<ProcInfo>, String> {
 
     let total_cpu = read_proc_stat_total_cpu()?;
 
-    for entry in fs::read_dir(proc_dir).map_err(|e| e.to_string())? {
+    for entry in fs::read_dir(proc_dir).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            // Android (and locked-down Linux) often hide /proc from apps.
+            "ps: process listing is not permitted on this platform".to_string()
+        } else {
+            format!("ps: {}", e)
+        }
+    })? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -1381,7 +1742,7 @@ mod tests {
 
     #[test]
     fn test_kill_usage_error() {
-        let shell = mk_shell();
+        let mut shell = mk_shell();
         let out = shell.cmd_kill(&[]);
         assert_ne!(out.exit_code, 0);
         assert!(out.stderr.contains("usage"));
@@ -1389,7 +1750,7 @@ mod tests {
 
     #[test]
     fn test_kill_invalid_signal() {
-        let shell = mk_shell();
+        let mut shell = mk_shell();
         let out = shell.cmd_kill(&["-INVALID", "1"]);
         assert_ne!(out.exit_code, 0);
     }
@@ -1412,12 +1773,12 @@ mod tests {
             .write("/data.txt", "", "hello gzip world! ".repeat(100).as_str())
             .unwrap();
 
-        let out = shell.cmd_gzip(&["/data.txt"]);
+        let out = shell.cmd_gzip(&["/data.txt"], None);
         assert_eq!(out.exit_code, 0);
         assert!(shell.vfs.exists("/data.txt.gz", ""));
         assert!(!shell.vfs.exists("/data.txt", ""));
 
-        let out = shell.cmd_gunzip(&["/data.txt.gz"]);
+        let out = shell.cmd_gunzip(&["/data.txt.gz"], None);
         assert_eq!(out.exit_code, 0);
         assert!(shell.vfs.exists("/data.txt", ""));
         let content = shell.vfs.read_to_string("/data.txt", "").unwrap();
@@ -1428,7 +1789,7 @@ mod tests {
     fn test_gzip_stdout() {
         let shell = mk_shell();
         shell.vfs.write("/small.txt", "", "hi").unwrap();
-        let out = shell.cmd_gzip(&["-c", "/small.txt"]);
+        let out = shell.cmd_gzip(&["-c", "/small.txt"], None);
         assert_eq!(out.exit_code, 0);
         assert!(shell.vfs.exists("/small.txt", ""));
     }
@@ -1695,7 +2056,7 @@ mod tests {
         shell.allow_subprocess = false;
         let out = shell.execute("some_unknown_tool", &["--flag"], None);
         assert_eq!(out.exit_code, 127);
-        assert!(out.stderr.contains("subprocess disabled"));
+        assert!(out.stderr.contains("command not found"));
     }
 
     #[test]
@@ -2181,7 +2542,9 @@ mod tests {
     #[test]
     fn test_cmd_declare_f() {
         let mut shell = mk_shell();
-        shell.functions.insert("myfunc".to_string(), "echo hello".to_string());
+        shell
+            .functions
+            .insert("myfunc".to_string(), "echo hello".to_string());
         let out = shell.cmd_declare(&["-f"]);
         assert_eq!(out.exit_code, 0);
         assert!(out.stdout.contains("myfunc"));
@@ -2209,7 +2572,9 @@ mod tests {
     #[test]
     fn test_cmd_unset_function() {
         let mut shell = mk_shell();
-        shell.functions.insert("myfn".to_string(), "echo hi".to_string());
+        shell
+            .functions
+            .insert("myfn".to_string(), "echo hi".to_string());
         let out = shell.cmd_unset(&["-f", "myfn"]);
         assert_eq!(out.exit_code, 0);
         assert!(!shell.functions.contains_key("myfn"));
@@ -2218,9 +2583,33 @@ mod tests {
     #[test]
     fn test_cmd_unset_missing() {
         let mut shell = mk_shell();
+        // bash: `unset` of a nonexistent name is a silent success.
         let out = shell.cmd_unset(&["NONEXISTENT"]);
-        assert_ne!(out.exit_code, 0);
-        assert!(out.stderr.contains("not found"));
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn test_exec_deadline_budget() {
+        let mut shell = mk_shell();
+        // Default: no deadline.
+        assert_eq!(shell.remaining_budget(), None);
+        assert_eq!(shell.exec_deadline_ms(), 0);
+
+        // A deadline ~2s out leaves a bounded, positive budget.
+        shell.set_exec_deadline_flag(Arc::new(AtomicU64::new(super::exec_deadline_after(2000))));
+        let b = shell.remaining_budget().expect("budget");
+        assert!(b > std::time::Duration::from_millis(1500), "{b:?}");
+        assert!(b <= std::time::Duration::from_millis(2000), "{b:?}");
+
+        // An already-expired deadline reports ZERO (not None).
+        shell.set_exec_deadline_flag(Arc::new(AtomicU64::new(super::exec_deadline_after(1))));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(shell.remaining_budget(), Some(std::time::Duration::ZERO));
+
+        // 0 = no deadline again.
+        shell.set_exec_deadline_flag(Arc::new(AtomicU64::new(0)));
+        assert_eq!(shell.remaining_budget(), None);
     }
 }
 // (will remove)

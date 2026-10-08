@@ -5,7 +5,7 @@ use crate::shell::{CommandOutput, Shell};
 use std::io::Read;
 
 impl Shell {
-    pub fn cmd_gunzip(&self, args: &[&str]) -> CommandOutput {
+    pub fn cmd_gunzip(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
         let mut to_stdout = false;
         let mut files = Vec::new();
 
@@ -18,6 +18,21 @@ impl Shell {
         }
 
         if files.is_empty() {
+            // `... | gunzip` — decompress the byte-accurate stdin (or the
+            // pipeline's text stdin for non-binary producers).
+            if let Some(bytes) = self
+                .take_binary_in()
+                .or_else(|| stdin.map(|s| s.as_bytes().to_vec()))
+            {
+                let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+                let mut out = Vec::new();
+                if decoder.read_to_end(&mut out).is_ok() {
+                    if !out.is_empty() {
+                        self.set_binary_out(out.clone());
+                    }
+                    return CommandOutput::success(String::from_utf8_lossy(&out).to_string());
+                }
+            }
             return CommandOutput::error("gunzip: missing file operand\n".to_string(), 1);
         }
 
@@ -59,6 +74,9 @@ impl Shell {
         }
 
         if to_stdout {
+            if !output_bytes.is_empty() {
+                self.set_binary_out(output_bytes.clone());
+            }
             CommandOutput::success(String::from_utf8_lossy(&output_bytes).to_string())
         } else {
             CommandOutput::success(String::new())

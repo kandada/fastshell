@@ -31,9 +31,7 @@ impl Shell {
 
         match self.vfs.resolve(&path, &self.cwd) {
             Ok(p) if p.is_dir() => {}
-            Ok(_) => {
-                return CommandOutput::error(format!("tree: {}: not a directory\n", path), 1)
-            }
+            Ok(_) => return CommandOutput::error(format!("tree: {}: not a directory\n", path), 1),
             Err(e) => return CommandOutput::error(format!("tree: {}: {}\n", path, e), 1),
         }
 

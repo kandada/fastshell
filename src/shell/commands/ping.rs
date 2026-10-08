@@ -2,7 +2,7 @@
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
 use crate::shell::{CommandOutput, Shell};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 const PING_HELP_TEXT: &str = "\
@@ -64,29 +64,57 @@ impl Shell {
             80
         };
 
-        let addr = format!("{}:{}", hostname, port);
+        // ICMP is unavailable in the sandbox (no raw sockets / mobile
+        // entitlements), so this is a TCP connect probe. When the caller does
+        // not pin a port, probe a set of common ones so a host that only answers
+        // on 443 (e.g. HTTPS-only) is still reported as reachable.
+        let ports: Vec<u16> = if host.contains(':') {
+            vec![port]
+        } else {
+            vec![443, 80, 22, 7]
+        };
+        let resolve = |p: u16| -> Option<std::net::SocketAddr> {
+            format!("{}:{}", hostname, p).parse().ok().or_else(|| {
+                (hostname, p)
+                    .to_socket_addrs()
+                    .ok()
+                    .and_then(|mut it| it.next())
+            })
+        };
+        // Validate the host resolves at all before reporting per-seq timeouts.
+        if ports.iter().all(|&p| resolve(p).is_none()) {
+            return CommandOutput::error(format!("ping: cannot resolve {}\n", hostname), 1);
+        }
 
         let mut success = 0;
         let mut total_time = Duration::new(0, 0);
         let mut min_time = Duration::MAX;
         let mut max_time = Duration::new(0, 0);
 
-        let timeout = Duration::from_secs(timeout_secs);
-
-        let socket_addr = match addr.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                return CommandOutput::error(format!("ping: cannot resolve {}\n", hostname), 1)
-            }
-        };
+        // Cap each connect attempt by the command's remaining budget so a
+        // timed-out ping releases the runtime promptly.
+        let base_timeout = Duration::from_secs(timeout_secs);
+        let timeout = self
+            .remaining_budget()
+            .map(|b| b.min(base_timeout))
+            .unwrap_or(base_timeout);
 
         let mut detail = String::new();
+        let mut used_port = ports[0];
 
         for seq in 1..=count {
-            let start = Instant::now();
-            match TcpStream::connect_timeout(&socket_addr, timeout) {
-                Ok(_) => {
-                    let rtt = start.elapsed();
+            let mut hit: Option<(u16, Duration)> = None;
+            for &p in &ports {
+                let Some(sa) = resolve(p) else { continue };
+                let start = Instant::now();
+                if TcpStream::connect_timeout(&sa, timeout).is_ok() {
+                    hit = Some((p, start.elapsed()));
+                    break;
+                }
+            }
+            match hit {
+                Some((p, rtt)) => {
+                    used_port = p;
                     success += 1;
                     total_time += rtt;
                     if rtt < min_time {
@@ -97,14 +125,15 @@ impl Shell {
                     }
                     if !quiet {
                         detail += &format!(
-                            "TCP seq={} from {} time={:.3} ms\n",
+                            "TCP seq={} from {}:{} time={:.3} ms\n",
                             seq,
-                            addr,
+                            hostname,
+                            p,
                             rtt.as_secs_f64() * 1000.0,
                         );
                     }
                 }
-                Err(_) => {
+                None => {
                     if !quiet {
                         detail += &format!("ping: seq={} timeout\n", seq);
                     }
@@ -125,7 +154,7 @@ impl Shell {
         };
 
         let mut output = detail;
-        output += &format!("TCP ping {} ({}:{})\n", hostname, hostname, port);
+        output += &format!("TCP ping {} ({}:{})\n", hostname, hostname, used_port);
         output += &format!(
             "{} packets transmitted, {} received, {:.0}% loss\n",
             count, success, loss_pct
@@ -154,7 +183,11 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)

@@ -30,13 +30,9 @@ impl Shell {
         }
         #[cfg(target_os = "macos")]
         {
-            let o = std::process::Command::new("dmesg").output().ok();
-            if let Some(o) = o {
-                return CommandOutput {
-                    stdout: String::from_utf8_lossy(&o.stdout).to_string(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                };
+            let o = self.run_external("dmesg", &[]);
+            if o.exit_code == 0 {
+                return o;
             }
         }
         CommandOutput::success(String::new())
@@ -75,17 +71,32 @@ impl Shell {
         if args.is_empty() {
             return CommandOutput::error("killall: missing program name\n".to_string(), 1);
         }
+        if args.contains(&"-l") || args.contains(&"--list") {
+            return CommandOutput::success(
+                " 1) SIGHUP 2) SIGINT 3) SIGQUIT 4) SIGILL 5) SIGTRAP 6) SIGABRT 7) SIGBUS 8) SIGFPE 9) SIGKILL 10) SIGUSR1 11) SIGSEGV 12) SIGUSR2 13) SIGPIPE 14) SIGALRM 15) SIGTERM\n"
+                    .to_string(),
+            );
+        }
         let name = args
             .iter()
             .find(|a| !a.starts_with('-'))
             .copied()
             .unwrap_or("");
+        // An empty name must never match every process (`starts_with("")` is
+        // always true), which would signal the entire system.
+        if name.is_empty() {
+            return CommandOutput::error("killall: missing program name\n".to_string(), 1);
+        }
         let procs = match list_processes() {
             Ok(p) => p,
             Err(e) => return CommandOutput::error(format!("killall: {}\n", e), 1),
         };
         for proc in &procs {
-            if proc.comm == name || proc.comm.starts_with(name) {
+            if proc.comm == name {
+                // Never signal this process.
+                if proc.pid as u32 == std::process::id() {
+                    continue;
+                }
                 #[cfg(unix)]
                 unsafe {
                     libc::kill(proc.pid as i32, 15);
@@ -110,25 +121,12 @@ impl Shell {
         }
         let mut output = String::new();
         for _ in 0..1 {
-            let vfs_root = self.vfs.root().to_path_buf();
-            let cwd = if self.cwd == "/" {
-                vfs_root.clone()
-            } else {
-                vfs_root.join(self.cwd.trim_start_matches('/'))
-            };
-            match std::process::Command::new(cmd_args[0])
-                .args(&cmd_args[1..])
-                .current_dir(&cwd)
-                .output()
-            {
-                Ok(o) => {
-                    output.push_str(&String::from_utf8_lossy(&o.stdout));
-                    output.push('\n');
-                }
-                Err(e) => {
-                    output.push_str(&format!("watch: {}\n", e));
-                }
+            let out = self.run_external(cmd_args[0], &cmd_args[1..]);
+            output.push_str(&out.stdout);
+            if !out.stderr.is_empty() {
+                output.push_str(&out.stderr);
             }
+            output.push('\n');
         }
         CommandOutput::success(output)
     }
@@ -153,24 +151,16 @@ impl Shell {
     pub fn cmd_who(&self, _args: &[&str]) -> CommandOutput {
         #[cfg(target_os = "linux")]
         {
-            let o = std::process::Command::new("who").output().ok();
-            if let Some(o) = o {
-                return CommandOutput {
-                    stdout: String::from_utf8_lossy(&o.stdout).to_string(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                };
+            let o = self.run_external("who", &[]);
+            if o.exit_code == 0 {
+                return o;
             }
         }
         #[cfg(target_os = "macos")]
         {
-            let o = std::process::Command::new("who").output().ok();
-            if let Some(o) = o {
-                return CommandOutput {
-                    stdout: String::from_utf8_lossy(&o.stdout).to_string(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                };
+            let o = self.run_external("who", &[]);
+            if o.exit_code == 0 {
+                return o;
             }
         }
         CommandOutput::success(String::new())
@@ -254,7 +244,7 @@ impl Shell {
                     }
                 }
             } else {
-                match self.vfs.read_to_string(&files[0], &self.cwd) {
+                match self.read_text_lossy(&files[0]) {
                     Ok(c) => c,
                     Err(e) => {
                         return CommandOutput::error(format!("sha3sum: {}: {}\n", files[0], e), 1)
@@ -328,6 +318,12 @@ impl Shell {
             match stdin {
                 Some(s) => s.to_string(),
                 None => return CommandOutput::error("tsort: missing input\n".to_string(), 1),
+            }
+        } else if args.len() == 1 && !args[0].contains('\n') {
+            // `tsort FILE` reads the file (like real tsort).
+            match self.read_text_lossy(args[0]) {
+                Ok(c) => c,
+                Err(_) => args.join(" "),
             }
         } else {
             args.join(" ")

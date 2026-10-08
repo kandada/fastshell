@@ -13,7 +13,7 @@ impl Shell {
             Ok(p) => p,
             Err(e) => return CommandOutput::error(format!("source: {}: {}\n", file, e), 1),
         };
-        let content = match self.vfs.read_to_string(file, &self.cwd) {
+        let content = match self.read_text_lossy(file) {
             Ok(c) => c,
             Err(e) => return CommandOutput::error(format!("source: {}: {}\n", file, e), 1),
         };

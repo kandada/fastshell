@@ -166,36 +166,16 @@ impl Shell {
             i += 1;
         }
 
-        #[cfg(unix)]
-        {
-            if adjustment != 0 {
-                unsafe {
-                    libc::nice(adjustment);
-                }
-            }
-        }
+        // GNU `nice` adjusts the priority of the COMMAND it runs, not of the
+        // calling process. Calling libc::nice() here would lower the host app's
+        // own scheduling priority (ANR risk), so we intentionally do not.
+        let _ = adjustment;
 
         match command {
             Some(cmd) => {
-                let vfs_root = self.vfs.root().to_path_buf();
-                let cwd = if self.cwd == "/" {
-                    vfs_root.clone()
-                } else {
-                    vfs_root.join(self.cwd.trim_start_matches('/'))
-                };
                 let cmd_args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-                let output = std::process::Command::new(&cmd)
-                    .args(&cmd_args_ref)
-                    .current_dir(&cwd)
-                    .output();
-                match output {
-                    Ok(out) => CommandOutput {
-                        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-                        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-                        exit_code: out.status.code().unwrap_or(-1),
-                    },
-                    Err(e) => CommandOutput::error(format!("nice: {}\n", e), 1),
-                }
+                // Honor allow_subprocess (no spawn on mobile → no SIGSYS).
+                self.run_external(&cmd, &cmd_args_ref)
             }
             None => CommandOutput::success(String::new()),
         }
@@ -220,7 +200,12 @@ impl Shell {
                     Ok(p) => p,
                     Err(e) => return CommandOutput::error(format!("chown: {}: {}\n", file, e), 1),
                 };
-                let path_c = std::ffi::CString::new(resolved.to_string_lossy().as_bytes()).unwrap();
+                let path_c = match std::ffi::CString::new(resolved.to_string_lossy().as_bytes()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return CommandOutput::error("invalid path (contains NUL)\n".to_string(), 1)
+                    }
+                };
                 let ret = unsafe { libc::chown(path_c.as_ptr(), uid, gid) };
                 if ret != 0 {
                     let e = std::io::Error::last_os_error();
@@ -253,7 +238,12 @@ impl Shell {
                     Ok(p) => p,
                     Err(e) => return CommandOutput::error(format!("chgrp: {}: {}\n", file, e), 1),
                 };
-                let path_c = std::ffi::CString::new(resolved.to_string_lossy().as_bytes()).unwrap();
+                let path_c = match std::ffi::CString::new(resolved.to_string_lossy().as_bytes()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return CommandOutput::error("invalid path (contains NUL)\n".to_string(), 1)
+                    }
+                };
                 unsafe {
                     libc::chown(path_c.as_ptr(), u32::MAX, gid);
                 }
@@ -269,8 +259,16 @@ impl Shell {
             let _gid = unsafe { libc::getgid() };
             let _count = 0i32;
             let groups = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-            let mut gids = vec![0u32; groups as usize];
-            unsafe { libc::getgroups(groups, gids.as_mut_ptr()) };
+            // getgroups() returns -1 on error; `vec![0u32; -1 as usize]` would
+            // be a capacity-overflow panic → guard.
+            let mut gids: Vec<u32> = if groups > 0 {
+                vec![0u32; groups as usize]
+            } else {
+                Vec::new()
+            };
+            if groups > 0 {
+                unsafe { libc::getgroups(groups, gids.as_mut_ptr()) };
+            }
 
             let pw = unsafe { libc::getpwuid(libc::getuid()) };
             let user_name = if pw.is_null() {
@@ -387,7 +385,7 @@ impl Shell {
             &[]
         };
 
-        let max_bytes = count.unwrap_or(usize::MAX) * bs;
+        let max_bytes = count.unwrap_or(usize::MAX).saturating_mul(bs);
         let to_write = &data[..max_bytes.min(data.len())];
 
         let written;
@@ -429,31 +427,75 @@ impl Shell {
     }
 
     pub fn cmd_od(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
-        let mut format = "o";
+        let mut format = "o".to_string();
+        let mut addr = 'o'; // 'o' | 'd' | 'x' | 'n'
+        let mut width = 16usize;
+        let mut skip = 0usize;
+        let mut limit: Option<usize> = None;
         let mut files = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
-            match args[i] {
+            let a = args[i];
+            match a {
                 "-t" => {
                     if i + 1 < args.len() {
-                        format = args[i + 1];
+                        format = args[i + 1].to_string();
                         i += 1;
                     }
                 }
-                "-A" | "-j" | "-N" | "-w" => {
-                    i += 1;
-                } // skip these flags
+                "-A" => {
+                    if i + 1 < args.len() {
+                        addr = args[i + 1].chars().next().unwrap_or('o');
+                        i += 1;
+                    }
+                }
+                "-j" => {
+                    if i + 1 < args.len() {
+                        skip = args[i + 1].parse().unwrap_or(0);
+                        i += 1;
+                    }
+                }
+                "-N" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().ok();
+                        i += 1;
+                    }
+                }
+                "-w" => {
+                    if i + 1 < args.len() {
+                        width = args[i + 1].parse().unwrap_or(16).max(1);
+                        i += 1;
+                    }
+                }
+                // Output formats (`od -c` was previously ignored → default octal).
+                "-c" => format = "c".to_string(),
+                "-a" => format = "a".to_string(),
+                "-b" => format = "o1".to_string(),
+                "-x" => format = "x".to_string(),
+                // `-tx1` / `-to1` / `-td2` — `-t` with the type attached.
+                arg if arg.starts_with("-t") && arg.len() > 2 => format = arg[2..].to_string(),
+                "-An" => addr = 'n',
+                "-Ad" => addr = 'd',
+                "-Ao" => addr = 'o',
+                "-Ax" => addr = 'x',
+                arg if arg.starts_with("-A") && arg.len() > 2 => {
+                    addr = arg.chars().nth(2).unwrap_or('o')
+                }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
             }
             i += 1;
         }
 
-        let data = if files.is_empty() {
-            match stdin {
-                Some(s) => s.as_bytes().to_vec(),
-                None => return CommandOutput::error("od: missing input\n".to_string(), 1),
+        let mut data = if files.is_empty() {
+            if let Some(b) = self.take_binary_in() {
+                b
+            } else {
+                match stdin {
+                    Some(s) => s.as_bytes().to_vec(),
+                    None => return CommandOutput::error("od: missing input\n".to_string(), 1),
+                }
             }
         } else {
             let mut all = Vec::new();
@@ -465,11 +507,30 @@ impl Shell {
             }
             all
         };
+        if skip > 0 {
+            data = data.get(skip..).unwrap_or(&[]).to_vec();
+        }
+        if let Some(n) = limit {
+            data.truncate(n);
+        }
+
+        let fmt_addr = |off: usize| -> String {
+            match addr {
+                'n' => String::new(),
+                'd' => format!("{:07}", off),
+                'x' => format!("{:07x}", off),
+                _ => format!("{:07o}", off),
+            }
+        };
 
         let mut output = String::new();
-        for (offset, chunk) in data.chunks(16).enumerate() {
-            output.push_str(&format!("{:07o} ", offset * 16));
-            match format {
+        for (offset, chunk) in data.chunks(width).enumerate() {
+            let a = fmt_addr(offset * width);
+            if !a.is_empty() {
+                output.push_str(&a);
+                output.push(' ');
+            }
+            match format.as_str() {
                 "x" | "x1" => {
                     for &byte in chunk {
                         output.push_str(&format!(" {:02x}", byte));
@@ -485,6 +546,16 @@ impl Shell {
                         output.push_str(&format!(" {:>6}", val));
                     }
                 }
+                "c" => {
+                    for &byte in chunk {
+                        output.push_str(&format!(" {:>3}", od_char_field(byte, false)));
+                    }
+                }
+                "a" => {
+                    for &byte in chunk {
+                        output.push_str(&format!(" {:>3}", od_char_field(byte, true)));
+                    }
+                }
                 _ => {
                     for &byte in chunk {
                         output.push_str(&format!(" {:03o}", byte));
@@ -493,7 +564,9 @@ impl Shell {
             }
             output.push('\n');
         }
-        output.push_str(&format!("{:07o}\n", data.len()));
+        if addr != 'n' {
+            output.push_str(&format!("{}\n", fmt_addr(data.len())));
+        }
 
         CommandOutput::success(output)
     }
@@ -527,13 +600,9 @@ impl Shell {
         }
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("sysctl")
-                .arg("-n")
-                .arg("kern.boottime")
-                .output()
-                .ok();
-            if let Some(out) = output {
-                let s = String::from_utf8_lossy(&out.stdout);
+            let out = self.run_external("sysctl", &["-n", "kern.boottime"]);
+            if out.exit_code == 0 {
+                let s = out.stdout;
                 if let Some(rest) = s.trim().strip_prefix("{ sec = ") {
                     if let Some(pos) = rest.find(',') {
                         if let Ok(boot_secs) = rest[..pos].parse::<f64>() {
@@ -608,16 +677,15 @@ impl Shell {
         }
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("vm_stat").output().ok();
+            let out = self.run_external("vm_stat", &[]);
             let mut page_size = 4096u64;
             let mut free_pages = 0u64;
             let mut active_pages = 0u64;
             let mut inactive_pages = 0u64;
             let mut wired_pages = 0u64;
 
-            if let Some(o) = output {
-                let s = String::from_utf8_lossy(&o.stdout);
-                for line in s.lines() {
+            if out.exit_code == 0 {
+                for line in out.stdout.lines() {
                     if line.contains("page size") {
                         page_size = line
                             .split_whitespace()
@@ -695,15 +763,110 @@ impl Shell {
             return perm;
         }
 
-        let output = std::process::Command::new("nslookup").arg(host).output();
-
-        match output {
-            Ok(o) => CommandOutput {
-                stdout: String::from_utf8_lossy(&o.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&o.stderr).to_string(),
-                exit_code: o.status.code().unwrap_or(1),
-            },
+        // Pure-Rust resolution via the system resolver (DNS + /etc/hosts) so it
+        // works on mobile where no external `nslookup` binary exists.
+        match self.dns_resolve(host) {
+            Ok(addrs) => {
+                let mut out = String::from("Server:\t\t(system resolver)\nAddress:\t(system)\n\n");
+                out.push_str(&format!("Name:\t{}\n", host));
+                for a in &addrs {
+                    let kind = if a.is_ipv4() { "A" } else { "AAAA" };
+                    out.push_str(&format!("Address:\t{}  ({})\n", a.ip(), kind));
+                }
+                CommandOutput::success(out)
+            }
             Err(e) => CommandOutput::error(format!("nslookup: {}\n", e), 1),
+        }
+    }
+
+    /// Resolve a hostname to socket addresses using the system resolver
+    /// (`getaddrinfo` → DNS + `/etc/hosts`). Shared by `nslookup`/`dig` so they
+    /// work on platforms without external binaries.
+    pub fn dns_resolve(&self, host: &str) -> Result<Vec<std::net::SocketAddr>, String> {
+        use std::net::ToSocketAddrs;
+        match (host, 0u16).to_socket_addrs() {
+            Ok(iter) => {
+                let addrs: Vec<std::net::SocketAddr> = iter.collect();
+                if addrs.is_empty() {
+                    Err(format!("{}: no address", host))
+                } else {
+                    Ok(addrs)
+                }
+            }
+            Err(e) => Err(format!("{}: {}", host, e)),
+        }
+    }
+
+    /// `getconf NAME` — minimal but useful subset (was advertised but missing).
+    pub fn cmd_getconf(&self, args: &[&str]) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success("Usage: getconf NAME [PATH]\n".to_string());
+        }
+        let name = match args.iter().find(|a| !a.starts_with('-')) {
+            Some(n) => *n,
+            None => return CommandOutput::error("getconf: missing variable\n".to_string(), 1),
+        };
+        let val: String = match name {
+            "_NPROCESSORS_ONLN" | "_NPROCESSORS_CONF" => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .to_string(),
+            "PATH_MAX" => "1024".to_string(),
+            "ARG_MAX" => "262144".to_string(),
+            "NAME_MAX" | "FILENAME_MAX" => "255".to_string(),
+            "PAGESIZE" | "PAGE_SIZE" => "4096".to_string(),
+            "LONG_BIT" | "WORD_BIT" => "64".to_string(),
+            "CHAR_BIT" => "8".to_string(),
+            "_POSIX_VERSION" => "200809".to_string(),
+            "HOST_NAME_MAX" => "255".to_string(),
+            "HOSTNAME" => self.cmd_hostname(&[]).stdout.trim().to_string(),
+            "USER" | "LOGNAME" => self.cmd_whoami(&[]).stdout.trim().to_string(),
+            "HOME" => self.vfs.root().to_string_lossy().to_string(),
+            "TMPDIR" => "/tmp".to_string(),
+            _ => {
+                return CommandOutput::error(
+                    format!("getconf: Unrecognized variable '{}'\n", name),
+                    1,
+                )
+            }
+        };
+        CommandOutput::success(format!("{}\n", val))
+    }
+
+    /// `getent DATABASE [KEY]` — hosts/passwd/group (was advertised but missing).
+    pub fn cmd_getent(&self, args: &[&str]) -> CommandOutput {
+        let db = args.first().copied().unwrap_or("");
+        let key = args.get(1).copied().unwrap_or("");
+        match db {
+            "hosts" => {
+                if key.is_empty() {
+                    return CommandOutput::error("getent: missing key\n".to_string(), 1);
+                }
+                match self.dns_resolve(key) {
+                    Ok(addrs) => {
+                        let mut out = String::new();
+                        for a in addrs {
+                            out.push_str(&format!("{}\t{}\n", a.ip(), key));
+                        }
+                        CommandOutput::success(out)
+                    }
+                    Err(_) => CommandOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 2,
+                    },
+                }
+            }
+            "passwd" => CommandOutput::success(format!(
+                "{}:x:501:501::{}:/bin/sh\n",
+                self.cmd_whoami(&[]).stdout.trim(),
+                self.vfs.root().to_string_lossy()
+            )),
+            "group" => {
+                CommandOutput::success(format!("{}:x:501:\n", self.cmd_whoami(&[]).stdout.trim()))
+            }
+            "" => CommandOutput::error("getent: missing database\n".to_string(), 1),
+            _ => CommandOutput::error(format!("getent: Unknown database '{}'\n", db), 1),
         }
     }
 }
@@ -729,6 +892,36 @@ fn bsd_sum(data: &[u8]) -> u16 {
     checksum
 }
 
+/// `od -c` / `od -a` per-byte field (printable chars verbatim, escapes for the
+/// rest; `named` uses the classic `od -a` mnemonics for control bytes).
+fn od_char_field(b: u8, named: bool) -> String {
+    if named {
+        const NAMES: [&str; 33] = [
+            "nul", "soh", "stx", "etx", "eot", "enq", "ack", "bel", "bs", "ht", "nl", "vt", "ff",
+            "cr", "so", "si", "dle", "dc1", "dc2", "dc3", "dc4", "nak", "syn", "etb", "can", "em",
+            "sub", "esc", "fs", "gs", "rs", "us", "sp",
+        ];
+        if (b as usize) < NAMES.len() {
+            return NAMES[b as usize].to_string();
+        }
+        if b == 0x7f {
+            return "del".to_string();
+        }
+    }
+    match b {
+        0 => "\\0".to_string(),
+        b'\n' => "\\n".to_string(),
+        b'\t' => "\\t".to_string(),
+        b'\r' => "\\r".to_string(),
+        0x08 => "\\b".to_string(),
+        0x0c => "\\f".to_string(),
+        0x0b => "\\v".to_string(),
+        b'\\' => "\\\\".to_string(),
+        0x20..=0x7e => (b as char).to_string(),
+        _ => format!("\\{:03o}", b),
+    }
+}
+
 fn cmd_hashsum_sha1(shell: &Shell, args: &[&str], stdin: Option<&str>) -> CommandOutput {
     let mut check = false;
     let mut files = Vec::new();
@@ -750,7 +943,7 @@ fn cmd_hashsum_sha1(shell: &Shell, args: &[&str], stdin: Option<&str>) -> Comman
                 }
             }
         } else {
-            match shell.vfs.read_to_string(&files[0], &shell.cwd) {
+            match shell.read_text_lossy(&files[0]) {
                 Ok(c) => c,
                 Err(e) => {
                     return CommandOutput::error(format!("sha1sum: {}: {}\n", files[0], e), 1)

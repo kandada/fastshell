@@ -102,8 +102,9 @@ impl Vfs {
         }
     }
 
-    pub fn resolve(&self, path: &str, cwd: &str) -> Result<PathBuf> {
-        // (c) 2025 xiefujin <490021684@qq.com>
+    /// Build the normalized physical candidate for `path` (no confinement
+    /// check yet). Shared by [`resolve`] and [`resolve_no_follow`].
+    fn candidate(&self, path: &str, cwd: &str) -> PathBuf {
         let candidate = if path.starts_with('/') {
             // A leading '/' is a VFS-internal path relative to the sandbox
             // root — UNLESS the caller passed a full physical path that is
@@ -126,9 +127,12 @@ impl Vfs {
             };
             base.join(path)
         };
+        normalize_path(&candidate)
+    }
 
-        let resolved = normalize_path(&candidate);
-
+    pub fn resolve(&self, path: &str, cwd: &str) -> Result<PathBuf> {
+        // (c) 2025 xiefujin <490021684@qq.com>
+        let resolved = self.candidate(path, cwd);
         if !resolved.starts_with(&self.root) {
             return Err(VfsError::PathEscape(resolved));
         }
@@ -136,7 +140,13 @@ impl Vfs {
         let canonical = match fs::canonicalize(&resolved) {
             Ok(c) => c,
             Err(_) => {
-                if let Some(parent) = resolved.parent() {
+                // Symlink whose target is VFS-absolute (e.g. `link -> /sub/g.txt`):
+                // `canonicalize` resolves the target against the HOST root and
+                // fails. Follow the chain manually, mapping an absolute target
+                // onto the VFS root.
+                if let Some(followed) = self.follow_symlink_chain(&resolved) {
+                    followed
+                } else if let Some(parent) = resolved.parent() {
                     if parent.exists() {
                         match fs::canonicalize(parent) {
                             Ok(canon_parent) => {
@@ -159,6 +169,59 @@ impl Vfs {
         }
 
         Ok(canonical)
+    }
+
+    /// Follow a symlink chain, resolving an ABSOLUTE target under the VFS root
+    /// (rather than the host root). Returns `Some(canonical_target)` when `path`
+    /// is a symlink that resolves, else `None` so the caller can fall back.
+    fn follow_symlink_chain(&self, path: &Path) -> Option<PathBuf> {
+        let md = fs::symlink_metadata(path).ok()?;
+        if !md.file_type().is_symlink() {
+            return None;
+        }
+        let mut cur = path.to_path_buf();
+        for _ in 0..40 {
+            let md = fs::symlink_metadata(&cur).ok()?;
+            if !md.file_type().is_symlink() {
+                break;
+            }
+            let target = fs::read_link(&cur).ok()?;
+            let next = if target.is_absolute() {
+                self.root.join(target.strip_prefix("/").ok()?)
+            } else {
+                cur.parent()?.join(&target)
+            };
+            if !next.starts_with(&self.root) {
+                return None;
+            }
+            cur = next;
+        }
+        fs::canonicalize(&cur).ok().or(Some(cur))
+    }
+
+    /// Like [`resolve`], but does **not** follow a symlink at the final
+    /// component, so `rm link` removes the link itself (POSIX) instead of its
+    /// target. The parent is still canonicalized (symlinked sandbox prefixes)
+    /// and confinement is enforced.
+    pub fn resolve_no_follow(&self, path: &str, cwd: &str) -> Result<PathBuf> {
+        let resolved = self.candidate(path, cwd);
+        if !resolved.starts_with(&self.root) {
+            return Err(VfsError::PathEscape(resolved));
+        }
+        let out = match resolved.parent() {
+            Some(parent) if parent.exists() => match fs::canonicalize(parent) {
+                Ok(canon_parent) => {
+                    let fname = resolved.file_name().unwrap_or_default();
+                    canon_parent.join(fname)
+                }
+                Err(_) => resolved,
+            },
+            _ => resolved,
+        };
+        if !out.starts_with(&self.root) {
+            return Err(VfsError::PathEscape(out));
+        }
+        Ok(out)
     }
 
     pub fn to_vpath(&self, abs_path: &Path) -> String {
@@ -204,7 +267,39 @@ impl Vfs {
         Ok(())
     }
 
+    /// Virtual device files (`/dev/null`, `/dev/zero`, `/dev/random`,
+    /// `/dev/urandom`, `/dev/stdin`). They live outside the sandbox root, so
+    /// `resolve` would reject them; synthesize their contents instead. The
+    /// infinite streams (`zero`/`random`/`urandom`) are bounded so a command
+    /// like `sha256sum /dev/urandom` can terminate.
+    fn pseudo_file(&self, path: &str, cwd: &str) -> Option<Vec<u8>> {
+        let vpath = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("{}/{}", cwd.trim_end_matches('/'), path)
+        };
+        let normalized = normalize_path(Path::new(&vpath))
+            .to_string_lossy()
+            .to_string();
+        match normalized.as_str() {
+            "/dev/null" => Some(Vec::new()),
+            "/dev/zero" => Some(vec![0u8; 65536]),
+            "/dev/random" | "/dev/urandom" => {
+                let mut buf = Vec::with_capacity(65536);
+                while buf.len() < 65536 {
+                    buf.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+                }
+                buf.truncate(65536);
+                Some(buf)
+            }
+            _ => None,
+        }
+    }
+
     pub fn read_to_string(&self, path: &str, cwd: &str) -> Result<String> {
+        if let Some(data) = self.pseudo_file(path, cwd) {
+            return Ok(String::from_utf8_lossy(&data).to_string());
+        }
         let target = self.resolve(path, cwd)?;
         if !target.exists() {
             return Err(VfsError::NotFound(self.to_vpath(&target)));
@@ -213,6 +308,9 @@ impl Vfs {
     }
 
     pub fn read(&self, path: &str, cwd: &str) -> Result<Vec<u8>> {
+        if let Some(data) = self.pseudo_file(path, cwd) {
+            return Ok(data);
+        }
         let target = self.resolve(path, cwd)?;
         if !target.exists() {
             return Err(VfsError::NotFound(self.to_vpath(&target)));
@@ -243,11 +341,12 @@ impl Vfs {
     }
 
     pub fn remove_file(&self, path: &str, cwd: &str) -> Result<()> {
-        let target = self.resolve(path, cwd)?;
-        if !target.exists() {
-            return Err(VfsError::NotFound(self.to_vpath(&target)));
-        }
-        if target.is_dir() {
+        // Do not follow a final symlink: `rm link` removes the link, not the
+        // target (POSIX). `symlink_metadata` reports a symlink-to-dir as a link.
+        let target = self.resolve_no_follow(path, cwd)?;
+        let md = fs::symlink_metadata(&target)
+            .map_err(|_| VfsError::NotFound(self.to_vpath(&target)))?;
+        if md.is_dir() {
             return Err(VfsError::NotADirectory(self.to_vpath(&target)));
         }
         fs::remove_file(&target)?;
@@ -255,11 +354,10 @@ impl Vfs {
     }
 
     pub fn remove_dir(&self, path: &str, cwd: &str) -> Result<()> {
-        let target = self.resolve(path, cwd)?;
-        if !target.exists() {
-            return Err(VfsError::NotFound(self.to_vpath(&target)));
-        }
-        if !target.is_dir() {
+        let target = self.resolve_no_follow(path, cwd)?;
+        let md = fs::symlink_metadata(&target)
+            .map_err(|_| VfsError::NotFound(self.to_vpath(&target)))?;
+        if !md.is_dir() {
             return Err(VfsError::NotADirectory(self.to_vpath(&target)));
         }
         fs::remove_dir(&target)?;
@@ -437,7 +535,10 @@ mod tests {
         let physical = vfs.root().join("projects/demo/a.txt");
         let resolved = vfs.resolve(physical.to_str().unwrap(), "/").unwrap();
         assert_eq!(resolved, physical.canonicalize().unwrap());
-        assert_eq!(vfs.read_to_string(physical.to_str().unwrap(), "/").unwrap(), "hi");
+        assert_eq!(
+            vfs.read_to_string(physical.to_str().unwrap(), "/").unwrap(),
+            "hi"
+        );
     }
 
     #[test]
@@ -457,7 +558,8 @@ mod tests {
             // Path through the symlinked alias — different textual prefix.
             let via_alias = base.join("alias/sandbox/projects/a.txt");
             assert_eq!(
-                vfs.read_to_string(via_alias.to_str().unwrap(), "/").unwrap(),
+                vfs.read_to_string(via_alias.to_str().unwrap(), "/")
+                    .unwrap(),
                 "hi"
             );
             // Non-existent file through the alias still resolves (for writes).

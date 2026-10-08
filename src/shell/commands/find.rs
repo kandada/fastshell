@@ -10,10 +10,14 @@ Usage: find [PATH] [OPTIONS] [EXPRESSION]
 
 Predicates:
   -name PATTERN    File name matches shell pattern
+  -iname PATTERN   Like -name, but case-insensitive
   -type [fdl]      File type: f=file, d=directory, l=symlink
   -empty           File is empty
   -mtime [+-]N     Modified time in days
   -size [+-]N[c]   File size in bytes
+  -regex PATTERN   Path matches a (case-sensitive) regex
+  -iregex PATTERN  Path matches a case-insensitive regex
+  -newer FILE      Modified more recently than FILE
 
 Actions:
   -print           Print file path (default)
@@ -30,17 +34,39 @@ Options:
 
   -h, --help       Show this help\n";
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SizeSign {
+    Greater,
+    Less,
+    Exact,
+}
+
 #[derive(Debug, Clone)]
 enum ConditionKind {
     Name(String),
     Iname(String),
+    Path(String),
+    Ipath(String),
     Type(char),
     Empty,
-    Mtime { days: i64, greater_than: bool },
-    Size { bytes: i64, greater_than: bool },
+    Mtime {
+        days: i64,
+        greater_than: bool,
+    },
+    Size {
+        bytes: i64,
+        sign: SizeSign,
+    },
     Regex(String),
     IRegex(String),
     Newer(SystemTime),
+    /// `-newermt TIME` — modification time newer than an absolute time.
+    NewerMt(SystemTime),
+    /// `-perm [-/]MODE` — permission bits (op: ' ' exact, '-' all, '/' any).
+    Perm {
+        mode: u32,
+        op: char,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +80,8 @@ enum Action {
     Print,
     Print0,
     Delete,
+    /// `-printf <format>` (common specifiers: %f %p %h %s %y %%; \n \t \0 \\)
+    Printf(String),
     /// -exec cmd args {} ;   (run per matched file)
     Exec(Vec<String>),
     /// -exec cmd args {} +   (run once with all matched files)
@@ -73,6 +101,11 @@ impl Shell {
         let mut mindepth: Option<usize> = None;
         let mut i = 0;
         let mut negate_next = false;
+        // `-prune` is an action in GNU find; the predicate group immediately
+        // before it selects the directories not to descend into (and whose
+        // output is suppressed, because the OR short-circuits).
+        let mut has_prune = false;
+        let mut prune_groups: Vec<usize> = Vec::new();
 
         while i < args.len() {
             match args[i] {
@@ -128,6 +161,46 @@ impl Shell {
                         );
                         negate_next = false;
                         i += 1;
+                    }
+                }
+                "-path" => {
+                    if i + 1 < args.len() {
+                        add_condition(
+                            &mut conditions,
+                            Condition {
+                                negate: negate_next,
+                                kind: ConditionKind::Path(args[i + 1].to_string()),
+                            },
+                        );
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
+                "-ipath" => {
+                    if i + 1 < args.len() {
+                        add_condition(
+                            &mut conditions,
+                            Condition {
+                                negate: negate_next,
+                                kind: ConditionKind::Ipath(args[i + 1].to_string()),
+                            },
+                        );
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
+                // `-print` is the default action; record it explicitly so that
+                // `-prune -o ... -print` still prints the non-pruned branch.
+                "-print" => {
+                    actions.push(Action::Print);
+                }
+                "-prune" => {
+                    has_prune = true;
+                    if !conditions.is_empty() {
+                        let idx = conditions.len() - 1;
+                        if !prune_groups.contains(&idx) {
+                            prune_groups.push(idx);
+                        }
                     }
                 }
                 "-type" => {
@@ -201,6 +274,42 @@ impl Shell {
                         i += 1;
                     }
                 }
+                "-perm" => {
+                    if i + 1 < args.len() {
+                        let a = args[i + 1];
+                        let (op, rest) = match a.chars().next() {
+                            Some('-') => ('-', &a[1..]),
+                            Some('/') => ('/', &a[1..]),
+                            _ => (' ', a),
+                        };
+                        if let Ok(mode) = u32::from_str_radix(rest, 8) {
+                            add_condition(
+                                &mut conditions,
+                                Condition {
+                                    negate: negate_next,
+                                    kind: ConditionKind::Perm { mode, op },
+                                },
+                            );
+                        }
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
+                "-newermt" => {
+                    if i + 1 < args.len() {
+                        if let Some(t) = parse_ref_time(args[i + 1]) {
+                            add_condition(
+                                &mut conditions,
+                                Condition {
+                                    negate: negate_next,
+                                    kind: ConditionKind::NewerMt(t),
+                                },
+                            );
+                        }
+                        negate_next = false;
+                        i += 1;
+                    }
+                }
                 "-newer" => {
                     if i + 1 < args.len() {
                         let ref_time = self
@@ -227,6 +336,12 @@ impl Shell {
                 }
                 "-delete" => {
                     actions.push(Action::Delete);
+                }
+                "-printf" => {
+                    if i + 1 < args.len() {
+                        actions.push(Action::Printf(args[i + 1].to_string()));
+                        i += 1;
+                    }
                 }
                 "-exec" => {
                     i += 1;
@@ -263,9 +378,13 @@ impl Shell {
             i += 1;
         }
 
-        if actions.is_empty() {
+        if actions.is_empty() && !has_prune {
             actions.push(Action::Print);
         }
+
+        let action_groups: Vec<usize> = (0..conditions.len())
+            .filter(|i| !prune_groups.contains(i))
+            .collect();
 
         let compiled_conditions: Vec<Vec<(bool, Option<regex::Regex>, ConditionKind)>> = conditions
             .iter()
@@ -276,8 +395,12 @@ impl Shell {
                         let compiled = match &c.kind {
                             ConditionKind::Name(pat) => Some(compile_glob_ci(pat, false)),
                             ConditionKind::Iname(pat) => Some(compile_glob_ci(pat, true)),
+                            ConditionKind::Path(pat) => Some(compile_glob_ci(pat, false)),
+                            ConditionKind::Ipath(pat) => Some(compile_glob_ci(pat, true)),
                             ConditionKind::Regex(pat) => regex::Regex::new(pat).ok(),
-                            ConditionKind::IRegex(pat) => regex::Regex::new(&format!("(?i){}", pat)).ok(),
+                            ConditionKind::IRegex(pat) => {
+                                regex::Regex::new(&format!("(?i){}", pat)).ok()
+                            }
                             _ => None,
                         };
                         (c.negate, compiled, c.kind.clone())
@@ -291,6 +414,7 @@ impl Shell {
         let mut batch_paths: Vec<String> = Vec::new();
 
         // Check the starting path itself
+        let mut start_pruned = false;
         if let Ok(resolved) = self.vfs.resolve(&path, &self.cwd) {
             if let Ok(metadata) = std::fs::symlink_metadata(&resolved) {
                 let entry_name = resolved
@@ -304,24 +428,59 @@ impl Shell {
                     size: metadata.len(),
                     modified: metadata.modified().ok(),
                 };
-                if evaluate_conditions(&compiled_conditions, entry_name, &start_entry, &self.vfs, &self.cwd) {
-                    apply_actions(&actions, &path, self, &mut output, &mut exit_code, &mut batch_paths);
+                start_pruned = !prune_groups.is_empty()
+                    && eval_subset(
+                        &compiled_conditions,
+                        &prune_groups,
+                        &entry_name,
+                        &path,
+                        &start_entry,
+                        &self.vfs,
+                        &self.cwd,
+                    );
+                let action_match = if action_groups.is_empty() {
+                    compiled_conditions.iter().all(|g| g.is_empty())
+                } else {
+                    eval_subset(
+                        &compiled_conditions,
+                        &action_groups,
+                        &entry_name,
+                        &path,
+                        &start_entry,
+                        &self.vfs,
+                        &self.cwd,
+                    )
+                };
+                if !start_pruned && action_match && mindepth.map_or(true, |md| md == 0) {
+                    apply_actions(
+                        &actions,
+                        &path,
+                        &start_entry,
+                        self,
+                        &mut output,
+                        &mut exit_code,
+                        &mut batch_paths,
+                    );
                 }
             }
         }
 
-        if let Err(e) = self.find_recursive(
-            &path,
-            0,
-            maxdepth,
-            mindepth,
-            &compiled_conditions,
-            &actions,
-            &mut output,
-            &mut exit_code,
-            &mut batch_paths,
-        ) {
-            return CommandOutput::error(format!("find: {}\n", e), 1);
+        if !start_pruned {
+            if let Err(e) = self.find_recursive(
+                &path,
+                0,
+                maxdepth,
+                mindepth,
+                &compiled_conditions,
+                &prune_groups,
+                &action_groups,
+                &actions,
+                &mut output,
+                &mut exit_code,
+                &mut batch_paths,
+            ) {
+                return CommandOutput::error(format!("find: {}\n", e), 1);
+            }
         }
 
         // `-exec ... {} +`: run once with all matched paths substituted.
@@ -360,6 +519,8 @@ impl Shell {
         maxdepth: Option<usize>,
         mindepth: Option<usize>,
         conditions: &[Vec<(bool, Option<regex::Regex>, ConditionKind)>],
+        prune_groups: &[usize],
+        action_groups: &[usize],
         actions: &[Action],
         output: &mut String,
         exit_code: &mut i32,
@@ -377,8 +538,18 @@ impl Shell {
                 return Ok(());
             }
             let entry_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+            let pruned = !prune_groups.is_empty()
+                && eval_subset(
+                    conditions,
+                    prune_groups,
+                    &entry.name,
+                    &entry_path,
+                    entry,
+                    &self.vfs,
+                    &self.cwd,
+                );
 
-            if entry.is_dir {
+            if entry.is_dir && !pruned {
                 if maxdepth.map_or(true, |md| depth < md) {
                     let _ = self.find_recursive(
                         &entry_path,
@@ -386,6 +557,8 @@ impl Shell {
                         maxdepth,
                         mindepth,
                         conditions,
+                        prune_groups,
+                        action_groups,
                         actions,
                         output,
                         exit_code,
@@ -394,10 +567,36 @@ impl Shell {
                 }
             }
 
-            // mindepth: only evaluate conditions if depth >= mindepth
-            if mindepth.map_or(true, |md| depth >= md) {
-                if evaluate_conditions(conditions, entry.name.clone(), entry, &self.vfs, &self.cwd) {
-                    apply_actions(actions, &entry_path, self, output, exit_code, batch_paths);
+            // A pruned entry is neither descended into nor printed.
+            if pruned {
+                continue;
+            }
+
+            // mindepth: entries listed here are at `depth + 1`.
+            if mindepth.map_or(true, |md| depth + 1 >= md) {
+                let action_match = if action_groups.is_empty() {
+                    conditions.iter().all(|g| g.is_empty())
+                } else {
+                    eval_subset(
+                        conditions,
+                        action_groups,
+                        &entry.name,
+                        &entry_path,
+                        entry,
+                        &self.vfs,
+                        &self.cwd,
+                    )
+                };
+                if action_match {
+                    apply_actions(
+                        actions,
+                        &entry_path,
+                        entry,
+                        self,
+                        output,
+                        exit_code,
+                        batch_paths,
+                    );
                 }
             }
         }
@@ -409,6 +608,7 @@ impl Shell {
 fn apply_actions(
     actions: &[Action],
     entry_path: &str,
+    entry: &crate::vfs::DirEntry,
     shell: &Shell,
     output: &mut String,
     exit_code: &mut i32,
@@ -424,6 +624,9 @@ fn apply_actions(
             Action::Print0 => {
                 output.push_str(entry_path);
                 output.push('\0');
+            }
+            Action::Printf(fmt) => {
+                output.push_str(&find_printf(fmt, entry_path, entry));
             }
             Action::Delete => {
                 // Try as directory first, fall back to file
@@ -476,93 +679,222 @@ fn run_exec_builtin(shell: &Shell, args: &[String], output: &mut String, exit_co
     }
 }
 
-fn evaluate_conditions(
+/// Minimal `-printf` formatter (GNU find's common specifiers).
+fn find_printf(fmt: &str, entry_path: &str, entry: &crate::vfs::DirEntry) -> String {
+    let mut out = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('0') => out.push('\0'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            '%' => match chars.next() {
+                Some('f') => out.push_str(&entry.name),
+                Some('p') => out.push_str(entry_path),
+                Some('h') => out.push_str(
+                    entry_path
+                        .rsplit_once('/')
+                        .map(|(d, _)| if d.is_empty() { "/" } else { d })
+                        .unwrap_or("."),
+                ),
+                Some('s') => out.push_str(&entry.size.to_string()),
+                Some('y') => out.push(if entry.is_symlink {
+                    'l'
+                } else if entry.is_dir {
+                    'd'
+                } else {
+                    'f'
+                }),
+                Some('%') => out.push('%'),
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
+                None => out.push('%'),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Parse a `-newermt` time: epoch seconds or `YYYY-MM-DD[ HH:MM:SS]`.
+fn parse_ref_time(s: &str) -> Option<SystemTime> {
+    if let Ok(secs) = s.parse::<i64>() {
+        return Some(if secs >= 0 {
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
+        } else {
+            std::time::UNIX_EPOCH - std::time::Duration::from_secs((-secs) as u64)
+        });
+    }
+    let (date, time) = match s.split_once(' ') {
+        Some((d, t)) => (d, Some(t)),
+        None => (s, None),
+    };
+    let mut parts = date.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let mo: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    let (hh, mm, ss) = match time {
+        Some(t) => {
+            let mut tp = t.split(':');
+            (
+                tp.next().and_then(|x| x.parse().ok()).unwrap_or(0i64),
+                tp.next().and_then(|x| x.parse().ok()).unwrap_or(0i64),
+                tp.next().and_then(|x| x.parse().ok()).unwrap_or(0i64),
+            )
+        }
+        None => (0, 0, 0),
+    };
+    // Days since 1970-01-01 (civil-from-days algorithm).
+    let yy = if mo <= 2 { y - 1 } else { y };
+    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+    let yoe = yy - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let secs = days * 86400 + hh * 3600 + mm * 60 + ss;
+    Some(if secs >= 0 {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
+    } else {
+        std::time::UNIX_EPOCH - std::time::Duration::from_secs((-secs) as u64)
+    })
+}
+
+/// OR across the selected condition groups (each group is an AND of its
+/// predicates). An empty group matches everything (GNU `-o -print`).
+fn eval_subset(
     conditions: &[Vec<(bool, Option<regex::Regex>, ConditionKind)>],
-    name: String,
+    indices: &[usize],
+    name: &str,
+    path: &str,
     entry: &crate::vfs::DirEntry,
     vfs: &crate::vfs::Vfs,
     cwd: &str,
 ) -> bool {
-    if conditions.is_empty() || conditions.iter().all(|g| g.is_empty()) {
-        return true;
-    }
-    for group in conditions {
-        if group.is_empty() {
-            continue;
-        }
-        let group_match = group.iter().all(|(negate, compiled, kind)| {
-            let result = match kind {
-                ConditionKind::Name(_) | ConditionKind::Iname(_) => match compiled {
-                    Some(re) => re.is_match(&name),
-                    None => true,
-                },
-                ConditionKind::Regex(_) | ConditionKind::IRegex(_) => match compiled {
-                    Some(re) => re.is_match(&name),
-                    None => false,
-                },
-                ConditionKind::Newer(ref_time) => match entry.modified {
-                    Some(mod_time) => mod_time > *ref_time,
-                    None => false,
-                },
-                ConditionKind::Type(ch) => match ch {
-                    'd' => entry.is_dir,
-                    'f' => !entry.is_dir,
-                    'l' => entry.is_symlink,
-                    _ => true,
-                },
-                ConditionKind::Empty => {
-                    if entry.is_dir {
-                        vfs.list_dir(&name, cwd)
-                            .map(|e| e.is_empty())
-                            .unwrap_or(false)
-                    } else {
-                        entry.size == 0
-                    }
-                }
-                ConditionKind::Mtime { days, greater_than } => match entry.modified {
-                    Some(mod_time) => {
-                        let now = SystemTime::now();
-                        let file_age_secs = match now.duration_since(mod_time) {
-                            Ok(d) => d.as_secs() as i64,
-                            Err(_) => -1,
-                        };
-                        if file_age_secs < 0 {
-                            return false;
-                        }
-                        let file_days = file_age_secs / 86400;
-                        if *greater_than {
-                            file_days > *days
-                        } else {
-                            file_days < *days
-                        }
-                    }
-                    None => false,
-                },
-                ConditionKind::Size {
-                    bytes,
-                    greater_than,
-                } => {
-                    let size = entry.size as i64;
-                    if *greater_than {
-                        size > *bytes
-                    } else {
-                        size < *bytes
-                    }
-                }
-            };
-            if *negate {
-                !result
-            } else {
-                result
+    for &i in indices {
+        if let Some(group) = conditions.get(i) {
+            if group.is_empty() || group_matches(group, name, path, entry, vfs, cwd) {
+                return true;
             }
-        });
-
-        if group_match {
-            return true;
         }
     }
-
     false
+}
+
+fn group_matches(
+    group: &[(bool, Option<regex::Regex>, ConditionKind)],
+    name: &str,
+    path: &str,
+    entry: &crate::vfs::DirEntry,
+    vfs: &crate::vfs::Vfs,
+    cwd: &str,
+) -> bool {
+    group.iter().all(|(negate, compiled, kind)| {
+        let result = match kind {
+            ConditionKind::Name(_) | ConditionKind::Iname(_) => match compiled {
+                Some(re) => re.is_match(name),
+                None => true,
+            },
+            // `-path`/`-ipath` (and `-regex`) match the full path, not the name.
+            ConditionKind::Path(_) | ConditionKind::Ipath(_) => match compiled {
+                Some(re) => re.is_match(path),
+                None => true,
+            },
+            ConditionKind::Regex(_) | ConditionKind::IRegex(_) => match compiled {
+                Some(re) => re.is_match(path),
+                None => false,
+            },
+            ConditionKind::Newer(ref_time) => match entry.modified {
+                Some(mod_time) => mod_time > *ref_time,
+                None => false,
+            },
+            ConditionKind::NewerMt(ref_time) => match entry.modified {
+                Some(mod_time) => mod_time > *ref_time,
+                None => false,
+            },
+            ConditionKind::Perm { mode, op } => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let actual = vfs
+                        .resolve(path, cwd)
+                        .ok()
+                        .and_then(|p| std::fs::metadata(&p).ok())
+                        .map(|md| md.permissions().mode() & 0o7777);
+                    match actual {
+                        Some(a) => match op {
+                            '-' => a & mode == *mode,
+                            '/' => *mode == 0 || a & mode != 0,
+                            _ => a == *mode,
+                        },
+                        None => false,
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = (mode, op);
+                    true
+                }
+            }
+            ConditionKind::Type(ch) => match ch {
+                // GNU `-type` uses lstat: a symlink is `l`, never `f`/`d`.
+                'd' => entry.is_dir && !entry.is_symlink,
+                'f' => !entry.is_dir && !entry.is_symlink,
+                'l' => entry.is_symlink,
+                _ => true,
+            },
+            ConditionKind::Empty => {
+                if entry.is_dir {
+                    vfs.list_dir(path, cwd)
+                        .map(|e| e.is_empty())
+                        .unwrap_or(false)
+                } else {
+                    entry.size == 0
+                }
+            }
+            ConditionKind::Mtime { days, greater_than } => match entry.modified {
+                Some(mod_time) => {
+                    let now = SystemTime::now();
+                    let file_age_secs = match now.duration_since(mod_time) {
+                        Ok(d) => d.as_secs() as i64,
+                        Err(_) => -1,
+                    };
+                    if file_age_secs < 0 {
+                        return false;
+                    }
+                    let file_days = file_age_secs / 86400;
+                    if *greater_than {
+                        file_days > *days
+                    } else {
+                        file_days < *days
+                    }
+                }
+                None => false,
+            },
+            ConditionKind::Size { bytes, sign } => {
+                let size = entry.size as i64;
+                match sign {
+                    SizeSign::Greater => size > *bytes,
+                    SizeSign::Less => size < *bytes,
+                    SizeSign::Exact => size == *bytes,
+                }
+            }
+        };
+        if *negate {
+            !result
+        } else {
+            result
+        }
+    })
 }
 
 fn add_condition(groups: &mut Vec<Vec<Condition>>, cond: Condition) {
@@ -590,36 +922,37 @@ fn parse_mtime(arg: &str) -> Option<ConditionKind> {
 }
 
 fn parse_size(arg: &str) -> Option<ConditionKind> {
-    if arg.len() < 3 {
+    let (sign, rest) = match arg.chars().next()? {
+        '+' => (SizeSign::Greater, &arg[1..]),
+        '-' => (SizeSign::Less, &arg[1..]),
+        _ => (SizeSign::Exact, arg),
+    };
+    if rest.is_empty() {
         return None;
     }
-    let (greater_than, rest) = match arg.chars().next().unwrap() {
-        '+' => (true, &arg[1..]),
-        '-' => (false, &arg[1..]),
+    // Unit suffix (`c` bytes, `w` 2-byte words, `b` 512-byte blocks, k/M/G).
+    let (num_str, unit) = match rest.chars().last()? {
+        'c' => (&rest[..rest.len() - 1], 'c'),
+        'w' => (&rest[..rest.len() - 1], 'w'),
+        'b' => (&rest[..rest.len() - 1], 'b'),
+        'k' | 'K' => (&rest[..rest.len() - 1], 'k'),
+        'M' => (&rest[..rest.len() - 1], 'M'),
+        'G' => (&rest[..rest.len() - 1], 'G'),
+        _ if rest.chars().all(|c| c.is_ascii_digit()) => (rest, 'b'),
         _ => return None,
     };
-
-    let (num_str, unit) = if rest.ends_with('k') || rest.ends_with('K') {
-        (&rest[..rest.len() - 1], 'k')
-    } else if rest.ends_with('M') {
-        (&rest[..rest.len() - 1], 'M')
-    } else if rest.ends_with('G') {
-        (&rest[..rest.len() - 1], 'G')
-    } else {
-        return None;
-    };
-
     let value: i64 = num_str.parse().ok()?;
-    let bytes = match unit {
-        'k' => value * 1024,
-        'M' => value * 1024 * 1024,
-        'G' => value * 1024 * 1024 * 1024,
-        _ => value,
+    let mult: i64 = match unit {
+        'c' => 1,
+        'w' => 2,
+        'k' => 1024,
+        'M' => 1024 * 1024,
+        'G' => 1024 * 1024 * 1024,
+        _ => 512,
     };
-
     Some(ConditionKind::Size {
-        bytes,
-        greater_than,
+        bytes: value.saturating_mul(mult),
+        sign,
     })
 }
 
@@ -643,7 +976,8 @@ fn compile_glob_ci(pattern: &str, ignore_case: bool) -> regex::Regex {
     regex_str.push('$');
     regex::Regex::new(&regex_str).unwrap_or_else(|_| {
         let escaped = regex::escape(pattern);
-        regex::Regex::new(&format!("^{}$", escaped)).unwrap_or_else(|_| regex::Regex::new(".*").unwrap())
+        regex::Regex::new(&format!("^{}$", escaped))
+            .unwrap_or_else(|_| regex::Regex::new(".*").unwrap())
     })
 }
 
@@ -835,6 +1169,41 @@ mod tests {
         let out = shell.cmd_find(&["sub", "-name", "*.txt", "-exec", "echo", "found", "{}", ";"]);
         // echo should output "found sub/a.txt" including the newline
         assert!(out.stdout.contains("sub/a.txt"));
+    }
+
+    #[test]
+    fn test_find_prune() {
+        let shell = mk_shell();
+        shell.cmd_mkdir(&["keep"]);
+        shell.cmd_mkdir(&["skip"]);
+        shell.cmd_touch(&["keep/a.md"]);
+        shell.cmd_touch(&["skip/b.md"]);
+
+        let out = shell.cmd_find(&[
+            ".", "-path", "./skip", "-prune", "-o", "-name", "*.md", "-print",
+        ]);
+        assert!(out.stdout.contains("./keep/a.md"), "{}", out.stdout);
+        assert!(
+            !out.stdout.contains("skip/b.md"),
+            "pruned dir must not be descended: {}",
+            out.stdout
+        );
+        assert!(
+            !out.stdout.contains("./skip\n"),
+            "pruned dir itself must not be printed: {}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn test_find_path_matches_full_path() {
+        let shell = mk_shell();
+        shell.cmd_mkdir(&["a"]);
+        shell.cmd_mkdir(&["a/b"]);
+        shell.cmd_touch(&["a/b/c.txt"]);
+
+        let out = shell.cmd_find(&[".", "-path", "*/b/*"]);
+        assert!(out.stdout.contains("./a/b/c.txt"), "{}", out.stdout);
     }
 
     #[test]

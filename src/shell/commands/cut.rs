@@ -42,7 +42,7 @@ impl Shell {
                         i += 1;
                     }
                 }
-                "-c" => {
+                "-c" | "-b" => {
                     if i + 1 < args.len() {
                         fields = parse_field_spec(args[i + 1]);
                         char_mode = true;
@@ -66,7 +66,7 @@ impl Shell {
                 arg if arg.starts_with("-f") && arg.len() > 2 => {
                     fields = parse_field_spec(&arg[2..]);
                 }
-                arg if arg.starts_with("-c") && arg.len() > 2 => {
+                arg if (arg.starts_with("-c") || arg.starts_with("-b")) && arg.len() > 2 => {
                     fields = parse_field_spec(&arg[2..]);
                     char_mode = true;
                 }
@@ -88,7 +88,7 @@ impl Shell {
         } else {
             let mut content = String::new();
             for file in &files {
-                match self.vfs.read_to_string(file, &self.cwd) {
+                match self.read_text_lossy(file) {
                     Ok(c) => content.push_str(&c),
                     Err(e) => return CommandOutput::error(format!("cut: {}: {}\n", file, e), 1),
                 }
@@ -221,7 +221,11 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)

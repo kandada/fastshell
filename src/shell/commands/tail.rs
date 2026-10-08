@@ -4,12 +4,26 @@
 use crate::shell::{CommandOutput, Shell};
 use std::time::{Duration, Instant};
 
+const TAIL_HELP_TEXT: &str = "\
+Usage: tail [OPTION]... [FILE]...
+Print the last 10 lines of each FILE to standard output.
+
+  -n N        print the last N lines (use +N to start at line N)
+  -c N        print the last N bytes
+  -f          follow: output appended data as the file grows
+  -h, --help  display this help and exit
+";
+
 impl Shell {
     pub fn cmd_tail(&self, args: &[&str], stdin: Option<&str>) -> CommandOutput {
+        if args.contains(&"-h") || args.contains(&"--help") {
+            return CommandOutput::success(TAIL_HELP_TEXT.to_string());
+        }
         let mut lines_count: i64 = 10;
         let mut char_count: Option<i64> = None;
         let mut from_start = false;
         let mut follow = false;
+        let mut quiet = false;
         let mut files = Vec::new();
 
         let mut i = 0;
@@ -41,8 +55,9 @@ impl Shell {
                     }
                 }
                 "-f" | "-F" | "--follow" => follow = true,
-                "-q" | "--quiet" | "--silent" | "-v" | "--verbose" | "-s" | "--sleep-interval"
-                | "--pid" | "--retry" => {
+                "-q" | "--quiet" | "--silent" => quiet = true,
+                "-v" | "--verbose" => quiet = false,
+                "-s" | "--sleep-interval" | "--pid" | "--retry" => {
                     if args[i] == "-s" || args[i] == "--sleep-interval" || args[i] == "--pid" {
                         if i + 1 < args.len() {
                             i += 1;
@@ -67,6 +82,35 @@ impl Shell {
                         char_count = Some(val.parse().unwrap_or(0));
                     }
                 }
+                // `tail -N` shorthand for `-n N` (e.g. `-1`, `-20`); `-Nf`/`-Nq`/`-Nv`.
+                arg if arg.len() > 1
+                    && arg.starts_with('-')
+                    && arg.as_bytes()[1].is_ascii_digit() =>
+                {
+                    let digits: String = arg[1..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
+                    lines_count = digits.parse().unwrap_or(10);
+                    let rest = &arg[1 + digits.len()..];
+                    if rest.contains('f') || rest.contains('F') {
+                        follow = true;
+                    }
+                    if rest.contains('q') {
+                        quiet = true;
+                    }
+                    if rest.contains('v') {
+                        quiet = false;
+                    }
+                }
+                // `tail +N` shorthand for `-n +N`.
+                arg if arg.len() > 1
+                    && arg.starts_with('+')
+                    && arg.as_bytes()[1].is_ascii_digit() =>
+                {
+                    from_start = true;
+                    lines_count = arg[1..].parse().unwrap_or(10);
+                }
                 arg if !arg.starts_with('-') => files.push(arg.to_string()),
                 _ => {}
             }
@@ -75,7 +119,7 @@ impl Shell {
 
         // Byte mode: `tail -c N` / `-c +N` / `-c -N`.
         if let Some(cn) = char_count {
-            return self.tail_bytes(files, stdin, cn, from_start);
+            return self.tail_bytes(files, stdin, cn, from_start, quiet);
         }
 
         let count = if lines_count < 0 {
@@ -88,23 +132,18 @@ impl Shell {
             match stdin {
                 Some(input) => {
                     let lines: Vec<&str> = input.lines().collect();
-                    let output = if from_start {
-                        let start = (count.saturating_sub(1)).min(lines.len());
-                        lines[start..].join("\n")
+                    let start = if from_start {
+                        (count.saturating_sub(1)).min(lines.len())
+                    } else if lines.len() > count {
+                        lines.len() - count
                     } else {
-                        let start = if lines.len() > count {
-                            lines.len() - count
-                        } else {
-                            0
-                        };
-                        lines[start..].join("\n")
+                        0
                     };
+                    // Each emitted line is newline-terminated (GNU tail).
                     let mut result = String::new();
-                    if !output.is_empty() {
-                        result.push_str(&output);
-                    }
-                    if output.ends_with('\n') || output.is_empty() {
-                        return CommandOutput::success(result);
+                    for line in &lines[start..] {
+                        result.push_str(line);
+                        result.push('\n');
                     }
                     return CommandOutput::success(result);
                 }
@@ -114,7 +153,7 @@ impl Shell {
 
         // If follow mode is off, read once and return.
         if !follow {
-            return self.tail_read_files(&files, count, from_start);
+            return self.tail_read_files(&files, count, from_start, quiet);
         }
 
         // ── follow mode ──────────────────────────────────────────────
@@ -122,13 +161,17 @@ impl Shell {
         let mut output = String::new();
 
         // Read initial content.
-        match self.vfs.read_to_string(file, &self.cwd) {
+        match self.read_text_lossy(file) {
             Ok(content) => {
                 let lines: Vec<&str> = content.lines().collect();
                 let start = if from_start {
                     (count.saturating_sub(1)).min(lines.len())
                 } else {
-                    if lines.len() > count { lines.len() - count } else { 0 }
+                    if lines.len() > count {
+                        lines.len() - count
+                    } else {
+                        0
+                    }
                 };
                 for &line in &lines[start..] {
                     output.push_str(line);
@@ -161,7 +204,7 @@ impl Shell {
         while Instant::now() < deadline {
             std::thread::sleep(poll_interval);
 
-            match self.vfs.read_to_string(file, &self.cwd) {
+            match self.read_text_lossy(file) {
                 Ok(content) => {
                     let lines: Vec<&str> = content.lines().collect();
                     let mut current = String::new();
@@ -189,9 +232,10 @@ impl Shell {
         stdin: Option<&str>,
         count: i64,
         from_start: bool,
+        quiet: bool,
     ) -> CommandOutput {
-        let slice_bytes = |content: &str| -> String {
-            let bytes = content.as_bytes();
+        let slice_bytes = |content: &[u8]| -> String {
+            let bytes = content;
             if from_start {
                 // `-c +N`: from the (N-1)-th byte (0-based) to the end.
                 let start = (count.saturating_sub(1)).max(0) as usize;
@@ -204,7 +248,7 @@ impl Shell {
                 // `-c N`: last N bytes.
                 let n = count as usize;
                 if n >= bytes.len() {
-                    content.to_string()
+                    String::from_utf8_lossy(bytes).to_string()
                 } else {
                     String::from_utf8_lossy(&bytes[bytes.len() - n..]).to_string()
                 }
@@ -221,35 +265,37 @@ impl Shell {
 
         if files.is_empty() {
             match stdin {
-                Some(input) => return CommandOutput::success(slice_bytes(input)),
-                None => {
-                    return CommandOutput::error("tail: missing file operand\n".to_string(), 1)
-                }
+                Some(input) => return CommandOutput::success(slice_bytes(input.as_bytes())),
+                None => return CommandOutput::error("tail: missing file operand\n".to_string(), 1),
             }
         }
 
         let mut output = String::new();
         for file in &files {
-            if files.len() > 1 {
+            if files.len() > 1 && !quiet {
                 output.push_str(&format!("==> {} <==\n", file));
             }
-            match self.vfs.read_to_string(file, &self.cwd) {
+            match self.read_bytes(file) {
                 Ok(content) => output.push_str(&slice_bytes(&content)),
-                Err(e) => {
-                    return CommandOutput::error(format!("tail: {}: {}\n", file, e), 1)
-                }
+                Err(e) => return CommandOutput::error(format!("tail: {}: {}\n", file, e), 1),
             }
         }
         CommandOutput::success(output)
     }
 
-    fn tail_read_files(&self, files: &[String], count: usize, from_start: bool) -> CommandOutput {
+    fn tail_read_files(
+        &self,
+        files: &[String],
+        count: usize,
+        from_start: bool,
+        quiet: bool,
+    ) -> CommandOutput {
         let mut output = String::new();
         for file in files {
-            if files.len() > 1 {
+            if files.len() > 1 && !quiet {
                 output.push_str(&format!("==> {} <==\n", file));
             }
-            match self.vfs.read_to_string(file, &self.cwd) {
+            match self.read_text_lossy(file) {
                 Ok(content) => {
                     let lines: Vec<&str> = content.lines().collect();
                     if from_start {
@@ -292,8 +338,8 @@ mod tests {
 
     fn setup_vfs() -> Vfs {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("fastshell_tail_test_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("fastshell_tail_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Vfs::new(dir).unwrap()
     }
@@ -341,8 +387,7 @@ mod tests {
         let vfs2 = vfs;
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(400));
-            vfs2
-                .write("follow.txt", "/", "line1\nline2\nline3\n")
+            vfs2.write("follow.txt", "/", "line1\nline2\nline3\n")
                 .unwrap();
         });
 

@@ -81,7 +81,13 @@ impl Shell {
             paths.push(".".to_string());
         }
 
-        let fmt_size = |sz: u64| if human { human_size(sz) } else { sz.to_string() };
+        let fmt_size = |sz: u64| {
+            if human {
+                human_size(sz)
+            } else {
+                sz.to_string()
+            }
+        };
         let mut output = String::new();
         let mut total: u64 = 0;
 
@@ -141,7 +147,13 @@ impl Shell {
                 } else {
                     0
                 };
-                let fmt = |v: u64| if human { human_size(v) } else { format!("{}", v / 1024) };
+                let fmt = |v: u64| {
+                    if human {
+                        human_size(v)
+                    } else {
+                        format!("{}", v / 1024)
+                    }
+                };
                 output.push_str(&format!(
                     "fastshell     {:>10} {:>10} {:>10} {:>3}% {}\n",
                     fmt(total),
@@ -213,7 +225,9 @@ impl Shell {
                             avail / 4096,
                         ));
                     }
-                    None => output.push_str(&format!("stat: {}: cannot read filesystem stats\n", file)),
+                    None => {
+                        output.push_str(&format!("stat: {}: cannot read filesystem stats\n", file))
+                    }
                 }
             }
             return CommandOutput::success(output);
@@ -232,7 +246,7 @@ impl Shell {
 
                 match std::fs::symlink_metadata(&resolved) {
                     Ok(meta) => {
-                        output.push_str(&format_stat(&resolved, &meta, fmt));
+                        output.push_str(&format_stat(&resolved, &meta, fmt, file));
                     }
                     Err(e) => {
                         output.push_str(&format!("stat: {}: {}\n", file, e));
@@ -302,7 +316,12 @@ impl Shell {
     }
 }
 
-fn format_stat(path: &std::path::Path, meta: &std::fs::Metadata, fmt: &str) -> String {
+fn format_stat(
+    path: &std::path::Path,
+    meta: &std::fs::Metadata,
+    fmt: &str,
+    display: &str,
+) -> String {
     let ftype_str = if meta.is_dir() {
         "directory"
     } else if meta.is_symlink() {
@@ -366,10 +385,9 @@ fn format_stat(path: &std::path::Path, meta: &std::fs::Metadata, fmt: &str) -> S
         )
     };
 
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    // `%n` echoes the path as the user gave it (GNU), not just the basename.
+    let _ = path;
+    let filename = display.to_string();
 
     let mut result = fmt.to_string();
     result = result.replace("%n", &filename);
@@ -405,9 +423,8 @@ fn du_list(
 ) -> u64 {
     if path.is_file() {
         let sz = path.metadata().map(|m| m.len()).unwrap_or(0);
-        if all_files {
-            out.push((sz, rel.to_string()));
-        }
+        // A file ARGUMENT is always reported (GNU `du FILE`), independent of -a.
+        out.push((sz, rel.to_string()));
         return sz;
     }
 

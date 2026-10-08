@@ -77,7 +77,11 @@ impl Shell {
             chars1.truncate(chars2.len());
         }
 
-        let squeeze_chars: &[char] = if squeeze { &chars1 } else { &[] };
+        // POSIX: `tr -s SET1 SET2` squeezes characters in SET2 (the translated
+        // set); with only SET1 given it squeezes SET1. Previously it always
+        // squeezed SET1, so `tr -s ' ' '_'` never collapsed underscores.
+        let squeeze_set: &[char] = if !chars2.is_empty() { &chars2 } else { &chars1 };
+        let squeeze_chars: &[char] = if squeeze { squeeze_set } else { &[] };
 
         let mut output = String::new();
         for ch in input.chars() {
@@ -219,7 +223,11 @@ mod tests {
 
     fn mk_shell() -> Shell {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("fastshell_test_{}_{}", std::process::id(), uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "fastshell_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let _ = fs::remove_dir_all(&dir);
         let vfs = Vfs::new(dir).unwrap();
         Shell::new(vfs)
