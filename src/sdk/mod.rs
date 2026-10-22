@@ -587,6 +587,93 @@ impl Fastshell {
         }
     }
 
+    /// Dispatch a Mobile Use (`ui.*`) call to the registered host plugin.
+    ///
+    /// This is the bridge aacode-rs uses for its read-only `ui_*` tools. It is
+    /// intentionally generic (JSON in/out) so the host can implement the
+    /// backend (Accessibility / Shizuku / Root) without fastshell depending on
+    /// Android.
+    pub fn ui_call(
+        &self,
+        method: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use crate::sdk::plugin::{UiAction, UiGesture, UiLimits, UiProgress, UiTarget};
+        let guard = self.plugin_ref.lock().map_err(|e| e.to_string())?;
+        let plugin = guard
+            .as_ref()
+            .ok_or_else(|| "mobile use unavailable: no host plugin registered".to_string())?;
+        let target: UiTarget = args
+            .get("target")
+            .cloned()
+            .map(|v| serde_json::from_value(v).unwrap_or_default())
+            .unwrap_or_default();
+        match method {
+            "ui.backends" => plugin
+                .ui_backends()
+                .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+            "ui.list_windows" => plugin
+                .ui_list_windows()
+                .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+            "ui.snapshot" => {
+                let limits: UiLimits = args
+                    .get("limits")
+                    .cloned()
+                    .map(|v| serde_json::from_value(v).unwrap_or_default())
+                    .unwrap_or_default();
+                plugin
+                    .ui_snapshot(&target, &limits)
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+            }
+            "ui.find" => {
+                let selector = args.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+                plugin
+                    .ui_find(&target, selector, limit)
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+            }
+            "ui.act" => {
+                let action: UiAction =
+                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+                plugin
+                    .ui_act(&action)
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+            }
+            "ui.gesture" => {
+                let gesture: UiGesture =
+                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+                plugin
+                    .ui_gesture(&gesture)
+                    .map(|_| serde_json::json!({"ok": true}))
+            }
+            "ui.screenshot" => plugin
+                .ui_screenshot(&target)
+                .map(|b64| serde_json::json!({"ok": true, "data_b64": b64})),
+            "ui.wait" => {
+                let selector = args.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+                let present = args
+                    .get("present")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let timeout = args
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5000);
+                plugin
+                    .ui_wait(&target, selector, present, timeout)
+                    .map(|p| serde_json::json!({"ok": true, "present": p}))
+            }
+            "ui.set_progress" => {
+                let progress: UiProgress =
+                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+                plugin
+                    .ui_set_progress(&progress)
+                    .map(|_| serde_json::json!({"ok": true}))
+            }
+            _ => Err(format!("unknown ui method: {method}")),
+        }
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -667,6 +754,15 @@ mod tests {
     fn test_init() {
         let sdk = setup_sdk();
         assert!(sdk.is_initialized());
+    }
+
+    #[test]
+    fn test_ui_call_without_plugin_reports_unavailable() {
+        let sdk = setup_sdk();
+        let err = sdk
+            .ui_call("ui.backends", &serde_json::json!({}))
+            .unwrap_err();
+        assert!(err.contains("no host plugin"), "err={err}");
     }
 
     #[test]

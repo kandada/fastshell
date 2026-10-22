@@ -101,6 +101,16 @@ extern char *aacode_list_sessions(const char *project_path);
 extern char *aacode_get_session_messages(const char *project_path, const char *session_id);
 extern void aacode_free_string(char *ptr);
 
+/* Interactive terminal (PTY) C ABI. Stubs exist even without the `pty`
+ * feature, so these symbols are always safe to link. */
+extern char *aacode_terminal_open(const char *shell, const char *cwd,
+                                  unsigned short cols, unsigned short rows);
+extern char *aacode_terminal_write(const char *id, const unsigned char *data, size_t len);
+extern char *aacode_terminal_read(const char *id, unsigned long long cursor, size_t max_bytes);
+extern char *aacode_terminal_resize(const char *id, unsigned short cols, unsigned short rows);
+extern char *aacode_terminal_close(const char *id);
+extern char *aacode_terminal_list(void);
+
 /* ── device capability callback (host → phone features) ────────────── */
 
 typedef char *(*fastshell_device_callback)(const char *method, const char *args_json);
@@ -504,6 +514,83 @@ Java_com_fastshell_Sdk_nativeAgentValidateApiKey(JNIEnv *env, jclass cls, jstrin
     jstring js = utf8_to_jstring(env, result ? result : "{\"valid\":false}");
     if (result) aacode_free_string(result);
     return js;
+}
+
+/* ── terminal (PTY) JNI wrappers (com.aacode.app.bridge.TerminalBridge) ── */
+
+JNIEXPORT jstring JNICALL
+Java_com_aacode_app_bridge_TerminalBridge_nativeOpen(JNIEnv *env, jclass cls,
+                                                     jstring shell, jstring cwd,
+                                                     jint cols, jint rows) {
+    (void)cls;
+    char *s = jstring_to_utf8(env, shell);
+    char *c = jstring_to_utf8(env, cwd);
+    char *r = aacode_terminal_open(s, c, (unsigned short)cols, (unsigned short)rows);
+    jstring out = utf8_to_jstring(env, r ? r : "{\"ok\":false,\"error\":\"terminal unavailable\"}");
+    if (r) aacode_free_string(r);
+    free(s);
+    free(c);
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_aacode_app_bridge_TerminalBridge_nativeWrite(JNIEnv *env, jclass cls,
+                                                      jstring id, jbyteArray data) {
+    (void)cls;
+    char *i = jstring_to_utf8(env, id);
+    jsize len = data ? (*env)->GetArrayLength(env, data) : 0;
+    jbyte *buf = data ? (*env)->GetByteArrayElements(env, data, NULL) : NULL;
+    char *r = aacode_terminal_write(i, (const unsigned char *)buf, (size_t)len);
+    jstring out = utf8_to_jstring(env, r ? r : "{\"ok\":false,\"error\":\"terminal unavailable\"}");
+    if (r) aacode_free_string(r);
+    if (buf) (*env)->ReleaseByteArrayElements(env, data, buf, JNI_ABORT);
+    free(i);
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_aacode_app_bridge_TerminalBridge_nativeRead(JNIEnv *env, jclass cls,
+                                                     jstring id, jlong cursor,
+                                                     jint max_bytes) {
+    (void)cls;
+    char *i = jstring_to_utf8(env, id);
+    char *r = aacode_terminal_read(i, (unsigned long long)cursor, (size_t)max_bytes);
+    jstring out = utf8_to_jstring(env, r ? r : "{\"ok\":false,\"error\":\"terminal unavailable\"}");
+    if (r) aacode_free_string(r);
+    free(i);
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_aacode_app_bridge_TerminalBridge_nativeResize(JNIEnv *env, jclass cls,
+                                                       jstring id, jint cols, jint rows) {
+    (void)cls;
+    char *i = jstring_to_utf8(env, id);
+    char *r = aacode_terminal_resize(i, (unsigned short)cols, (unsigned short)rows);
+    jstring out = utf8_to_jstring(env, r ? r : "{\"ok\":false,\"error\":\"terminal unavailable\"}");
+    if (r) aacode_free_string(r);
+    free(i);
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_aacode_app_bridge_TerminalBridge_nativeClose(JNIEnv *env, jclass cls, jstring id) {
+    (void)cls;
+    char *i = jstring_to_utf8(env, id);
+    char *r = aacode_terminal_close(i);
+    jstring out = utf8_to_jstring(env, r ? r : "{\"ok\":false,\"error\":\"terminal unavailable\"}");
+    if (r) aacode_free_string(r);
+    free(i);
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_aacode_app_bridge_TerminalBridge_nativeList(JNIEnv *env, jclass cls) {
+    (void)cls;
+    char *r = aacode_terminal_list();
+    jstring out = utf8_to_jstring(env, r ? r : "{\"ok\":false,\"error\":\"terminal unavailable\"}");
+    if (r) aacode_free_string(r);
+    return out;
 }
 
 JNIEXPORT jstring JNICALL

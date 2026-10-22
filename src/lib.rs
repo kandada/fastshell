@@ -3,6 +3,7 @@
 
 pub mod bridge;
 pub mod js;
+pub mod mobile;
 pub mod python;
 #[cfg(feature = "python")]
 pub mod python_bridge;

@@ -252,6 +252,54 @@ if _fs_root:
         if hasattr(_fs_shutil, _n) and ('shutil_' + _n) not in _fs_os._fs_orig:
             _fs_os._fs_orig['shutil_' + _n] = getattr(_fs_shutil, _n)
 
+    # Canonical root (resolves Android's /data/user/0 ↔ /data/data alias and
+    # macOS /var ↔ /private/var). Best-effort: fall back to the raw root.
+    #
+    # IMPORTANT: os.lstat is patched later in this wrapper. posixpath.realpath
+    # calls os.lstat, so resolving through the patched version would re-enter
+    # _fs_resolve → realpath → lstat forever. Use the ORIGINAL lstat only for
+    # this internal canonicalization, then restore the patched one.
+    _fs_orig_lstat = _fs_os._fs_orig.get('lstat', _fs_os.lstat)
+    # Thread-local re-entrancy flag. realpath() calls os.lstat(); using the
+    # patched lstat would recurse forever. A thread-local bypass is safer than
+    # swapping os.lstat globally (other Python threads stay sandboxed).
+    try:
+        import threading as _fs_threading
+        _fs_rp_local = _fs_threading.local()
+    except Exception:
+        _fs_rp_local = None
+
+    def _fs_realpath(path):
+        if _fs_rp_local is not None:
+            _fs_rp_local.active = True
+            try:
+                return _fs_os.path.realpath(path)
+            finally:
+                _fs_rp_local.active = False
+        # Fallback for interpreters without threading.local.
+        _fs_saved_lstat = _fs_os.lstat
+        try:
+            _fs_os.lstat = _fs_orig_lstat
+            return _fs_os.path.realpath(path)
+        finally:
+            _fs_os.lstat = _fs_saved_lstat
+
+    try:
+        _fs_real_root = _fs_realpath(_fs_root)
+    except Exception:
+        _fs_real_root = _fs_root
+
+    def _fs_under_root(path, root):
+        try:
+            path = _fs_os.path.normcase(_fs_os.path.abspath(path))
+            root = _fs_os.path.normcase(_fs_os.path.abspath(root))
+        except Exception:
+            return False
+        if path == root:
+            return True
+        sep = _fs_os.sep
+        return path.startswith(root.rstrip(sep) + sep)
+
     def _fs_resolve(file):
         file = _fs_os.fspath(file)
         # Already inside the sandbox (the WRAPPER's own real cwd, host-provided
@@ -262,6 +310,17 @@ if _fs_root:
         if not _fs_os.path.isabs(file):
             file = _fs_os.path.join(_fs_os.environ.get('FASTSHELL_CWD', _fs_cwd_default), file)
         else:
+            # An absolute HOST path that reaches the sandbox through an alias
+            # (Android: /data/user/0/... while the canonical root is
+            # /data/data/...). The shell VFS already accepts this; the Python
+            # wrapper used to treat it as a virtual path and double-prefix the
+            # root. Only accept it when realpath proves it is inside the root.
+            try:
+                _fs_real = _fs_realpath(file)
+                if _fs_under_root(_fs_real, _fs_real_root):
+                    return _fs_real
+            except Exception:
+                pass
             file = file.lstrip('/')
         parts = []
         for p in file.split('/'):
@@ -309,6 +368,8 @@ if _fs_root:
     def _fs_sandboxed_stat(path, *a, **kw):
         if isinstance(path, int):
             return _fs_os._fs_orig['stat'](path, *a, **kw)
+        if _fs_rp_local is not None and getattr(_fs_rp_local, 'active', False):
+            return _fs_os._fs_orig['stat'](path, *a, **kw)
         return _fs_os._fs_orig['stat'](_fs_resolve(path), *a, **kw)
     _fs_os.stat = _fs_sandboxed_stat
 
@@ -344,6 +405,8 @@ if _fs_root:
     def _fs_sandboxed_lstat(path, *a, **kw):
         if isinstance(path, int):
             return _fs_os._fs_orig['lstat'](path, *a, **kw)
+        if _fs_rp_local is not None and getattr(_fs_rp_local, 'active', False):
+            return _fs_orig_lstat(path, *a, **kw)
         return _fs_os._fs_orig['lstat'](_fs_resolve(path), *a, **kw)
     _fs_os.lstat = _fs_sandboxed_lstat
 

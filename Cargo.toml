@@ -3,7 +3,7 @@
 
 [package]
 name = "fastshell"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 description = "Lightweight Bash + Python runtime SDK for mobile AI agents"
 license = "Apache-2.0"

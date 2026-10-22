@@ -1439,3 +1439,95 @@ fn sed_subst_print_flag() {
     assert_eq!(out(&s, "printf 'foo\\nbar\\n' | sed -n 's/o/O/p'"), "fOo\n");
     assert_eq!(out(&s, "echo aaa | sed 's/a/b/gp'"), "bbb\nbbb\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn python_accepts_host_absolute_alias_of_sandbox_root() {
+    // Android exposes the app dir as both /data/user/0/<pkg> and
+    // /data/data/<pkg>. The shell VFS accepts either spelling; the Python
+    // sandbox wrapper used to treat the alias as a virtual path and
+    // double-prefix the root. Only absolute paths that realpath proves are
+    // inside the root may take this path.
+    let s = sdk();
+    if {
+        let rt = s.runtime_ref();
+        let rt = rt.lock().unwrap();
+        !rt.python_available()
+    } {
+        return;
+    }
+
+    let root = std::path::PathBuf::from(s.vfs_root());
+    let alias = root.with_file_name(format!(
+        "{}-alias",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let _ = std::fs::remove_file(&alias);
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+
+    std::fs::write(root.join("alias.txt"), "hello").unwrap();
+    let existing = alias.join("alias.txt");
+    let code = format!(
+        "print(open({:?}).read())",
+        existing.to_string_lossy().as_ref()
+    );
+    let r = s.execute_python(&code);
+    assert!(
+        r.is_success(),
+        "alias read failed: stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
+    assert_eq!(r.stdout.trim(), "hello");
+
+    // Writing a NEW file through the alias must land inside the real root.
+    let new_file = alias.join("new.txt");
+    let code = format!(
+        "open({:?}, 'w').write('new'); print(open({:?}).read())",
+        new_file.to_string_lossy().as_ref(),
+        new_file.to_string_lossy().as_ref()
+    );
+    let r = s.execute_python(&code);
+    assert!(
+        r.is_success(),
+        "alias write failed: stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
+    assert_eq!(r.stdout.trim(), "new");
+    assert_eq!(
+        std::fs::read_to_string(root.join("new.txt")).unwrap(),
+        "new"
+    );
+
+    // Reproduce the actual session: shell redirect to the alias, then Python
+    // reads the same host-absolute path.
+    let via_shell = alias.join("via_shell.txt");
+    let (_, err, rc) = run(&s, &format!("echo hi > {}", via_shell.display()));
+    assert_eq!(rc, 0, "shell write via alias failed: {err}");
+    let code = format!(
+        "print(open({:?}).read().strip())",
+        via_shell.to_string_lossy().as_ref()
+    );
+    let r = s.execute_python(&code);
+    assert!(
+        r.is_success(),
+        "shell→python alias failed: stdout={:?} stderr={:?}",
+        r.stdout,
+        r.stderr
+    );
+    assert_eq!(r.stdout.trim(), "hi");
+
+    // Absolute paths outside the root are still confined to it.
+    let code = r#"
+try:
+    open('/definitely-not-in-the-sandbox/secret')
+    print('LEAK')
+except FileNotFoundError:
+    print('blocked')
+"#;
+    let out = s.execute_python(code);
+    assert_eq!(out.stdout.trim(), "blocked", "stderr={:?}", out.stderr);
+
+    let _ = std::fs::remove_file(&alias);
+}

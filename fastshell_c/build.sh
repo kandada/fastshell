@@ -33,7 +33,7 @@ echo "=== [1/2] cargo build staticlib (${TARGET}) ==="
 # Compile aacode-rs which INCLUDES fastshell as a dependency. This produces a
 # single staticlib containing both fastshell's sandbox engine AND aacode-rs's
 # native agent C ABI symbols (aacode_run_task, aacode_cancel, ...).
-cargo build --release --target "${TARGET}" --lib -p aacode-rs --features browser
+cargo build --release --target "${TARGET}" --lib -p aacode-rs --features browser,pty
 
 STATICLIB="target/${TARGET}/release/libaacode_rs.a"
 mkdir -p "${CDIST}"

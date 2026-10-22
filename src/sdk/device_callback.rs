@@ -524,6 +524,97 @@ impl DevicePlugin for CallbackDevicePlugin {
     fn render_html(&self, html: &str, output_path: &str) -> Result<(), String> {
         self.call_unit("render_html", json!({"html": html, "path": output_path}))
     }
+
+    // ── Mobile Use (host implements via Accessibility/Shizuku/Root) ─────
+    fn ui_backends(&self) -> Result<Vec<String>, String> {
+        let v = self.call("ui.backends", json!({}))?;
+        let arr = v
+            .as_array()
+            .cloned()
+            .or_else(|| v.get("backends").and_then(|x| x.as_array()).cloned())
+            .unwrap_or_default();
+        Ok(arr
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect())
+    }
+
+    fn ui_list_windows(&self) -> Result<Vec<UiWindow>, String> {
+        let v = self.call("ui.list_windows", json!({}))?;
+        parse_list(&v, "windows")
+    }
+
+    fn ui_snapshot(&self, target: &UiTarget, limits: &UiLimits) -> Result<UiSnapshot, String> {
+        let v = self.call("ui.snapshot", json!({ "target": target, "limits": limits }))?;
+        serde_json::from_value(v).map_err(|e| format!("ui_snapshot: {e}"))
+    }
+
+    fn ui_find(
+        &self,
+        target: &UiTarget,
+        selector: &str,
+        limit: u32,
+    ) -> Result<Vec<UiNode>, String> {
+        let v = self.call(
+            "ui.find",
+            json!({ "target": target, "selector": selector, "limit": limit }),
+        )?;
+        parse_list(&v, "nodes")
+    }
+
+    fn ui_act(&self, action: &UiAction) -> Result<UiActionResult, String> {
+        let args = serde_json::to_value(action).map_err(|e| e.to_string())?;
+        let v = self.call("ui.act", args)?;
+        serde_json::from_value(v).map_err(|e| format!("ui_act: {e}"))
+    }
+
+    fn ui_gesture(&self, gesture: &UiGesture) -> Result<(), String> {
+        let args = serde_json::to_value(gesture).map_err(|e| e.to_string())?;
+        self.call_unit("ui.gesture", args)
+    }
+
+    fn ui_screenshot(&self, target: &UiTarget) -> Result<String, String> {
+        let v = self.call("ui.screenshot", json!({ "target": target }))?;
+        Ok(Self::str_field(&v, &["data_b64", "base64", "png_b64"]))
+    }
+
+    fn ui_wait(
+        &self,
+        target: &UiTarget,
+        selector: &str,
+        present: bool,
+        timeout_ms: u64,
+    ) -> Result<bool, String> {
+        let v = self.call(
+            "ui.wait",
+            json!({
+                "target": target,
+                "selector": selector,
+                "present": present,
+                "timeout_ms": timeout_ms,
+            }),
+        )?;
+        Ok(v.get("present")
+            .or_else(|| v.get("found"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false))
+    }
+
+    fn ui_set_progress(&self, progress: &UiProgress) -> Result<(), String> {
+        let args = serde_json::to_value(progress).map_err(|e| e.to_string())?;
+        self.call_unit("ui.set_progress", args)
+    }
+}
+
+fn parse_list<T: serde::de::DeserializeOwned>(v: &Value, key: &str) -> Result<Vec<T>, String> {
+    let arr = v
+        .as_array()
+        .cloned()
+        .or_else(|| v.get(key).and_then(|x| x.as_array()).cloned())
+        .unwrap_or_default();
+    arr.into_iter()
+        .map(|x| serde_json::from_value(x).map_err(|e| e.to_string()))
+        .collect()
 }
 
 fn parse_contact(v: &Value) -> Contact {
@@ -556,6 +647,16 @@ mod tests {
             "get_clipboard" => r#"{"ok":true,"text":"hello"}"#,
             "vibrate" => r#"{"ok":true,"vibrated":200}"#,
             "take_photo" => r#"{"ok":false,"error":"no camera"}"#,
+            "ui.backends" => r#"{"ok":true,"backends":["accessibility","shizuku"]}"#,
+            "ui.list_windows" => {
+                r#"{"ok":true,"windows":[{"package":"com.x","window_id":1,"display_id":0,"width":1080,"height":2400,"orientation":1,"focused":true,"tree_revision":5,"backend":"accessibility"}]}"#
+            }
+            "ui.snapshot" => {
+                r#"{"ok":true,"backend":"accessibility","package":"com.x","window_id":1,"display_id":0,"width":1080,"height":2400,"orientation":1,"tree_revision":5,"nodes":[{"node_ref":"n1","role":"button","text":"Go","view_id":"go","bounds":{"x":1,"y":2,"width":3,"height":4},"clickable":true,"enabled":true,"actions":["click"]}],"truncated":false}"#
+            }
+            "ui.act" => r#"{"ok":true,"backend":"accessibility","status":"success"}"#,
+            "ui.wait" => r#"{"ok":true,"present":true}"#,
+            "ui.screenshot" => r#"{"ok":true,"data_b64":"iVBORw0KGgo="}"#,
             _ => r#"{"ok":true}"#,
         };
         let c = CString::new(resp).unwrap();
@@ -581,6 +682,44 @@ mod tests {
     fn unit_ok() {
         let p = CallbackDevicePlugin::new(fake_cb);
         assert!(p.vibrate(200).is_ok());
+    }
+
+    #[test]
+    fn ui_mobile_use_roundtrip() {
+        let p = CallbackDevicePlugin::new(fake_cb);
+        assert_eq!(
+            p.ui_backends().unwrap(),
+            vec!["accessibility".to_string(), "shizuku".to_string()]
+        );
+        let wins = p.ui_list_windows().unwrap();
+        assert_eq!(wins.len(), 1);
+        assert_eq!(wins[0].package, "com.x");
+
+        let snap = p
+            .ui_snapshot(&UiTarget::default(), &UiLimits::default())
+            .unwrap();
+        assert_eq!(snap.backend, "accessibility");
+        assert_eq!(snap.nodes.len(), 1);
+        assert_eq!(snap.nodes[0].text, "Go");
+
+        let act = p
+            .ui_act(&UiAction {
+                action: "click".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(act.ok);
+        assert_eq!(act.status, "success");
+
+        assert!(p
+            .ui_wait(&UiTarget::default(), "role=button", true, 1000)
+            .unwrap());
+        assert_eq!(
+            p.ui_screenshot(&UiTarget::default()).unwrap(),
+            "iVBORw0KGgo="
+        );
+        assert!(p.ui_gesture(&UiGesture::default()).is_ok());
+        assert!(p.ui_set_progress(&UiProgress::default()).is_ok());
     }
 
     #[test]

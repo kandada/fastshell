@@ -77,6 +77,149 @@ pub struct DeviceInfo {
     pub screen_height: u32,
 }
 
+// ── Mobile Use (UI automation) contract ─────────────────────────────────────
+//
+// The host implements these with Accessibility / Shizuku / Root and registers
+// the plugin via the existing device callback bridge. fastshell only defines
+// the contract; it never holds Android permissions.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiLimits {
+    pub max_depth: u32,
+    pub max_nodes: u32,
+    pub max_text_len: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiNode {
+    /// Host-issued, opaque reference for this snapshot only.
+    pub node_ref: String,
+    pub role: String,
+    pub text: String,
+    pub description: String,
+    pub view_id: String,
+    pub bounds: UiBounds,
+    pub clickable: bool,
+    pub enabled: bool,
+    pub checked: Option<bool>,
+    pub selected: bool,
+    /// Password/OTP/etc. — hosts must redact text/description for these.
+    pub sensitive: bool,
+    pub actions: Vec<String>,
+}
+
+/// Stable node identity used to detect a stale target before acting.
+///
+/// `tree_revision` is informational only: unrelated tree changes must not
+/// reject an otherwise-identical node (see `mobile::fingerprint_matches`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiFingerprint {
+    pub package: String,
+    pub window_id: i64,
+    pub display_id: i32,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: i32,
+    pub tree_revision: u64,
+    pub view_id: String,
+    pub text: String,
+    pub description: String,
+    pub bounds: UiBounds,
+    pub enabled: bool,
+    pub checked: Option<bool>,
+    pub actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiWindow {
+    pub package: String,
+    pub window_id: i64,
+    pub display_id: i32,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: i32,
+    pub focused: bool,
+    pub tree_revision: u64,
+    pub backend: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiSnapshot {
+    pub backend: String,
+    pub package: String,
+    pub window_id: i64,
+    pub display_id: i32,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: i32,
+    pub tree_revision: u64,
+    pub limits: UiLimits,
+    pub nodes: Vec<UiNode>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiTarget {
+    pub package: Option<String>,
+    pub window_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiAction {
+    pub target: UiTarget,
+    pub node_ref: String,
+    pub fingerprint: UiFingerprint,
+    /// click | long_click | set_text | ime_enter | scroll
+    pub action: String,
+    pub text: Option<String>,
+    pub value: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiGesture {
+    pub target: UiTarget,
+    pub frame: UiFingerprint,
+    pub points: Vec<(f64, f64)>,
+    pub duration_ms: u64,
+    pub fingers: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiProgress {
+    pub target: UiTarget,
+    pub node_ref: String,
+    pub fingerprint: UiFingerprint,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiActionResult {
+    pub ok: bool,
+    pub backend: String,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub message: Option<String>,
+}
+
 /// Trait for device-specific capabilities.
 /// Host app implements this and registers with fastshell.
 /// fastshell never holds system permissions — the host owns all authorization.
@@ -156,5 +299,50 @@ pub trait DevicePlugin: Send {
     fn render_html(&self, html: &str, output_path: &str) -> Result<(), String> {
         let _ = (html, output_path);
         Err("render_html: no WebView backend registered by host app".to_string())
+    }
+
+    // ── Mobile Use (UI automation) ──────────────────────────────────────
+    // All default to "not supported" so existing hosts keep compiling and
+    // fail cleanly. The host owns Accessibility/Shizuku/Root authorization.
+
+    /// Ready backends in priority order, e.g. `["root","shizuku","accessibility"]`.
+    fn ui_backends(&self) -> Result<Vec<String>, String> {
+        Err("ui_backends: not supported by host".to_string())
+    }
+    fn ui_list_windows(&self) -> Result<Vec<UiWindow>, String> {
+        Err("ui_list_windows: not supported by host".to_string())
+    }
+    fn ui_snapshot(&self, _target: &UiTarget, _limits: &UiLimits) -> Result<UiSnapshot, String> {
+        Err("ui_snapshot: not supported by host".to_string())
+    }
+    fn ui_find(
+        &self,
+        _target: &UiTarget,
+        _selector: &str,
+        _limit: u32,
+    ) -> Result<Vec<UiNode>, String> {
+        Err("ui_find: not supported by host".to_string())
+    }
+    fn ui_act(&self, _action: &UiAction) -> Result<UiActionResult, String> {
+        Err("ui_act: not supported by host".to_string())
+    }
+    fn ui_gesture(&self, _gesture: &UiGesture) -> Result<(), String> {
+        Err("ui_gesture: not supported by host".to_string())
+    }
+    /// Base64-encoded PNG/JPEG bytes (host captures the screen/window).
+    fn ui_screenshot(&self, _target: &UiTarget) -> Result<String, String> {
+        Err("ui_screenshot: not supported by host".to_string())
+    }
+    fn ui_wait(
+        &self,
+        _target: &UiTarget,
+        _selector: &str,
+        _present: bool,
+        _timeout_ms: u64,
+    ) -> Result<bool, String> {
+        Err("ui_wait: not supported by host".to_string())
+    }
+    fn ui_set_progress(&self, _progress: &UiProgress) -> Result<(), String> {
+        Err("ui_set_progress: not supported by host".to_string())
     }
 }
