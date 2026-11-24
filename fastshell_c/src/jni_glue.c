@@ -99,6 +99,9 @@ extern void aacode_task_free(void *handle);
 extern char *aacode_validate_api_key(const char *config_json);
 extern char *aacode_list_sessions(const char *project_path);
 extern char *aacode_get_session_messages(const char *project_path, const char *session_id);
+extern char *aacode_jobs_list(const char *project_path);
+extern char *aacode_jobs_output(const char *project_path, const char *job_id);
+extern char *aacode_jobs_cancel(const char *project_path, const char *job_id);
 extern void aacode_free_string(char *ptr);
 
 /* Interactive terminal (PTY) C ABI. Stubs exist even without the `pty`
@@ -600,6 +603,41 @@ Java_com_fastshell_Sdk_nativeAgentListSessions(JNIEnv *env, jclass cls, jstring 
     char *result = aacode_list_sessions(pp);
     free(pp);
     jstring js = utf8_to_jstring(env, result ? result : "[]");
+    if (result) aacode_free_string(result);
+    return js;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_fastshell_Sdk_nativeAgentListJobs(JNIEnv *env, jclass cls, jstring project_path) {
+    (void)cls;
+    char *pp = jstring_to_utf8(env, project_path);
+    char *result = aacode_jobs_list(pp);
+    free(pp);
+    jstring js = utf8_to_jstring(env, result ? result : "{\"success\":false}");
+    if (result) aacode_free_string(result);
+    return js;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_fastshell_Sdk_nativeAgentJobOutput(JNIEnv *env, jclass cls, jstring project_path, jstring job_id) {
+    (void)cls;
+    char *pp = jstring_to_utf8(env, project_path);
+    char *id = jstring_to_utf8(env, job_id);
+    char *result = aacode_jobs_output(pp, id);
+    free(pp); free(id);
+    jstring js = utf8_to_jstring(env, result ? result : "{\"success\":false}");
+    if (result) aacode_free_string(result);
+    return js;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_fastshell_Sdk_nativeAgentJobCancel(JNIEnv *env, jclass cls, jstring project_path, jstring job_id) {
+    (void)cls;
+    char *pp = jstring_to_utf8(env, project_path);
+    char *id = jstring_to_utf8(env, job_id);
+    char *result = aacode_jobs_cancel(pp, id);
+    free(pp); free(id);
+    jstring js = utf8_to_jstring(env, result ? result : "{\"success\":false}");
     if (result) aacode_free_string(result);
     return js;
 }
