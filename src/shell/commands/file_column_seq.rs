@@ -400,7 +400,8 @@ fn detect_type(data: &[u8], mime: bool) -> String {
         .iter()
         .filter(|&&b| b >= 0x20 || b == b'\n' || b == b'\r' || b == b'\t')
         .count();
-    if text_chars as f64 / data.len() as f64 > 0.95 {
+    let is_utf8 = std::str::from_utf8(data).is_ok();
+    if text_chars as f64 / data.len() as f64 > 0.95 && is_utf8 {
         if data.starts_with(b"{") || data.starts_with(b"[") {
             return if mime {
                 "application/json; charset=utf-8".to_string()
@@ -429,8 +430,10 @@ fn detect_type(data: &[u8], mime: bool) -> String {
         }
         return if mime {
             "text/plain; charset=utf-8".to_string()
-        } else {
+        } else if data.is_ascii() {
             "ASCII text".to_string()
+        } else {
+            "Unicode text, UTF-8 text".to_string()
         };
     }
 
@@ -629,6 +632,18 @@ mod tests {
         let data = b"Hello, world!\nThis is a test.\n";
         assert_eq!(detect_type(data, false), "ASCII text");
         assert_eq!(detect_type(data, true), "text/plain; charset=utf-8");
+    }
+
+    #[test]
+    fn test_detect_utf8_text() {
+        let data = "中文标题\nemoji 😀\n".as_bytes();
+        assert_eq!(detect_type(data, false), "Unicode text, UTF-8 text");
+        assert_eq!(detect_type(data, true), "text/plain; charset=utf-8");
+    }
+
+    #[test]
+    fn test_detect_invalid_utf8_is_data() {
+        assert_eq!(detect_type(&[0xff, 0xfe, 0x41], false), "data");
     }
 
     #[test]

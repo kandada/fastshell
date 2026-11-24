@@ -73,7 +73,15 @@ fn evaluate_test(args: &[&str], shell: &Shell) -> Option<bool> {
     }
 
     match args.len() {
-        1 => Some(!args[0].is_empty()),
+        1 => {
+            // A bare unary operator has a missing operand and is an error
+            // (GNU test exits 2), not a truthy string.
+            if args[0].starts_with('-') {
+                None
+            } else {
+                Some(!args[0].is_empty())
+            }
+        }
         2 => match args[0] {
             "-z" => Some(args[1].is_empty()),
             "-n" => Some(!args[1].is_empty()),

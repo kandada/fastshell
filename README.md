@@ -33,7 +33,7 @@ Mobile platforms lack a native Bash environment. AI coding agents rely on shell 
 
 ```toml
 [dependencies]
-fastshell = "0.3.4"
+fastshell = "0.3.8"
 ```
 
 ## Quick Start

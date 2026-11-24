@@ -376,6 +376,76 @@ mod tests {
     }
 
     #[test]
+    fn every_mapped_long_option_rewrites_to_short_form() {
+        let commands = [
+            "cp", "mv", "rm", "mkdir", "uniq", "wc", "cut", "chmod", "du", "df", "tail", "sort",
+            "tr", "stat", "date", "grep", "xargs", "ln", "ls", "sed", "awk", "cat", "diff",
+        ];
+        for cmd in commands {
+            for (long, short) in long_options(cmd) {
+                let (out_cmd, out_args) = normalize(cmd, &[long]);
+                assert_eq!(out_cmd, cmd);
+                assert_eq!(out_args, vec![*short], "mapping {cmd} {long}");
+                let with_value = format!("{long}=value");
+                let (_, out_args) = normalize(cmd, &[with_value.as_str()]);
+                assert_eq!(
+                    out_args,
+                    vec![*short, "value"],
+                    "mapping {cmd} {long}=value"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_command_alias_maps_to_expected_command() {
+        let aliases = [
+            ("dir", "ls"),
+            ("copy", "cp"),
+            ("move", "mv"),
+            ("ren", "mv"),
+            ("rename", "mv"),
+            ("del", "rm"),
+            ("erase", "rm"),
+            ("md", "mkdir"),
+            ("rd", "rmdir"),
+            ("cls", "clear"),
+            ("where", "which"),
+            ("gawk", "awk"),
+            ("mawk", "awk"),
+            ("nawk", "awk"),
+            ("less", "cat"),
+            ("more", "cat"),
+            ("view", "cat"),
+            ("most", "cat"),
+            ("findstr", "grep"),
+            ("fc", "diff"),
+            ("comp", "diff"),
+            ("xcopy", "cp"),
+            ("pcre2grep", "grep"),
+            ("pcregrep", "grep"),
+            ("whereis", "which"),
+            ("pip3", "pip"),
+            ("md5", "md5sum"),
+            ("sha1", "sha1sum"),
+            ("sha256", "sha256sum"),
+            ("sha512", "sha512sum"),
+            ("uncompress", "gunzip"),
+            ("lzcat", "unxz"),
+            ("xzcat", "unxz"),
+            ("unlzma", "unxz"),
+            ("unlzcat", "unxz"),
+            ("bzcat", "bunzip2"),
+            ("zgrep", "grep"),
+            ("bzgrep", "grep"),
+            ("xzgrep", "grep"),
+        ];
+        for (alias, canonical) in aliases {
+            assert_eq!(normalize(alias, &[]).0, canonical, "alias {alias}");
+        }
+    }
+
+    #[test]
     fn head_tail_long_options() {
         let (c, a) = normalize("head", &["--lines=2", "f"]);
         assert_eq!(c, "head");

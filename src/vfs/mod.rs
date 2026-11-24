@@ -4,6 +4,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 #[derive(Debug)]
@@ -56,6 +57,9 @@ pub struct DirEntry {
 #[derive(Debug, Clone)]
 pub struct Vfs {
     root: PathBuf,
+    /// Recently written logical paths (bounded). Used only for read fallback
+    /// when a model remembers a filename but uses the wrong directory.
+    recent_writes: Arc<Mutex<Vec<String>>>,
 }
 
 impl Vfs {
@@ -65,7 +69,10 @@ impl Vfs {
         }
         let root = root.canonicalize()?;
         // (c) 2025 xiefujin <490021684@qq.com>
-        Ok(Vfs { root })
+        Ok(Vfs {
+            root,
+            recent_writes: Arc::new(Mutex::new(Vec::new())),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -105,6 +112,16 @@ impl Vfs {
     /// Build the normalized physical candidate for `path` (no confinement
     /// check yet). Shared by [`resolve`] and [`resolve_no_follow`].
     fn candidate(&self, path: &str, cwd: &str) -> PathBuf {
+        // Accept common temporary-directory aliases used by models, while
+        // keeping everything inside the sandbox root.
+        let path = if path == "/var/tmp" || path.starts_with("/var/tmp/") {
+            path.replacen("/var/tmp", "/tmp", 1)
+        } else if path == "/private/tmp" || path.starts_with("/private/tmp/") {
+            path.replacen("/private/tmp", "/tmp", 1)
+        } else {
+            path.to_string()
+        };
+        let path = path.as_str();
         let candidate = if path.starts_with('/') {
             // A leading '/' is a VFS-internal path relative to the sandbox
             // root — UNLESS the caller passed a full physical path that is
@@ -296,11 +313,57 @@ impl Vfs {
         }
     }
 
+    fn remember_write(&self, target: &Path) {
+        if let Ok(mut writes) = self.recent_writes.lock() {
+            let vpath = self.to_vpath(target);
+            writes.retain(|p| p != &vpath);
+            writes.push(vpath);
+            if writes.len() > 64 {
+                let drain = writes.len() - 64;
+                writes.drain(0..drain);
+            }
+        }
+    }
+
+    /// Resolve a read target with a safe intent fallback: if the requested
+    /// path is missing and its basename is unique among recent writes, use the
+    /// recent write. This fixes model mistakes such as writing `/tmp/gz.json`
+    /// and then reading `.aacode/gz.json` without guessing when ambiguous.
+    fn resolve_read(&self, path: &str, cwd: &str) -> Result<PathBuf> {
+        let target = self.resolve(path, cwd)?;
+        if target.exists() {
+            return Ok(target);
+        }
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if name.is_empty() {
+            return Ok(target);
+        }
+        let candidates: Vec<PathBuf> = self
+            .recent_writes
+            .lock()
+            .map(|writes| {
+                writes
+                    .iter()
+                    .filter(|p| Path::new(p).file_name().and_then(|n| n.to_str()) == Some(name))
+                    .map(|p| self.root.join(p.trim_start_matches('/')))
+                    .filter(|p| p.exists())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if candidates.len() == 1 {
+            return Ok(candidates[0].clone());
+        }
+        Ok(target)
+    }
+
     pub fn read_to_string(&self, path: &str, cwd: &str) -> Result<String> {
         if let Some(data) = self.pseudo_file(path, cwd) {
             return Ok(String::from_utf8_lossy(&data).to_string());
         }
-        let target = self.resolve(path, cwd)?;
+        let target = self.resolve_read(path, cwd)?;
         if !target.exists() {
             return Err(VfsError::NotFound(self.to_vpath(&target)));
         }
@@ -311,7 +374,7 @@ impl Vfs {
         if let Some(data) = self.pseudo_file(path, cwd) {
             return Ok(data);
         }
-        let target = self.resolve(path, cwd)?;
+        let target = self.resolve_read(path, cwd)?;
         if !target.exists() {
             return Err(VfsError::NotFound(self.to_vpath(&target)));
         }
@@ -326,6 +389,7 @@ impl Vfs {
             }
         }
         fs::write(&target, contents)?;
+        self.remember_write(&target);
         Ok(())
     }
 
@@ -337,6 +401,7 @@ impl Vfs {
             }
         }
         fs::write(&target, contents)?;
+        self.remember_write(&target);
         Ok(())
     }
 
@@ -423,6 +488,7 @@ impl Vfs {
             }
             fs::copy(&src, &dst)?;
         }
+        self.remember_write(&dst);
         Ok(())
     }
 
@@ -438,6 +504,7 @@ impl Vfs {
             }
         }
         fs::rename(&src, &dst)?;
+        self.remember_write(&dst);
         Ok(())
     }
 
@@ -514,6 +581,129 @@ mod tests {
         let resolved = vfs.resolve("/home/user", "").unwrap();
         assert!(resolved.starts_with(vfs.root()));
         assert!(resolved.ends_with("home/user"));
+    }
+
+    #[test]
+    fn test_tmp_aliases_resolve_inside_sandbox() {
+        let vfs = setup_vfs();
+        let tmp = vfs.resolve("/tmp/a.txt", "").unwrap();
+        let var_tmp = vfs.resolve("/var/tmp/a.txt", "").unwrap();
+        let private_tmp = vfs.resolve("/private/tmp/a.txt", "").unwrap();
+        assert_eq!(tmp, var_tmp);
+        assert_eq!(tmp, private_tmp);
+        assert!(tmp.starts_with(vfs.root()));
+    }
+
+    #[test]
+    fn read_falls_back_to_unique_recent_write_by_basename() {
+        let vfs = setup_vfs();
+        vfs.write("/tmp/gz.json", "", "weather").unwrap();
+        let got = vfs
+            .read_to_string(".aacode/gz.json", "/projects/test")
+            .unwrap();
+        assert_eq!(got, "weather");
+    }
+
+    #[test]
+    fn read_does_not_guess_when_basename_is_ambiguous() {
+        let vfs = setup_vfs();
+        vfs.write("/tmp/gz.json", "", "one").unwrap();
+        vfs.write("/tmp/other/gz.json", "", "two").unwrap();
+        assert!(vfs
+            .read_to_string(".aacode/gz.json", "/projects/test")
+            .is_err());
+    }
+
+    #[test]
+    fn tmp_alias_write_is_visible_through_all_aliases() {
+        let vfs = setup_vfs();
+        vfs.write("/var/tmp/a.txt", "", "a").unwrap();
+        vfs.write("/private/tmp/b.txt", "", "b").unwrap();
+        vfs.write("/tmp/c.txt", "", "c").unwrap();
+        assert_eq!(vfs.read_to_string("/tmp/a.txt", "").unwrap(), "a");
+        assert_eq!(vfs.read_to_string("/private/tmp/a.txt", "").unwrap(), "a");
+        assert_eq!(vfs.read_to_string("/var/tmp/b.txt", "").unwrap(), "b");
+        assert_eq!(vfs.read_to_string("/tmp/b.txt", "").unwrap(), "b");
+        assert_eq!(vfs.read_to_string("/var/tmp/c.txt", "").unwrap(), "c");
+    }
+
+    #[test]
+    fn copy_destination_is_tracked_for_read_fallback() {
+        let vfs = setup_vfs();
+        vfs.write("/tmp/src.json", "", "weather").unwrap();
+        vfs.copy("/tmp/src.json", "/tmp/copied.json", "").unwrap();
+        let got = vfs
+            .read_to_string(".aacode/copied.json", "/projects/test")
+            .unwrap();
+        assert_eq!(got, "weather");
+    }
+
+    #[test]
+    fn rename_destination_is_tracked_for_read_fallback() {
+        let vfs = setup_vfs();
+        vfs.write("/tmp/src.json", "", "weather").unwrap();
+        vfs.rename("/tmp/src.json", "/tmp/moved.json", "").unwrap();
+        let got = vfs
+            .read_to_string(".aacode/moved.json", "/projects/test")
+            .unwrap();
+        assert_eq!(got, "weather");
+    }
+
+    #[test]
+    fn write_bytes_is_tracked_for_binary_read_fallback() {
+        let vfs = setup_vfs();
+        vfs.write_bytes("/tmp/blob.bin", "", &[0, 255, 1]).unwrap();
+        let got = vfs.read(".aacode/blob.bin", "/projects/test").unwrap();
+        assert_eq!(got, vec![0, 255, 1]);
+    }
+
+    #[test]
+    fn explicit_existing_read_wins_over_fallback() {
+        let vfs = setup_vfs();
+        vfs.write("/tmp/gz.json", "", "fallback").unwrap();
+        vfs.write("/projects/test/.aacode/gz.json", "", "explicit")
+            .unwrap();
+        let got = vfs
+            .read_to_string(".aacode/gz.json", "/projects/test")
+            .unwrap();
+        assert_eq!(got, "explicit");
+    }
+
+    #[test]
+    fn fallback_does_not_resurrect_deleted_file() {
+        let vfs = setup_vfs();
+        vfs.write("/tmp/gone.json", "", "gone").unwrap();
+        vfs.remove_file("/tmp/gone.json", "").unwrap();
+        assert!(vfs
+            .read_to_string(".aacode/gone.json", "/projects/test")
+            .is_err());
+    }
+
+    #[test]
+    fn fallback_uses_latest_rewrite() {
+        let vfs = setup_vfs();
+        vfs.write("/tmp/gz.json", "", "one").unwrap();
+        vfs.write("/tmp/gz.json", "", "two").unwrap();
+        let got = vfs
+            .read_to_string(".aacode/gz.json", "/projects/test")
+            .unwrap();
+        assert_eq!(got, "two");
+    }
+
+    #[test]
+    fn fallback_recent_writes_are_bounded() {
+        let vfs = setup_vfs();
+        for i in 0..80 {
+            vfs.write(&format!("/tmp/f{i}.json"), "", "x").unwrap();
+        }
+        assert!(vfs
+            .read_to_string(".aacode/f0.json", "/projects/test")
+            .is_err());
+        assert_eq!(
+            vfs.read_to_string(".aacode/f79.json", "/projects/test")
+                .unwrap(),
+            "x"
+        );
     }
 
     #[test]

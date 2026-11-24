@@ -76,7 +76,7 @@ impl Shell {
         }
 
         if files.len() < 2 {
-            return CommandOutput::error("diff: missing file operands\n".to_string(), 1);
+            return CommandOutput::error("diff: missing file operands\n".to_string(), 2);
         }
 
         let path1 = files[0];
@@ -116,11 +116,11 @@ impl Shell {
 
         let f1 = match self.read_text_lossy(path1) {
             Ok(c) => c,
-            Err(e) => return CommandOutput::error(format!("diff: {}: {}\n", path1, e), 1),
+            Err(e) => return CommandOutput::error(format!("diff: {}: {}\n", path1, e), 2),
         };
         let f2 = match self.read_text_lossy(path2) {
             Ok(c) => c,
-            Err(e) => return CommandOutput::error(format!("diff: {}: {}\n", path2, e), 1),
+            Err(e) => return CommandOutput::error(format!("diff: {}: {}\n", path2, e), 2),
         };
 
         let lines1: Vec<&str> = f1.lines().collect();

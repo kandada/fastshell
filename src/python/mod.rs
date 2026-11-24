@@ -302,6 +302,11 @@ if _fs_root:
 
     def _fs_resolve(file):
         file = _fs_os.fspath(file)
+        # Common model/tool aliases: keep temporary paths inside the sandbox.
+        if file == '/var/tmp' or file.startswith('/var/tmp/'):
+            file = '/tmp' + file[len('/var/tmp'):]
+        elif file == '/private/tmp' or file.startswith('/private/tmp/'):
+            file = '/tmp' + file[len('/private/tmp'):]
         # Already inside the sandbox (the WRAPPER's own real cwd, host-provided
         # absolute real paths, …) → return as-is. Without this the persistent
         # interpreter double-prefixes the root on the next call.

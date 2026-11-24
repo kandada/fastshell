@@ -372,6 +372,83 @@ fn e2e_subprocess_disabled_builtin_still_works() {
 // ═══════════════════════════════════════════════════════
 
 #[test]
+fn e2e_vfs_tmp_alias_and_recent_write_fallback() {
+    let sdk = setup_default();
+    let r = sdk.execute("echo weather > /var/tmp/weather.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert_eq!(
+        sdk.execute("cat /tmp/weather.json").stdout.trim(),
+        "weather"
+    );
+    assert_eq!(
+        sdk.execute("cat /private/tmp/weather.json").stdout.trim(),
+        "weather"
+    );
+    assert_eq!(
+        sdk.execute("cat .aacode/weather.json").stdout.trim(),
+        "weather"
+    );
+
+    let r = sdk
+        .execute("mkdir -p /tmp/other && echo one > /tmp/gz.json && echo two > /tmp/other/gz.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let r = sdk.execute("cat .aacode/gz.json");
+    assert_ne!(r.exit_code, 0, "ambiguous basename must not be guessed");
+}
+
+#[test]
+fn e2e_vfs_copy_and_move_recent_write_fallback() {
+    let sdk = setup_default();
+    let r = sdk.execute("echo copy > /tmp/copy_src.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let r = sdk.execute("mkdir -p /tmp/archive && cp /tmp/copy_src.json /tmp/archive/copied.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert_eq!(sdk.execute("cat .aacode/copied.json").stdout.trim(), "copy");
+
+    let r = sdk.execute("echo move > /tmp/move_src.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let r = sdk.execute("mv /tmp/move_src.json /tmp/moved.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert_eq!(sdk.execute("cat .aacode/moved.json").stdout.trim(), "move");
+}
+
+#[test]
+fn e2e_vfs_existing_read_wins_over_recent_write() {
+    let sdk = setup_default();
+    let r = sdk.execute("echo fallback > /tmp/gz.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let r = sdk.execute(
+        "mkdir -p /projects/test/.aacode && echo explicit > /projects/test/.aacode/gz.json",
+    );
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let r = sdk.execute("cd /projects/test && cat .aacode/gz.json");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout.trim(), "explicit");
+}
+
+#[test]
+fn e2e_python_tmp_alias_bridge() {
+    let sdk = setup_default();
+    if !sdk.get_info().python_available {
+        return;
+    }
+    let r = sdk.execute("echo shell-value > /tmp/python_alias.txt");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let r = sdk.execute_python("print(open('/var/tmp/python_alias.txt').read().strip())");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout.trim(), "shell-value");
+    let r = sdk.execute_python("print(open('/private/tmp/python_alias.txt').read().strip())");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout.trim(), "shell-value");
+
+    let r = sdk.execute_python("open('/var/tmp/python_out.txt', 'w').write('python-value')");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    let r = sdk.execute("cat /tmp/python_out.txt");
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout.trim(), "python-value");
+}
+
+#[test]
 fn e2e_python_basic_execution() {
     let sdk = setup_default();
     let r = sdk.execute_python("print(10 + 32)");

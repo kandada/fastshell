@@ -34,7 +34,7 @@
 
 ```toml
 [dependencies]
-fastshell = "0.3.4"
+fastshell = "0.3.8"
 ```
 
 ## 快速开始
